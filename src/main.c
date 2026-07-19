@@ -39,6 +39,8 @@ static struct host host = { .fb_fd = -1, .input_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
 static int first_frame;
+static uint32_t last_frame_hash;
+static unsigned last_frame_width, last_frame_height;
 
 static void log_kmsg(const char *message)
 {
@@ -86,18 +88,43 @@ static uint16_t xrgb8888_to_565(uint32_t pixel)
 		((pixel >> 5) & 0x07e0u) | ((pixel >> 3) & 0x001fu));
 }
 
+static uint32_t frame_hash(const void *data, unsigned height, size_t pitch)
+{
+	const uint32_t *words = data;
+	uint32_t hash = 2166136261u;
+	size_t length = (size_t)height * pitch;
+	size_t i;
+
+	for (i = 0; i < length / sizeof(*words); i++) {
+		hash ^= words[i];
+		hash *= 16777619u;
+	}
+	return hash ^ (uint32_t)length;
+}
+
 static void video(const void *data, unsigned width, unsigned height,
 	size_t pitch)
 {
 	unsigned out_w, out_h, left, top, y;
+	uint32_t hash;
 
 	if (!data || !host.fb || !width || !height)
 		return;
+	hash = frame_hash(data, height, pitch);
+	if (first_frame && hash == last_frame_hash && width == last_frame_width &&
+			height == last_frame_height)
+		return;
+	last_frame_hash = hash;
+	last_frame_width = width;
+	last_frame_height = height;
 	out_w = width > host.fb_width ? host.fb_width : width;
 	out_h = height > host.fb_height ? host.fb_height : height;
 	left = (host.fb_width - out_w) / 2u;
 	top = (host.fb_height - out_h) / 2u;
-	for (y = 0; y < out_h; y++) {
+	if (host.format == RETRO_PIXEL_FORMAT_RGB565 && width == host.fb_width &&
+			height == host.fb_height && pitch == host.fb_stride * 2u) {
+		memcpy(host.fb, data, (size_t)height * pitch);
+	} else for (y = 0; y < out_h; y++) {
 		uint16_t *dst = host.fb + (top + y) * host.fb_stride + left;
 		unsigned src_y = y * height / out_h;
 		unsigned x;
@@ -121,11 +148,17 @@ static void video(const void *data, unsigned width, unsigned height,
 	(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 	if (!first_frame) {
+		char details[160];
 		int fd = open(READY_MARKER,
 			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 
 		if (fd >= 0)
 			close(fd);
+		snprintf(details, sizeof(details),
+			"first frame %ux%u pitch=%lu format=%u hash=%08x fb=%ux%u stride=%u\n",
+			width, height, (unsigned long)pitch, (unsigned)host.format, hash,
+			host.fb_width, host.fb_height, host.fb_stride * 2u);
+		log_kmsg(details);
 		first_frame = 1;
 	}
 }

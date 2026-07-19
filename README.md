@@ -12,8 +12,9 @@ while sharing ROM/menu metadata.
 
 Current bring-up implements the libretro lifecycle, ROM full-path loading,
 absolute frame pacing, SF2000 evdev joypad mapping, direct RGB565 framebuffer
-copy, XRGB8888 conversion, and centered downscaling. RGB565 at native width is
-a single row copy. Audio is deliberately consumed without blocking until the
+copy, XRGB8888 conversion, and centered downscaling. Native 320x240 RGB565 is
+published with one contiguous copy, and identical frames are not repeatedly
+written into the live scanout. Audio is deliberately consumed without blocking until the
 Linux ALSA DMA service has a stable application ABI.
 
 Build checks:
@@ -38,7 +39,10 @@ Linux image launches it with START+X and SELECT+Y returns to the Linux console.
 `mufrog-commandc` tree through a small Linux adapter. It provides the actual
 themeable ROM browser rather than the synthetic pattern. The SF2000 Linux
 image embeds this bFLT and exposes the SD card at FrogUI's established
-`/media/mmcblk0` path. Core-selection requests are the next Linux frontend
+`/media/mmcblk0` path. There is no standalone frontend file to place on the SD
+card when using the integrated image: it is installed as
+`/usr/bin/sf2000-frontend` inside `bisrv.asd` and START+X launches it.
+Core-selection requests are the next Linux frontend
 service to implement; browsing, settings, rendering, and input already run.
 
 ## Boundaries and next checkpoints
