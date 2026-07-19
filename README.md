@@ -34,6 +34,13 @@ as `sf2000-frontend /mnt/sd/roms/game.ext`.
 `make demo` builds a self-contained moving RGB565 test core. The integrated
 Linux image launches it with START+X and SELECT+Y returns to the Linux console.
 
+`make frogui` links the symbol-prefixed FrogUI core produced by the read-only
+`mufrog-commandc` tree through a small Linux adapter. It provides the actual
+themeable ROM browser rather than the synthetic pattern. The SF2000 Linux
+image embeds this bFLT and exposes the SD card at FrogUI's established
+`/media/mmcblk0` path. Core-selection requests are the next Linux frontend
+service to implement; browsing, settings, rendering, and input already run.
+
 ## Boundaries and next checkpoints
 
 - Kernel: framebuffer/GE, evdev, ALSA PCM, MMC, clocks and power.

@@ -16,6 +16,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __mips__
+#include <sys/cachectl.h>
+extern int cacheflush(void *address, int bytes, int cache);
+#endif
+
+#define READY_MARKER "/run/sf2000-frontend-ready"
+
 struct host {
 	int fb_fd, input_fd;
 	uint16_t *fb;
@@ -31,6 +38,7 @@ struct host {
 static struct host host = { .fb_fd = -1, .input_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
+static int first_frame;
 
 static void log_kmsg(const char *message)
 {
@@ -108,6 +116,17 @@ static void video(const void *data, unsigned width, unsigned height,
 				dst[x] = xrgb8888_to_565(*(const uint32_t *)(
 					(const uint8_t *)data + src_y * pitch + src_x * 4u));
 		}
+	}
+#ifdef __mips__
+	(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
+#endif
+	if (!first_frame) {
+		int fd = open(READY_MARKER,
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+		if (fd >= 0)
+			close(fd);
+		first_frame = 1;
 	}
 }
 
@@ -220,6 +239,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: %s ROM\n", argv[0]);
 		return 2;
 	}
+	(void)unlink(READY_MARKER);
 	if (open_platform() < 0) {
 		log_kmsg("platform open failed\n");
 		perror("sf2000-frontend: platform");
@@ -254,7 +274,7 @@ int main(int argc, char **argv)
 	host.fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
 	frame_ns = (long)(1000000000.0 / host.fps);
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
-	log_kmsg("demo running SELECT+Y exits\n");
+	log_kmsg("frontend running SELECT+Y exits\n");
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
