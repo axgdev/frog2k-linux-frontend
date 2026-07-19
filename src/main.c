@@ -32,6 +32,20 @@ static struct host host = { .fb_fd = -1, .input_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
 
+static void log_kmsg(const char *message)
+{
+	char line[160];
+	int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	int length;
+
+	if (fd < 0)
+		return;
+	length = snprintf(line, sizeof(line), "<6>sf2000-frontend: %s", message);
+	if (length > 0)
+		(void)write(fd, line, (size_t)length);
+	close(fd);
+}
+
 static void stop_signal(int signal_number)
 {
 	(void)signal_number;
@@ -143,6 +157,9 @@ static void input_poll(void)
 		else
 			host.keys &= ~bit;
 	}
+	if ((host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_SELECT)) &&
+			(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_Y)))
+		stopping = 1;
 }
 
 static int16_t input_state(unsigned port, unsigned device, unsigned index,
@@ -204,6 +221,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	if (open_platform() < 0) {
+		log_kmsg("platform open failed\n");
 		perror("sf2000-frontend: platform");
 		close_platform();
 		return 1;
@@ -226,6 +244,7 @@ int main(int argc, char **argv)
 	retro_init();
 	game.path = argv[1];
 	if (!retro_load_game(&game)) {
+		log_kmsg("core rejected game\n");
 		fprintf(stderr, "sf2000-frontend: core rejected %s\n", argv[1]);
 		retro_deinit();
 		close_platform();
@@ -235,6 +254,7 @@ int main(int argc, char **argv)
 	host.fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
 	frame_ns = (long)(1000000000.0 / host.fps);
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	log_kmsg("demo running SELECT+Y exits\n");
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
@@ -249,5 +269,6 @@ int main(int argc, char **argv)
 	retro_unload_game();
 	retro_deinit();
 	close_platform();
+	log_kmsg("returned cleanly\n");
 	return 0;
 }

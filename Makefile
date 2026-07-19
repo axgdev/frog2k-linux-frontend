@@ -7,7 +7,7 @@ CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
 SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float
 SF2000_LDFLAGS := -static -Wl,-elf2flt=-r
 
-.PHONY: all clean check sf2000
+.PHONY: all clean check sf2000 demo
 
 all: check
 
@@ -23,6 +23,12 @@ sf2000:
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend \
 		src/main.c $(CORE)
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend
+
+demo:
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend-demo \
+		src/main.c tests/dummy_core.c
+	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend-demo
 
 clean:
 	rm -rf build

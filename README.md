@@ -31,6 +31,9 @@ make sf2000 CORE=/path/to/core_libretro.a
 The resulting `build/sf2000-frontend` is a MIPS32r1 soft-float bFLT. Invoke it
 as `sf2000-frontend /mnt/sd/roms/game.ext`.
 
+`make demo` builds a self-contained moving RGB565 test core. The integrated
+Linux image launches it with START+X and SELECT+Y returns to the Linux console.
+
 ## Boundaries and next checkpoints
 
 - Kernel: framebuffer/GE, evdev, ALSA PCM, MMC, clocks and power.
