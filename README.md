@@ -33,7 +33,7 @@ The resulting `build/sf2000-frontend` is a MIPS32r1 soft-float bFLT. Invoke it
 as `sf2000-frontend /mnt/sd/roms/game.ext`.
 
 `make demo` builds a self-contained moving RGB565 test core. The integrated
-Linux image launches it with START+X and SELECT+Y returns to the Linux console.
+Linux image launches it with START+R and START+L returns to the Linux console.
 
 `make frogui` links the symbol-prefixed FrogUI core produced by the read-only
 `mufrog-commandc` tree through a small Linux adapter. It provides the actual
@@ -41,7 +41,8 @@ themeable ROM browser rather than the synthetic pattern. The SF2000 Linux
 image embeds this bFLT and exposes the SD card at FrogUI's established
 `/media/mmcblk0` path. There is no standalone frontend file to place on the SD
 card when using the integrated image: it is installed as
-`/usr/bin/sf2000-frontend` inside `bisrv.asd` and START+X launches it.
+`/usr/bin/sf2000-frontend` inside `bisrv.asd` and START+R launches it. START+X
+remains reserved for the SF2000 Linux graphics performance benchmark.
 Core-selection requests are the next Linux frontend
 service to implement; browsing, settings, rendering, and input already run.
 

@@ -209,8 +209,8 @@ static void input_poll(void)
 		else
 			host.keys &= ~bit;
 	}
-	if ((host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_SELECT)) &&
-			(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_Y)))
+	if ((host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_START)) &&
+			(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_L)))
 		stopping = 1;
 }
 
@@ -307,7 +307,7 @@ int main(int argc, char **argv)
 	host.fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
 	frame_ns = (long)(1000000000.0 / host.fps);
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
-	log_kmsg("frontend running SELECT+Y exits\n");
+	log_kmsg("frontend running START+L exits\n");
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
