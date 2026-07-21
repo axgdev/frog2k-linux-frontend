@@ -6,11 +6,22 @@ SF2000_FLTHDR ?= $(CROSS_COMPILE)flthdr
 CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
+GPSP_REV := 5b6e751f4abf368509146cd143c949c1946ac1ae
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 GAMBATTE_DIR := .deps/gambatte
+GPSP_DIR := .deps/gpsp
 COMMON_DIR := .deps/libretro-common
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
+GPSP_CORE := build/gpsp_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
+GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
+GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+	-G0 -mno-abicalls -fno-pic -fomit-frame-pointer -ffast-math \
+	-ffunction-sections -fdata-sections -DSMALL_TRANSLATION_CACHE \
+	-DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
+	-DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -DHAVE_DYNAREC \
+	-DMIPS_ARCH -DSF2000 -DSF2000_NOMMU \
+	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
 	file/file_path.c file/file_path_io.c \
@@ -23,7 +34,7 @@ SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float
 SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 	-Wl,--gc-sections
 
-.PHONY: all clean check sf2000 demo frogui browser gambatte integrated
+.PHONY: all clean check sf2000 demo frogui browser gambatte gpsp integrated
 
 all: check
 
@@ -73,6 +84,17 @@ gambatte:
 		-Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gambatte
 
+gpsp: $(GPSP_CORE)
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-host.o src/main.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/content.o src/content.c
+	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
+		-c -o build/nommu-new.o src/nommu_new.cpp
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-gpsp \
+		build/gpsp-host.o build/nommu-new.o $(GPSP_CORE) build/content.o -lm \
+		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
+	$(SF2000_FLTHDR) -s 524288 build/sf2000-gpsp
+
 $(GAMBATTE_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/libretro/gambatte-libretro.git $(GAMBATTE_DIR)
@@ -82,6 +104,28 @@ $(COMMON_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/libretro/libretro-common.git $(COMMON_DIR)
 	git -C $(COMMON_DIR) checkout --detach $(COMMON_REV)
+
+$(GPSP_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/libretro/gpsp.git $(GPSP_DIR)
+	git -C $(GPSP_DIR) checkout --detach $(GPSP_REV)
+
+$(GPSP_DIR)/.sf2000-patched: $(GPSP_DIR)/.git $(GPSP_PATCHES)
+	for patch_file in $(GPSP_PATCHES); do \
+		if patch -d '$(GPSP_DIR)' -p1 --dry-run < "$$patch_file" >/dev/null; then \
+			patch -d '$(GPSP_DIR)' -p1 < "$$patch_file"; \
+		elif ! patch -d '$(GPSP_DIR)' -p1 --dry-run -R < "$$patch_file" >/dev/null; then \
+			exit 1; \
+		fi; \
+	done
+	touch '$@'
+
+$(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched
+	mkdir -p build
+	$(MAKE) -C $(GPSP_DIR) clean-objs platform=rs90 STATIC_LINKING=1
+	$(MAKE) -C $(GPSP_DIR) platform=rs90 STATIC_LINKING=1 \
+		TARGET='$(abspath $@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' CFLAGS='$(GPSP_CFLAGS)'
 
 $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	for patch_file in $(GAMBATTE_PATCHES); do \
@@ -113,7 +157,7 @@ build/utf8_compat.o: src/utf8_compat.c
 $(LIBRETRO_COMMON): $(COMMON_OBJECTS)
 	$(CROSS_COMPILE)ar rcs '$@' $(COMMON_OBJECTS)
 
-integrated: browser gambatte
+integrated: browser gambatte gpsp
 
 clean:
 	rm -rf build

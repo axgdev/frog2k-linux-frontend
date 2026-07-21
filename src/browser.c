@@ -20,6 +20,7 @@ extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
+#define GPSP_PATH "/usr/bin/sf2000-gpsp"
 #define SD_ROOT "/mnt/sd"
 #define MAX_ENTRIES 128
 #define MAX_NAME 128
@@ -246,6 +247,22 @@ static int gameboy_path(const char *path)
 		(!strcasecmp(extension, ".gb") || !strcasecmp(extension, ".gbc"));
 }
 
+static int gba_path(const char *path)
+{
+	const char *extension = strrchr(path, '.');
+	const char *component = path;
+
+	while ((component = strchr(component, '/'))) {
+		const char *end = strchr(++component, '/');
+		size_t length = end ? (size_t)(end - component) : strlen(component);
+		if (length == 3 && !strncasecmp(component, "GBA", 3))
+			return extension && !strcasecmp(extension, ".gba");
+		if (!end) break;
+		component = end;
+	}
+	return 0;
+}
+
 static void launch_selected(void)
 {
 	char path[MAX_PATH], message[640];
@@ -258,21 +275,24 @@ static void launch_selected(void)
 		scan_directory();
 		return;
 	}
-	if (!gameboy_path(path)) {
-		log_message("unsupported file; place GB/GBC ROMs in GB or GBC directory");
+	if (!gameboy_path(path) && !gba_path(path)) {
+		log_message("unsupported file; use GB, GBC, or GBA directory");
 		return;
 	}
-	snprintf(message, sizeof(message), "launch Gambatte %s", path);
-	log_message(message);
 	{
-		char *const argv[] = { (char *)GAMBATTE_PATH, path, NULL };
-		char *const envp[] = { NULL };
+		const char *core = gba_path(path) ? GPSP_PATH : GAMBATTE_PATH;
+		const char *name = gba_path(path) ? "gpSP" : "Gambatte";
 
-		/* Replace the browser on NOMMU; powerd supervises this process and
-		 * restores the console when the core exits. */
-		execve(GAMBATTE_PATH, argv, envp);
+		snprintf(message, sizeof(message), "launch %s %s", name, path);
+		log_message(message);
+		{
+			char *const argv[] = { (char *)core, path, NULL };
+			char *const envp[] = { NULL };
+
+			execve(core, argv, envp);
+		}
+		snprintf(message, sizeof(message), "%s exec failed errno=%d", name, errno);
 	}
-	snprintf(message, sizeof(message), "Gambatte exec failed errno=%d", errno);
 	log_message(message);
 }
 

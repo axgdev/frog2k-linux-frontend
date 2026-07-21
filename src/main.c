@@ -40,8 +40,6 @@ static struct host host = { .fb_fd = -1, .input_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
 static int first_frame;
-static uint32_t last_frame_hash;
-static unsigned last_frame_width, last_frame_height;
 static unsigned video_callbacks;
 
 static void log_kmsg(const char *message)
@@ -125,7 +123,7 @@ static uint32_t frame_hash(const void *data, unsigned height, size_t pitch)
 static void video(const void *data, unsigned width, unsigned height,
 	size_t pitch)
 {
-	unsigned out_w, out_h, left, top, y;
+	unsigned out_w, out_h, left, top, x_step, y;
 	uint32_t hash;
 
 	video_callbacks++;
@@ -139,23 +137,25 @@ static void video(const void *data, unsigned width, unsigned height,
 		}
 		return;
 	}
-	hash = frame_hash(data, height, pitch);
-	if (first_frame && hash == last_frame_hash && width == last_frame_width &&
-			height == last_frame_height)
-		return;
-	last_frame_hash = hash;
-	last_frame_width = width;
-	last_frame_height = height;
-	out_w = width > host.fb_width ? host.fb_width : width;
-	out_h = height > host.fb_height ? host.fb_height : height;
+	hash = first_frame ? 0 : frame_hash(data, height, pitch);
+	/* Scale up as well as down while preserving the core's aspect ratio. */
+	out_w = host.fb_width;
+	out_h = height * host.fb_width / width;
+	if (out_h > host.fb_height) {
+		out_h = host.fb_height;
+		out_w = width * host.fb_height / height;
+	}
 	left = (host.fb_width - out_w) / 2u;
 	top = (host.fb_height - out_h) / 2u;
+	x_step = (width << 16) / out_w;
+	if (!first_frame)
+		memset(host.fb, 0, host.fb_bytes);
 	if (host.format == RETRO_PIXEL_FORMAT_RGB565 && width == host.fb_width &&
 			height == host.fb_height && pitch == host.fb_stride * 2u) {
 		memcpy(host.fb, data, (size_t)height * pitch);
 	} else for (y = 0; y < out_h; y++) {
 		uint16_t *dst = host.fb + (top + y) * host.fb_stride + left;
-		unsigned src_y = y * height / out_h;
+		unsigned src_y = (y * ((height << 16) / out_h)) >> 16;
 		unsigned x;
 
 		if (host.format == RETRO_PIXEL_FORMAT_RGB565 && out_w == width) {
@@ -164,7 +164,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			continue;
 		}
 		for (x = 0; x < out_w; x++) {
-			unsigned src_x = x * width / out_w;
+			unsigned src_x = (x * x_step) >> 16;
 			if (host.format == RETRO_PIXEL_FORMAT_RGB565)
 				dst[x] = *(const uint16_t *)((const uint8_t *)data +
 					src_y * pitch + src_x * 2u);
@@ -326,7 +326,8 @@ int main(int argc, char **argv)
 	memset(&info, 0, sizeof(info));
 	retro_get_system_info(&info);
 	retro_init();
-	if (sf2000_load_content(argv[1], &game) < 0) {
+	game.path = argv[1];
+	if (!info.need_fullpath && sf2000_load_content(argv[1], &game) < 0) {
 		log_kmsg("ROM read failed\n");
 		perror("sf2000-frontend: ROM read");
 		retro_deinit();

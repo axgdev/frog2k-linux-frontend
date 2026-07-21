@@ -14,6 +14,10 @@ struct allocation_header {
 	std::size_t requested_bytes;
 };
 
+static constexpr std::size_t mmap_threshold = 128u * 1024u;
+static unsigned char small_arena[256u * 1024u];
+static std::size_t small_arena_used;
+
 static void allocation_trace(const char *result, std::size_t bytes, void *memory)
 {
 	char line[128];
@@ -38,6 +42,17 @@ static void *mapping_allocate(std::size_t bytes)
 		errno = ENOMEM;
 		return nullptr;
 	}
+	if (total < mmap_threshold) {
+		const std::size_t aligned = (total + 15u) & ~std::size_t(15u);
+		if (aligned > sizeof(small_arena) - small_arena_used)
+			return nullptr;
+		allocation_header *header = reinterpret_cast<allocation_header *>(
+			small_arena + small_arena_used);
+		small_arena_used += aligned;
+		header->mapping_bytes = ~std::size_t(0);
+		header->requested_bytes = bytes;
+		return header + 1;
+	}
 	const std::size_t mapping_bytes = (total + 4095u) & ~std::size_t(4095u);
 	void *mapping = mmap(nullptr, mapping_bytes, PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -56,7 +71,10 @@ static void mapping_release(void *memory)
 	if (memory) {
 		allocation_header *header =
 			static_cast<allocation_header *>(memory) - 1;
-		(void)munmap(header, header->mapping_bytes);
+		if (header->mapping_bytes == ~std::size_t(0))
+			return;
+		if (header->mapping_bytes)
+			(void)munmap(header, header->mapping_bytes);
 	}
 }
 
@@ -76,7 +94,10 @@ extern "C" void *__wrap_calloc(std::size_t count, std::size_t bytes)
 		errno = ENOMEM;
 		return nullptr;
 	}
-	return mapping_allocate(count * bytes);
+	void *memory = mapping_allocate(count * bytes);
+	if (memory)
+		std::memset(memory, 0, count * bytes);
+	return memory;
 }
 
 extern "C" void *__wrap_realloc(void *memory, std::size_t bytes)
