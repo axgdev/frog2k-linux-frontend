@@ -42,6 +42,7 @@ static volatile sig_atomic_t stopping;
 static int first_frame;
 static uint32_t last_frame_hash;
 static unsigned last_frame_width, last_frame_height;
+static unsigned video_callbacks;
 
 static void log_kmsg(const char *message)
 {
@@ -127,8 +128,17 @@ static void video(const void *data, unsigned width, unsigned height,
 	unsigned out_w, out_h, left, top, y;
 	uint32_t hash;
 
-	if (!data || !host.fb || !width || !height)
+	video_callbacks++;
+	if (!data || !host.fb || !width || !height) {
+		if (video_callbacks == 1) {
+			char details[128];
+			snprintf(details, sizeof(details),
+				"video callback deferred data=%u size=%ux%u\n",
+				data != NULL, width, height);
+			log_kmsg(details);
+		}
 		return;
+	}
 	hash = frame_hash(data, height, pitch);
 	if (first_frame && hash == last_frame_hash && width == last_frame_width &&
 			height == last_frame_height)

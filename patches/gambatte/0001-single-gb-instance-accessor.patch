@@ -1,11 +1,36 @@
 diff --git a/libgambatte/libretro/libretro.cpp b/libgambatte/libretro/libretro.cpp
 --- a/libgambatte/libretro/libretro.cpp
 +++ b/libgambatte/libretro/libretro.cpp
-@@ -52,7 +52,12 @@ static retro_input_state_t input_state_cb;
- static retro_audio_sample_batch_t audio_batch_cb;
- static retro_environment_t environ_cb;
- static gambatte::video_pixel_t* video_buf;
+@@ -49,10 +49,31 @@ extern "C" void linearFree(void* mem);
+-static retro_video_refresh_t video_cb;
+-static retro_input_poll_t input_poll_cb;
+-static retro_input_state_t input_state_cb;
+-static retro_audio_sample_batch_t audio_batch_cb;
+-static retro_environment_t environ_cb;
+-static gambatte::video_pixel_t* video_buf;
 -static gambatte::GB gb;
++struct LibretroHostState
++{
++   retro_video_refresh_t video;
++   retro_input_poll_t input_poll;
++   retro_input_state_t input_state;
++   retro_audio_sample_batch_t audio_batch;
++   retro_environment_t environment;
++   gambatte::video_pixel_t *video_buffer;
++};
++
++static LibretroHostState &libretro_host_state()
++{
++   static LibretroHostState state = { NULL, NULL, NULL, NULL, NULL, NULL };
++   return state;
++}
++
++#define video_cb       (libretro_host_state().video)
++#define input_poll_cb  (libretro_host_state().input_poll)
++#define input_state_cb (libretro_host_state().input_state)
++#define audio_batch_cb (libretro_host_state().audio_batch)
++#define environ_cb     (libretro_host_state().environment)
++#define video_buf      (libretro_host_state().video_buffer)
 +static gambatte::GB &gb_instance()
 +{
 +   static gambatte::GB instance;
