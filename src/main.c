@@ -7,6 +7,7 @@
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,9 +63,24 @@ static void stop_signal(int signal_number)
 	stopping = 1;
 }
 
+static void core_log(enum retro_log_level level, const char *format, ...)
+{
+	char message[128];
+	va_list arguments;
+
+	(void)level;
+	va_start(arguments, format);
+	(void)vsnprintf(message, sizeof(message), format, arguments);
+	va_end(arguments);
+	log_kmsg(message);
+}
+
 static bool environment(unsigned command, void *data)
 {
 	switch (command) {
+	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
+		*(bool *)data = true;
+		return true;
 	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
 		host.format = *(enum retro_pixel_format *)data;
 		return host.format == RETRO_PIXEL_FORMAT_RGB565 ||
@@ -76,6 +92,9 @@ static bool environment(unsigned command, void *data)
 		*(const char **)data = host.save_dir;
 		return true;
 	case RETRO_ENVIRONMENT_SET_GEOMETRY:
+		return true;
+	case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
+		((struct retro_log_callback *)data)->log = core_log;
 		return true;
 	default:
 		return false;
@@ -260,6 +279,8 @@ static void close_platform(void)
 		close(host.input_fd);
 }
 
+extern int sf2000_load_content(const char *path, struct retro_game_info *game);
+
 int main(int argc, char **argv)
 {
 	struct retro_system_info info;
@@ -295,12 +316,19 @@ int main(int argc, char **argv)
 	memset(&info, 0, sizeof(info));
 	retro_get_system_info(&info);
 	retro_init();
-	game.path = argv[1];
+	if (sf2000_load_content(argv[1], &game) < 0) {
+		log_kmsg("ROM read failed\n");
+		perror("sf2000-frontend: ROM read");
+		retro_deinit();
+		close_platform();
+		return 1;
+	}
 	if (!retro_load_game(&game)) {
 		log_kmsg("core rejected game\n");
 		fprintf(stderr, "sf2000-frontend: core rejected %s\n", argv[1]);
 		retro_deinit();
 		close_platform();
+		free((void *)game.data);
 		return 1;
 	}
 	retro_get_system_av_info(&av);
@@ -322,6 +350,10 @@ int main(int argc, char **argv)
 	retro_unload_game();
 	retro_deinit();
 	close_platform();
+	free((void *)game.data);
 	log_kmsg("returned cleanly\n");
-	return 0;
+	/* The process owns the core and all of its mappings.  Avoid running
+	 * C++ static destructors after retro_deinit(); they duplicate core
+	 * teardown and are not part of the libretro lifecycle. */
+	_exit(0);
 }

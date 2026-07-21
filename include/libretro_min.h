@@ -7,10 +7,12 @@
 #include <stdint.h>
 
 #define RETRO_API_VERSION 1
+#define RETRO_ENVIRONMENT_GET_CAN_DUPE 3
 #define RETRO_ENVIRONMENT_SET_PIXEL_FORMAT 10
 #define RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY 9
 #define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 31
 #define RETRO_ENVIRONMENT_SET_GEOMETRY 37
+#define RETRO_ENVIRONMENT_GET_LOG_INTERFACE 27
 #define RETRO_DEVICE_JOYPAD 1
 #define RETRO_DEVICE_ID_JOYPAD_B 0
 #define RETRO_DEVICE_ID_JOYPAD_Y 1
@@ -50,6 +52,12 @@ struct retro_game_info {
 	size_t size;
 	const char *meta;
 };
+enum retro_log_level {
+	RETRO_LOG_DEBUG, RETRO_LOG_INFO, RETRO_LOG_WARN, RETRO_LOG_ERROR,
+	RETRO_LOG_DUMMY = INT32_MAX
+};
+typedef void (*retro_log_printf_t)(enum retro_log_level, const char *, ...);
+struct retro_log_callback { retro_log_printf_t log; };
 
 typedef bool (*retro_environment_t)(unsigned, void *);
 typedef void (*retro_video_refresh_t)(const void *, unsigned, unsigned, size_t);

@@ -1,0 +1,66 @@
+diff --git a/libgambatte/libretro/libretro.cpp b/libgambatte/libretro/libretro.cpp
+--- a/libgambatte/libretro/libretro.cpp
++++ b/libgambatte/libretro/libretro.cpp
+@@ -52,7 +52,12 @@ static retro_input_state_t input_state_cb;
+ static retro_audio_sample_batch_t audio_batch_cb;
+ static retro_environment_t environ_cb;
+ static gambatte::video_pixel_t* video_buf;
+-static gambatte::GB gb;
++static gambatte::GB &gb_instance()
++{
++   static gambatte::GB instance;
++   return instance;
++}
++#define gb gb_instance()
+ 
+ static bool libretro_supports_option_categories = false;
+ static bool libretro_supports_bitmasks          = false;
+@@ -157,7 +162,19 @@ static bool use_official_bootloader = false;
+ #define BLIP_BUFFER_SIZE (1024 + 512)
+ 
+-static blipper_t *resampler_l = NULL;
+-static blipper_t *resampler_r = NULL;
++struct AudioResamplers
++{
++   blipper_t *left;
++   blipper_t *right;
++};
++
++static AudioResamplers &audio_resamplers()
++{
++   static AudioResamplers state = { NULL, NULL };
++   return state;
++}
++
++#define resampler_l (audio_resamplers().left)
++#define resampler_r (audio_resamplers().right)
+ 
+ static bool use_cc_resampler = false;
+ 
+@@ -1492,7 +1497,7 @@ static bool get_bootloader_from_file(const char *filename, unsigned char *buf,
+ 
+ namespace input
+ {
+-   struct map { unsigned snes; unsigned gb; };
++   struct map { unsigned snes; unsigned gb_bits; };
+    static const map btn_map[] = {
+       { RETRO_DEVICE_ID_JOYPAD_A, gambatte::InputGetter::A },
+       { RETRO_DEVICE_ID_JOYPAD_B, gambatte::InputGetter::B },
+@@ -1520,7 +1525,7 @@ static void update_input_state(void)
+    {
+       int16_t ret = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+       for (i = 0; i < sizeof(input::btn_map) / sizeof(input::map); i++)
+-         res |= (ret & (1 << input::btn_map[i].snes)) ? input::btn_map[i].gb : 0;
++         res |= (ret & (1 << input::btn_map[i].snes)) ? input::btn_map[i].gb_bits : 0;
+ 
+       libretro_ff_enabled = libretro_supports_ff_override &&
+             (ret & (1 << RETRO_DEVICE_ID_JOYPAD_R2));
+@@ -1537,7 +1542,7 @@ static void update_input_state(void)
+    else
+    {
+       for (i = 0; i < sizeof(input::btn_map) / sizeof(input::map); i++)
+-         res |= input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, input::btn_map[i].snes) ? input::btn_map[i].gb : 0;
++         res |= input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, input::btn_map[i].snes) ? input::btn_map[i].gb_bits : 0;
+ 
+       libretro_ff_enabled = libretro_supports_ff_override &&
+             input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2);

@@ -10,6 +10,7 @@ COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 GAMBATTE_DIR := .deps/gambatte
 COMMON_DIR := .deps/libretro-common
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
+GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
 	file/file_path.c file/file_path_io.c \
@@ -19,7 +20,8 @@ COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
 SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float
-SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections
+SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
+	-Wl,--gc-sections
 
 .PHONY: all clean check sf2000 demo frogui browser gambatte integrated
 
@@ -62,9 +64,13 @@ gambatte:
 	$(MAKE) $(GAMBATTE_CORE) $(LIBRETRO_COMMON)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-host.o src/main.c
+	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
+		-c -o build/nommu-new.o src/nommu_new.cpp
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/content.o src/content.c
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
-		-o build/sf2000-gambatte build/gambatte-host.o $(GAMBATTE_CORE) \
-		$(LIBRETRO_COMMON) -lm
+		-o build/sf2000-gambatte build/gambatte-host.o build/nommu-new.o $(GAMBATTE_CORE) \
+		$(LIBRETRO_COMMON) build/content.o -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
+		-Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gambatte
 
 $(GAMBATTE_DIR)/.git:
@@ -77,7 +83,18 @@ $(COMMON_DIR)/.git:
 	git clone --filter=blob:none https://github.com/libretro/libretro-common.git $(COMMON_DIR)
 	git -C $(COMMON_DIR) checkout --detach $(COMMON_REV)
 
-$(GAMBATTE_CORE): $(GAMBATTE_DIR)/.git
+$(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
+	for patch_file in $(GAMBATTE_PATCHES); do \
+		if patch -d '$(GAMBATTE_DIR)' -p1 --dry-run < "$$patch_file" >/dev/null; then \
+			patch -d '$(GAMBATTE_DIR)' -p1 < "$$patch_file"; \
+		elif ! grep -q 'gb_instance' '$(GAMBATTE_DIR)/libgambatte/libretro/libretro.cpp'; then \
+			exit 1; \
+		fi; \
+	done
+	touch '$@'
+
+$(GAMBATTE_CORE): $(GAMBATTE_DIR)/.sf2000-patched
+	mkdir -p build
 	CFLAGS='-Os -EL -march=mips32 -msoft-float -G0 -mno-abicalls -fno-pic -ffast-math -ffunction-sections -fdata-sections' \
 	CXXFLAGS='-Os -EL -march=mips32 -msoft-float -G0 -mno-abicalls -fno-pic -ffast-math -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti' \
 	$(MAKE) -C $(GAMBATTE_DIR) -f Makefile.libretro platform=unix \

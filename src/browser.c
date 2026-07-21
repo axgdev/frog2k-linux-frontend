@@ -13,11 +13,9 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-extern pid_t vfork(void);
 extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
@@ -251,8 +249,6 @@ static int gameboy_path(const char *path)
 static void launch_selected(void)
 {
 	char path[MAX_PATH], message[640];
-	pid_t pid;
-	int status;
 
 	if (snprintf(path, sizeof(path), "%s/%s", current, entries[selected].name) >=
 			(int)sizeof(path))
@@ -268,13 +264,16 @@ static void launch_selected(void)
 	}
 	snprintf(message, sizeof(message), "launch Gambatte %s", path);
 	log_message(message);
-	pid = vfork();
-	if (pid == 0) {
+	{
 		char *const argv[] = { (char *)GAMBATTE_PATH, path, NULL };
-		execv(GAMBATTE_PATH, argv);
-		_exit(127);
+		char *const envp[] = { NULL };
+
+		/* Replace the browser on NOMMU; powerd supervises this process and
+		 * restores the console when the core exits. */
+		execve(GAMBATTE_PATH, argv, envp);
 	}
-	while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR) ;
+	snprintf(message, sizeof(message), "Gambatte exec failed errno=%d", errno);
+	log_message(message);
 }
 
 static void parent_directory(void)
@@ -318,10 +317,16 @@ int main(void)
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			unsigned visible = height > 42 ? (height - 42) / 10u : 1u;
 			if (event.type != EV_KEY) continue;
-			if (event.code == BTN_START) start = event.value != 0;
-			if (event.code == BTN_TL) l = event.value != 0;
-			if (!start && !l) exit_latched = 0;
-			if (!exit_latched && start && l) { exit_latched = 1; goto done; }
+			if (event.code == BTN_START || event.code == BTN_TL) {
+				if (event.code == BTN_START) start = event.value != 0;
+				else l = event.value != 0;
+				if (!start && !l) exit_latched = 0;
+				if (!exit_latched && start && l) {
+					exit_latched = 1;
+					goto done;
+				}
+				continue;
+			}
 			if (event.value != 1) continue;
 			if (event.code == BTN_DPAD_UP && selected) selected--;
 			else if (event.code == BTN_DPAD_DOWN && selected + 1 < entry_count) selected++;
@@ -341,5 +346,5 @@ int main(void)
 done:
 	log_message("returned cleanly");
 	close(input); close(fb);
-	return 0;
+	_exit(0);
 }
