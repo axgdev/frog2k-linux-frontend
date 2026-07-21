@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <linux/input.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -26,6 +27,8 @@ extern long syscall(long number, ...);
 #define MAX_NAME 128
 #define MAX_PATH 512
 #define MAX_FRAME_PIXELS (320u * 240u)
+#define LINUX_DT_DIR 4u
+#define LINUX_DT_REG 8u
 
 struct linux_dirent64 {
 	uint64_t inode;
@@ -34,6 +37,29 @@ struct linux_dirent64 {
 	unsigned char type;
 	char name[];
 };
+
+static ssize_t kernel_getdents64(int fd, void *buffer, size_t bytes)
+{
+#ifdef __mips__
+	register long v0 __asm__("$2") = __NR_getdents64;
+	register long a0 __asm__("$4") = fd;
+	register long a1 __asm__("$5") = (long)buffer;
+	register long a2 __asm__("$6") = (long)bytes;
+	register long a3 __asm__("$7") = 0;
+
+	__asm__ volatile ("syscall"
+		: "+r"(v0), "+r"(a3)
+		: "r"(a0), "r"(a1), "r"(a2)
+		: "memory");
+	if (a3) {
+		errno = (int)-v0;
+		return -1;
+	}
+	return v0;
+#else
+	return syscall(__NR_getdents64, fd, buffer, bytes);
+#endif
+}
 
 struct entry { char name[MAX_NAME]; unsigned directory; };
 static struct entry entries[MAX_ENTRIES];
@@ -122,31 +148,52 @@ static void scan_directory(void)
 		return;
 	}
 	while (entry_count < MAX_ENTRIES) {
-		long bytes = syscall(__NR_getdents64, directory, buffer, sizeof(buffer));
+		ssize_t bytes = kernel_getdents64(directory, buffer, sizeof(buffer));
 		long position = 0;
 
-		if (bytes <= 0)
+		if (bytes < 0) {
+			char message[160];
+			snprintf(message, sizeof(message),
+				"directory read failed errno=%d", errno);
+			log_message(message);
+			break;
+		}
+		if (bytes == 0)
 			break;
 		while (position < bytes && entry_count < MAX_ENTRIES) {
 			struct linux_dirent64 *item =
 				(struct linux_dirent64 *)(void *)(buffer + position);
 			char path[MAX_PATH];
-			struct stat info;
+			int is_directory = item->type == LINUX_DT_DIR;
+			int is_regular = item->type == LINUX_DT_REG;
 
-			if (item->record_length < sizeof(*item) + 1u ||
+			if (item->record_length <
+					offsetof(struct linux_dirent64, name) + 1u ||
 					position + item->record_length > bytes)
 				break;
 			position += item->record_length;
 			if (!strcmp(item->name, ".") || !strcmp(item->name, ".."))
 				continue;
 			if (snprintf(path, sizeof(path), "%s/%s", current, item->name) >=
-					(int)sizeof(path) || stat(path, &info) != 0)
+					(int)sizeof(path))
 				continue;
-			if (!S_ISDIR(info.st_mode) && !S_ISREG(info.st_mode))
-				continue;
+			if (!is_directory && !is_regular) {
+				int item_fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+				if (item_fd >= 0)
+					is_directory = 1;
+				else
+					item_fd = open(path, O_RDONLY | O_CLOEXEC);
+				if (item_fd >= 0) {
+					if (!is_directory)
+						is_regular = 1;
+					close(item_fd);
+				}
+				if (!is_directory && !is_regular)
+					continue;
+			}
 			strncpy(entries[entry_count].name, item->name, MAX_NAME - 1u);
 			entries[entry_count].name[MAX_NAME - 1u] = 0;
-			entries[entry_count].directory = S_ISDIR(info.st_mode);
+			entries[entry_count].directory = (unsigned)is_directory;
 			entry_count++;
 		}
 	}
