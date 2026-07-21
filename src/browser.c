@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fb.h>
@@ -11,17 +10,14 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 extern pid_t vfork(void);
-#ifdef __mips__
-#include <sys/cachectl.h>
-extern int cacheflush(void *address, int bytes, int cache);
-#endif
+extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
@@ -29,11 +25,21 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define MAX_ENTRIES 128
 #define MAX_NAME 128
 #define MAX_PATH 512
+#define MAX_FRAME_PIXELS (320u * 240u)
+
+struct linux_dirent64 {
+	uint64_t inode;
+	int64_t offset;
+	unsigned short record_length;
+	unsigned char type;
+	char name[];
+};
 
 struct entry { char name[MAX_NAME]; unsigned directory; };
 static struct entry entries[MAX_ENTRIES];
 static unsigned entry_count, selected, first;
-static uint16_t *framebuffer;
+static uint16_t framebuffer[MAX_FRAME_PIXELS];
+static int framebuffer_fd = -1;
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
 
@@ -88,7 +94,7 @@ static void text(int x, int y, const char *value, uint16_t color)
 		unsigned column, row;
 		for (column = 0; column < 4; column++)
 			for (row = 0; row < 7; row++)
-				if ((bits >> (column * 8u + row)) & 1u)
+				if ((bits >> ((3u - column) * 8u + row)) & 1u)
 					framebuffer[(y + row) * stride + x + column] = color;
 	}
 }
@@ -103,31 +109,55 @@ static int compare_entries(const void *left, const void *right)
 
 static void scan_directory(void)
 {
-	DIR *directory = opendir(current);
-	struct dirent *item;
+	char buffer[4096];
+	int directory = open(current, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	int saved_errno = errno;
 
 	entry_count = selected = first = 0;
-	if (!directory) {
-		log_message("cannot open directory");
+	if (directory < 0) {
+		char message[640];
+		snprintf(message, sizeof(message),
+			"cannot open directory path=%s errno=%d", current, saved_errno);
+		log_message(message);
 		return;
 	}
-	while (entry_count < MAX_ENTRIES && (item = readdir(directory))) {
-		char path[MAX_PATH];
-		struct stat info;
-		if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, ".."))
-			continue;
-		if (snprintf(path, sizeof(path), "%s/%s", current, item->d_name) >=
-				(int)sizeof(path) || stat(path, &info) != 0)
-			continue;
-		if (!S_ISDIR(info.st_mode) && !S_ISREG(info.st_mode))
-			continue;
-		strncpy(entries[entry_count].name, item->d_name, MAX_NAME - 1u);
-		entries[entry_count].name[MAX_NAME - 1u] = 0;
-		entries[entry_count].directory = S_ISDIR(info.st_mode);
-		entry_count++;
+	while (entry_count < MAX_ENTRIES) {
+		long bytes = syscall(__NR_getdents64, directory, buffer, sizeof(buffer));
+		long position = 0;
+
+		if (bytes <= 0)
+			break;
+		while (position < bytes && entry_count < MAX_ENTRIES) {
+			struct linux_dirent64 *item =
+				(struct linux_dirent64 *)(void *)(buffer + position);
+			char path[MAX_PATH];
+			struct stat info;
+
+			if (item->record_length < sizeof(*item) + 1u ||
+					position + item->record_length > bytes)
+				break;
+			position += item->record_length;
+			if (!strcmp(item->name, ".") || !strcmp(item->name, ".."))
+				continue;
+			if (snprintf(path, sizeof(path), "%s/%s", current, item->name) >=
+					(int)sizeof(path) || stat(path, &info) != 0)
+				continue;
+			if (!S_ISDIR(info.st_mode) && !S_ISREG(info.st_mode))
+				continue;
+			strncpy(entries[entry_count].name, item->name, MAX_NAME - 1u);
+			entries[entry_count].name[MAX_NAME - 1u] = 0;
+			entries[entry_count].directory = S_ISDIR(info.st_mode);
+			entry_count++;
+		}
 	}
-	closedir(directory);
+	close(directory);
 	qsort(entries, entry_count, sizeof(entries[0]), compare_entries);
+	{
+		char message[640];
+		snprintf(message, sizeof(message), "directory path=%s entries=%u",
+			current, entry_count);
+		log_message(message);
+	}
 }
 
 static void draw(void)
@@ -148,12 +178,9 @@ static void draw(void)
 		text(8, 32 + (int)row * 10, line, color);
 	}
 	text(6, height - 9, "A OPEN  B BACK  START+L EXIT", 0x07e0);
-#ifdef __mips__
-	(void)cacheflush(framebuffer,
-		(int)((size_t)height * stride * sizeof(*framebuffer)), BCACHE);
-#else
-	(void)msync(framebuffer, (size_t)height * stride * sizeof(*framebuffer), MS_SYNC);
-#endif
+	if (pwrite(framebuffer_fd, framebuffer,
+			(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
+		log_message("framebuffer write failed");
 }
 
 static int gameboy_path(const char *path)
@@ -225,14 +252,21 @@ int main(void)
 			ioctl(fb, FBIOGET_VSCREENINFO, &var) < 0 || var.bits_per_pixel != 16)
 		return 1;
 	width = var.xres; height = var.yres; stride = fix.line_length / 2u;
-	framebuffer = mmap(NULL, fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
-	if (framebuffer == MAP_FAILED) return 1;
+	if ((size_t)height * stride > MAX_FRAME_PIXELS)
+		return 1;
+	framebuffer_fd = fb;
 	input = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (input < 0) return 1;
 	scan_directory(); draw();
 	{ int ready = open(READY_MARKER, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (ready >= 0) close(ready); }
-	log_message("ready: DPAD select A open B back START+L exit");
+	{
+		char message[160];
+		snprintf(message, sizeof(message),
+			"ready: DPAD select A open B back START+L exit fb=%ux%u stride=%u",
+			width, height, stride * 2u);
+		log_message(message);
+	}
 	for (;;) {
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			unsigned visible = height > 42 ? (height - 42) / 10u : 1u;
@@ -259,6 +293,6 @@ int main(void)
 	}
 done:
 	log_message("returned cleanly");
-	munmap(framebuffer, fix.smem_len); close(input); close(fb);
+	close(input); close(fb);
 	return 0;
 }
