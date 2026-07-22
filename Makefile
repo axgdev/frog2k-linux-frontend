@@ -17,6 +17,7 @@ GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-G0 -mno-abicalls -fno-pic -fomit-frame-pointer -ffast-math \
+	-fsigned-char -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections -DSMALL_TRANSLATION_CACHE \
 	-DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
 	-DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -DHAVE_DYNAREC \
@@ -38,9 +39,9 @@ SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 
 all: check
 
-build/frontend-check: src/main.c tests/dummy_core.c include/libretro_min.h
+build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libretro_min.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -o $@ src/main.c tests/dummy_core.c
+	$(CC) $(CFLAGS) -o $@ src/main.c src/content.c tests/dummy_core.c
 
 check: build/frontend-check
 
@@ -125,7 +126,11 @@ $(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched
 	$(MAKE) -C $(GPSP_DIR) clean-objs platform=rs90 STATIC_LINKING=1
 	$(MAKE) -C $(GPSP_DIR) platform=rs90 STATIC_LINKING=1 \
 		TARGET='$(abspath $@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
-		AR='$(CROSS_COMPILE)ar' CFLAGS='$(GPSP_CFLAGS)'
+		AR='$(CROSS_COMPILE)ar' \
+		CPU_THREADED_CC='$(SF2000_CC)' \
+		CFLAGS='$(GPSP_CFLAGS)' \
+		OPTIMIZE='-Os -DNDEBUG' \
+		CPU_THREADED_OPTIMIZE='-Os -DNDEBUG -fno-expensive-optimizations'
 
 $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	for patch_file in $(GAMBATTE_PATCHES); do \

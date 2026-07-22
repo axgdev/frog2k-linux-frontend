@@ -1,3 +1,16 @@
+diff --git a/Makefile b/Makefile
+index f5e3bf2..5b355f1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -633,7 +633,7 @@ else
+ endif
+ 
+ cpu_threaded.o: cpu_threaded.c
+-	$(CC) $(INCFLAGS) $(CFLAGS) $(OPTIMIZE) -Wno-unused-variable -Wno-unused-label -c  -o $@ $<
++	$(if $(CPU_THREADED_CC),$(CPU_THREADED_CC),$(CC)) $(INCFLAGS) $(CFLAGS) $(if $(CPU_THREADED_OPTIMIZE),$(CPU_THREADED_OPTIMIZE),$(OPTIMIZE)) -Wno-unused-variable -Wno-unused-label -c  -o $@ $<
+ 
+ %.o: %.S
+ 	$(CC) $(ASFLAGS) $(CFLAGS) $(OPTIMIZE) -c -o $@ $<
 diff --git a/Makefile.common b/Makefile.common
 index 9742c05..608275f 100644
 --- a/Makefile.common
@@ -16,25 +29,48 @@ index 9742c05..608275f 100644
  
 -
 diff --git a/common.h b/common.h
-index d9a0f1d..af8c088 100644
+index d9a0f1d..2ff0016 100644
 --- a/common.h
 +++ b/common.h
-@@ -40,6 +40,10 @@
+@@ -40,6 +40,16 @@
    #endif
  #endif
  
 +#ifdef SF2000
 +#define SF2000_GPSP_DYNAREC_LOOKUP_FAILED 0x7ffffffeu
++void unifrog_core_load_progress(const char *stage, unsigned current,
++  unsigned total);
++#define sf2000_load_progress(stage, current, total) \
++  unifrog_core_load_progress((stage), (unsigned)(current), (unsigned)(total))
++#else
++#define sf2000_load_progress(stage, current, total) ((void)0)
 +#endif
 +
  #define ror(dest, value, shift)                                               \
    dest = ((value) >> (shift)) | ((value) << (32 - (shift)))                   \
  
 diff --git a/cpu_threaded.c b/cpu_threaded.c
-index 8942ab3..d86e80b 100644
+index 8942ab3..7a9929c 100644
 --- a/cpu_threaded.c
 +++ b/cpu_threaded.c
-@@ -2653,12 +2653,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
+@@ -249,7 +249,16 @@ typedef struct
+   }
+ #elif defined(MIPS_ARCH)
+   void platform_cache_sync(void *baseaddr, void *endptr) {
++#ifdef SF2000
++    /* The HC15xx has physically indexed 32-byte cache lines.  Generated
++     * blocks frequently begin at the permanent-cache watermark; flushing an
++     * exact, unaligned byte range can leave the shared boundary line stale. */
++    uintptr_t begin = (uintptr_t)baseaddr & ~(uintptr_t)31;
++    uintptr_t end = ((uintptr_t)endptr + 31) & ~(uintptr_t)31;
++    __builtin___clear_cache((char *)begin, (char *)end);
++#else
+     __builtin___clear_cache(baseaddr, endptr);
++#endif
+   }
+ #else
+   /* x86 CPUs have icache consistency checks */
+@@ -2653,12 +2662,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
      u8 *ret = block_lookup_translate_arm(pc);
@@ -51,7 +87,7 @@ index 8942ab3..d86e80b 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
-@@ -2669,11 +2672,14 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
+@@ -2669,11 +2681,14 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
      u8 *ret = block_lookup_translate_thumb(pc);
@@ -67,11 +103,71 @@ index 8942ab3..d86e80b 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
-@@ -3412,4 +3418,3 @@ void flush_dynarec_caches(void)
+@@ -3160,10 +3175,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
+   for(i = 0; i < external_block_exit_position; i++)
+   {
+     branch_target = external_block_exits[i].branch_target;
+-    if(branch_target == 0x00000008)
+-      translation_target = bios_swi_entrypoint;
+-    else
+-      translation_target = block_lookup_translate_arm(branch_target);
++    translation_target = block_lookup_translate_arm(branch_target);
+     if (!translation_target)
+       return false;
+     generate_branch_patch_unconditional(
+@@ -3318,7 +3330,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
+   {
+     branch_target = external_block_exits[i].branch_target;
+     if(branch_target == 0x00000008)
+-      translation_target = bios_swi_entrypoint;
++      translation_target = block_lookup_translate_arm(branch_target);
+     else
+       translation_target = block_lookup_translate_thumb(branch_target);
+     if (!translation_target)
+@@ -3331,12 +3343,12 @@ bool translate_block_thumb(u32 pc, bool ram_region)
+ 
+ void init_bios_hooks(void)
+ {
+-  // Pre-generate this entry point so that we can safely invoke fast
+-  // SWI calls from ROM and RAM regardless of cache flushes.
+-  rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
+-  last_rom_translation_ptr = rom_translation_ptr;
+-  bios_swi_entrypoint = block_lookup_address_arm(0x8);
+-  rom_cache_watermark = (u32)(rom_translation_ptr - rom_translation_cache);
++  /* BIOS code must not become part of the permanent emitter watermark.
++   * Its external exits can reach the cartridge, so pre-translating vector 8
++   * here also makes ordinary game blocks permanent and allows later hash
++   * headers to overwrite their continuation.  Compile SWI vector 8 through
++   * the normal ROM cache on demand instead. */
++  bios_swi_entrypoint = NULL;
+ }
+ 
+ void flush_translation_cache_ram(void)
+@@ -3412,4 +3424,3 @@ void flush_dynarec_caches(void)
    iwram_code_max = 0x8000;
    flush_translation_cache_ram();
  }
 -
+diff --git a/gba_memory.c b/gba_memory.c
+index c3a1b29..269de36 100644
+--- a/gba_memory.c
++++ b/gba_memory.c
+@@ -2695,6 +2695,7 @@ static s32 load_gamepak_raw(const char *name)
+     // Proceed to read the whole ROM or as much as possible.
+     for (i = 0; i < ldblks; i++)
+     {
++	  sf2000_load_progress("ROM cache", i, ldblks);
+       // Load 1MB chunk and map it
+       {
+         u32 read_len = (u32)filestream_read(gamepak_file_large, gamepak_buffers[i], gamepak_buffer_blocksize);
+@@ -2711,6 +2712,7 @@ static s32 load_gamepak_raw(const char *name)
+         map_rom_entry(read, phyn, blkptr, rom_blocks);
+       }
+     } 
++	 sf2000_load_progress("ROM cache", ldblks, ldblks);
+ 
+     return 0;
+   }
 diff --git a/gpsp_config.h b/gpsp_config.h
 index 625f46e..33b5193 100644
 --- a/gpsp_config.h
@@ -127,7 +223,7 @@ index 46bb951..41cc27c 100644
  #endif /* MMAP_JIT_CACHE */
 -
 diff --git a/mips/mips_emit.h b/mips/mips_emit.h
-index 79d5183..0b91040 100644
+index 79d5183..47e4f51 100644
 --- a/mips/mips_emit.h
 +++ b/mips/mips_emit.h
 @@ -2653,13 +2653,16 @@ static void emit_phand(
@@ -149,14 +245,11 @@ index 79d5183..0b91040 100644
      mips_emit_jr(reg_rv);
      #ifdef MIPS_HAS_R2_INSTS
        mips_emit_synci(mips_reg_ra, -8);
-@@ -2801,13 +2804,23 @@ void init_emitter(bool must_swap) {
+@@ -2801,13 +2804,20 @@ void init_emitter(bool must_swap) {
    rom_cache_watermark = (u32)(translation_ptr - rom_translation_cache);
  
    init_bios_hooks();
 +
-+  /* Permanent helper stubs precede the normal cache-sync watermark. */
-+  __builtin___clear_cache((char *)rom_translation_cache,
-+                          (char *)rom_translation_ptr);
  }
  
  u32 execute_arm_translate_internal(u32 cycles, void *regptr);

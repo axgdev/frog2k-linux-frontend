@@ -56,10 +56,29 @@ static void log_kmsg(const char *message)
 	close(fd);
 }
 
+void unifrog_core_load_progress(const char *stage, unsigned current,
+	unsigned total)
+{
+	char message[160];
+	snprintf(message, sizeof(message), "load %s %u/%u\n", stage, current,
+		total);
+	log_kmsg(message);
+}
+
 static void stop_signal(int signal_number)
 {
 	(void)signal_number;
 	stopping = 1;
+}
+
+static void fault_signal(int signal_number, siginfo_t *info, void *context)
+{
+	char message[128];
+	(void)context;
+	snprintf(message, sizeof(message), "fatal signal=%d address=%p\n",
+		signal_number, info ? info->si_addr : NULL);
+	log_kmsg(message);
+	_exit(128 + signal_number);
 }
 
 static void core_log(enum retro_log_level level, const char *format, ...)
@@ -298,11 +317,20 @@ int main(int argc, char **argv)
 	struct retro_game_info game = { 0 };
 	struct timespec deadline;
 	long frame_ns;
+	struct sigaction fault_action;
 
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s ROM\n", argv[0]);
 		return 2;
 	}
+	log_kmsg("entry\n");
+	memset(&fault_action, 0, sizeof(fault_action));
+	fault_action.sa_sigaction = fault_signal;
+	fault_action.sa_flags = SA_SIGINFO;
+	sigemptyset(&fault_action.sa_mask);
+	(void)sigaction(SIGILL, &fault_action, NULL);
+	(void)sigaction(SIGBUS, &fault_action, NULL);
+	(void)sigaction(SIGSEGV, &fault_action, NULL);
 	(void)unlink(READY_MARKER);
 	if (open_platform() < 0) {
 		log_kmsg("platform open failed\n");
@@ -312,6 +340,7 @@ int main(int argc, char **argv)
 	}
 	host.system_dir = "/mnt/sd/bios";
 	host.save_dir = "/mnt/sd/saves";
+	log_kmsg("platform ready\n");
 	retro_set_environment(environment);
 	retro_set_video_refresh(video);
 	retro_set_audio_sample(audio_sample);
@@ -325,7 +354,9 @@ int main(int argc, char **argv)
 	}
 	memset(&info, 0, sizeof(info));
 	retro_get_system_info(&info);
+	log_kmsg("core init begin\n");
 	retro_init();
+	log_kmsg("core init complete\n");
 	game.path = argv[1];
 	if (!info.need_fullpath && sf2000_load_content(argv[1], &game) < 0) {
 		log_kmsg("ROM read failed\n");
@@ -334,6 +365,7 @@ int main(int argc, char **argv)
 		close_platform();
 		return 1;
 	}
+	log_kmsg("ROM load begin\n");
 	if (!retro_load_game(&game)) {
 		log_kmsg("core rejected game\n");
 		fprintf(stderr, "sf2000-frontend: core rejected %s\n", argv[1]);
@@ -342,6 +374,7 @@ int main(int argc, char **argv)
 		free((void *)game.data);
 		return 1;
 	}
+	log_kmsg("ROM load complete\n");
 	retro_get_system_av_info(&av);
 	host.fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
 	frame_ns = (long)(1000000000.0 / host.fps);

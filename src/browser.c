@@ -285,6 +285,13 @@ static void launch_selected(void)
 
 		snprintf(message, sizeof(message), "launch %s %s", name, path);
 		log_message(message);
+		/* exec of a large bFLT includes relocation and BSS setup on the weak
+		 * CPU.  Replace the browser before entering the kernel loader so this
+		 * unavoidable work never looks like a frozen selection screen. */
+		memset(framebuffer, 0, (size_t)height * stride * sizeof(*framebuffer));
+		text(72, 92, "LOADING EMULATOR", 0xffff);
+		text(102, 108, name, 0x07ff);
+		text(48, 132, "PLEASE WAIT - SYSTEM IS ACTIVE", 0x07e0);
 		{
 			char *const argv[] = { (char *)core, path, NULL };
 			char *const envp[] = { NULL };
