@@ -25,7 +25,7 @@ GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-ffunction-sections -fdata-sections -DSMALL_TRANSLATION_CACHE \
 	-DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
 	-DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -DHAVE_DYNAREC \
-	-DMIPS_ARCH -DMMAP_JIT_CACHE -DSF2000 -DSF2000_NOMMU \
+	-DMIPS_ARCH -DSF2000 -DSF2000_NOMMU \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
@@ -142,7 +142,7 @@ $(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched
 		CPU_THREADED_CC='$(SF2000_CC)' \
 		CFLAGS='$(GPSP_CFLAGS)' \
 		OPTIMIZE='-Os -DNDEBUG' \
-		CPU_THREADED_OPTIMIZE='-O1 -g -DNDEBUG -fno-strict-aliasing -fwrapv'
+		CPU_THREADED_OPTIMIZE='-Os -g -DNDEBUG -fno-expensive-optimizations -fno-strict-aliasing -fwrapv'
 
 $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	for patch_file in $(GAMBATTE_PATCHES); do \

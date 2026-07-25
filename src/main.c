@@ -408,9 +408,9 @@ static void video(const void *data, unsigned width, unsigned height,
 			elapsed_ms -= (unsigned long)
 				(metrics_start.tv_nsec - now.tv_nsec) / 1000000ul;
 		snprintf(details, sizeof(details),
-			"video metric frames=%u elapsed_ms=%lu presenter=%s audio=%s\n",
+			"video metric frames=%u elapsed_ms=%lu presenter=%s audio=%s gba_pc=%08x\n",
 			video_callbacks, elapsed_ms, host.ge ? "GE" : "CPU",
-			host.pcm_fd >= 0 ? "DMA" : "off");
+			host.pcm_fd >= 0 ? "DMA" : "off", reg ? reg[15] : 0);
 		log_kmsg(details);
 	}
 }
