@@ -226,6 +226,17 @@ diff --git a/mips/mips_emit.h b/mips/mips_emit.h
 index 79d5183..47e4f51 100644
 --- a/mips/mips_emit.h
 +++ b/mips/mips_emit.h
+@@ -1512,7 +1512,8 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address)
+ #define thumb_data_proc_mov_hi()                                              \
+ {                                                                             \
+   thumb_decode_hireg_op();                                                    \
++  u32 dest_rd = rd;                                                           \
+   check_load_reg_pc(arm_reg_a0, rs, 4);                                       \
+-  mips_emit_addu(arm_to_mips_reg[rd], arm_to_mips_reg[rs], reg_zero);         \
+-  check_store_reg_pc_thumb(rd);                                               \
++  mips_emit_addu(arm_to_mips_reg[dest_rd], arm_to_mips_reg[rs], reg_zero);    \
++  check_store_reg_pc_thumb(dest_rd);                                          \
+ }                                                                             \
 @@ -2653,13 +2653,16 @@ static void emit_phand(
    mips_emit_addu(reg_temp, reg_temp, reg_base); // Add to the base_reg the table offset
    mips_emit_lw(reg_rv,   reg_temp, tbloff);     // Get func addr from 1st table

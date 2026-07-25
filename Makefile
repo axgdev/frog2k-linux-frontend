@@ -11,17 +11,21 @@ COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 GAMBATTE_DIR := .deps/gambatte
 GPSP_DIR := .deps/gpsp
 COMMON_DIR := .deps/libretro-common
+SF2000_LINUX_DIR ?= ../sf2000_linux
+GE_DIR := $(SF2000_LINUX_DIR)/ge
+GE_SOURCES := $(GE_DIR)/hcge_linux.c $(GE_DIR)/hcge_node.c
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-G0 -mno-abicalls -fno-pic -fomit-frame-pointer -ffast-math \
-	-fsigned-char -fno-unwind-tables -fno-asynchronous-unwind-tables \
+	-fsigned-char -fno-strict-aliasing -fwrapv \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections -DSMALL_TRANSLATION_CACHE \
 	-DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
 	-DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -DHAVE_DYNAREC \
-	-DMIPS_ARCH -DSF2000 -DSF2000_NOMMU \
+	-DMIPS_ARCH -DMMAP_JIT_CACHE -DSF2000 -DSF2000_NOMMU \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
@@ -31,7 +35,7 @@ COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_compat.o
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
-SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float
+SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float -I$(GE_DIR)
 SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 	-Wl,--gc-sections
 
@@ -39,9 +43,10 @@ SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 
 all: check
 
-build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libretro_min.h
+build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES)
 	mkdir -p build
-	$(CC) $(CFLAGS) -o $@ src/main.c src/content.c tests/dummy_core.c
+	$(CC) $(CFLAGS) -I$(GE_DIR) -o $@ src/main.c src/content.c \
+		tests/dummy_core.c $(GE_SOURCES)
 
 check: build/frontend-check
 
@@ -49,20 +54,20 @@ sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend \
-		src/main.c $(CORE)
+		src/main.c $(GE_SOURCES) $(CORE)
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend
 
 demo:
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend-demo \
-		src/main.c tests/dummy_core.c
+		src/main.c $(GE_SOURCES) tests/dummy_core.c
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend-demo
 
 frogui:
 	test -f "$(FROGUI_CORE)"
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
-		-o build/sf2000-frontend-frogui src/main.c src/frogui_adapter.c \
+		-o build/sf2000-frontend-frogui src/main.c $(GE_SOURCES) src/frogui_adapter.c \
 		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-frontend-frogui
 
@@ -76,23 +81,30 @@ gambatte:
 	$(MAKE) $(GAMBATTE_CORE) $(LIBRETRO_COMMON)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-host.o src/main.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-ge-linux.o $(GE_DIR)/hcge_linux.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-ge-node.o $(GE_DIR)/hcge_node.c
 	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
-		-c -o build/nommu-new.o src/nommu_new.cpp
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/content.o src/content.c
+		-c -o build/gambatte-nommu-new.o src/nommu_new.cpp
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-content.o src/content.c
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
-		-o build/sf2000-gambatte build/gambatte-host.o build/nommu-new.o $(GAMBATTE_CORE) \
-		$(LIBRETRO_COMMON) build/content.o -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
+		-o build/sf2000-gambatte build/gambatte-host.o build/gambatte-ge-linux.o \
+		build/gambatte-ge-node.o build/gambatte-nommu-new.o $(GAMBATTE_CORE) \
+		$(LIBRETRO_COMMON) build/gambatte-content.o -lm -Wl,--wrap=malloc \
+		-Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gambatte
 
 gpsp: $(GPSP_CORE)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-host.o src/main.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/content.o src/content.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-ge-linux.o $(GE_DIR)/hcge_linux.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-ge-node.o $(GE_DIR)/hcge_node.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-content.o src/content.c
 	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
-		-c -o build/nommu-new.o src/nommu_new.cpp
+		-c -o build/gpsp-nommu-new.o src/nommu_new.cpp
 	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-gpsp \
-		build/gpsp-host.o build/nommu-new.o $(GPSP_CORE) build/content.o -lm \
+		build/gpsp-host.o build/gpsp-ge-linux.o build/gpsp-ge-node.o \
+		build/gpsp-nommu-new.o $(GPSP_CORE) build/gpsp-content.o -lm \
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gpsp
 
@@ -130,7 +142,7 @@ $(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched
 		CPU_THREADED_CC='$(SF2000_CC)' \
 		CFLAGS='$(GPSP_CFLAGS)' \
 		OPTIMIZE='-Os -DNDEBUG' \
-		CPU_THREADED_OPTIMIZE='-Os -DNDEBUG -fno-expensive-optimizations'
+		CPU_THREADED_OPTIMIZE='-O1 -g -DNDEBUG -fno-strict-aliasing -fwrapv'
 
 $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	for patch_file in $(GAMBATTE_PATCHES); do \

@@ -9,6 +9,7 @@
 #define RETRO_API_VERSION 1
 #define RETRO_ENVIRONMENT_GET_CAN_DUPE 3
 #define RETRO_ENVIRONMENT_SET_PIXEL_FORMAT 10
+#define RETRO_ENVIRONMENT_GET_VARIABLE 15
 #define RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY 9
 #define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 31
 #define RETRO_ENVIRONMENT_SET_GEOMETRY 37
@@ -51,6 +52,10 @@ struct retro_game_info {
 	const void *data;
 	size_t size;
 	const char *meta;
+};
+struct retro_variable {
+	const char *key;
+	const char *value;
 };
 enum retro_log_level {
 	RETRO_LOG_DEBUG, RETRO_LOG_INFO, RETRO_LOG_WARN, RETRO_LOG_ERROR,
