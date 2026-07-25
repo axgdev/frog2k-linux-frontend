@@ -103,6 +103,45 @@ index 8942ab3..7a9929c 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
+@@ -2887,8 +2902,8 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
+ #define MAX_BLOCK_SIZE   1024   // 2/4KiB blocks max
+ #define MAX_EXITS          32   // This covers 99% blocks
+-
++#if !defined(SF2000_NOMMU)
+ block_data_type block_data[MAX_BLOCK_SIZE];
+ block_exit_type block_exits[MAX_EXITS];
++#endif
+-
+ #define smc_write_arm_yes() {                                                 \
+   intptr_t offset = (pc < 0x03000000) ? 0x40000 : -0x8000;                    \
+@@ -3010,5 +3025,17 @@ if (ram_region) {                                                             \
+ bool translate_block_arm(u32 pc, bool ram_region)
+ {
++#if defined(SF2000_NOMMU)
++  /*
++   * A Linux/NOMMU bFLT executable is relocated at load time.  Keeping these
++   * work arrays in BSS makes the MIPS HI16/LO16 reference depend on a text
++   * relocation which the flat loader cannot represent reliably.  The
++   * translator already has a 512 KiB process stack, and its old global
++   * workspace was non-reentrant, so a per-translation stack workspace is
++   * both relocatable and preserves the intended lifetime.
++   */
++  block_data_type block_data[MAX_BLOCK_SIZE] = {{0}};
++  block_exit_type block_exits[MAX_EXITS] = {{0}};
++#endif
+   u32 opcode = 0;
+   u32 last_opcode;
+   u32 condition;
+@@ -3175,5 +3202,9 @@ bool translate_block_arm(u32 pc, bool ram_region)
+ bool translate_block_thumb(u32 pc, bool ram_region)
+ {
++#if defined(SF2000_NOMMU)
++  block_data_type block_data[MAX_BLOCK_SIZE] = {{0}};
++  block_exit_type block_exits[MAX_EXITS] = {{0}};
++#endif
+   u32 opcode = 0;
+   u32 last_opcode;
+   u32 condition;
 @@ -3412,4 +3424,3 @@ void flush_dynarec_caches(void)
    iwram_code_max = 0x8000;
    flush_translation_cache_ram();
