@@ -14,7 +14,13 @@ struct allocation_header {
 	std::size_t requested_bytes;
 };
 
-static constexpr std::size_t mmap_threshold = 128u * 1024u;
+/*
+ * Keep transient core allocations out of the fixed arena once they are large
+ * enough to consume a substantial fraction of it.  Gambatte has a 90 KiB
+ * allocation after several smaller permanent allocations; treating that as
+ * "small" exhausted the arena even though the system still had free memory.
+ */
+static constexpr std::size_t mmap_threshold = 64u * 1024u;
 static unsigned char small_arena[256u * 1024u];
 static std::size_t small_arena_used;
 
