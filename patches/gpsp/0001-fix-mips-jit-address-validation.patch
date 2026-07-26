@@ -114,7 +114,7 @@ index 8942ab3..7a9929c 100644
 -
  #define smc_write_arm_yes() {                                                 \
    intptr_t offset = (pc < 0x03000000) ? 0x40000 : -0x8000;                    \
-@@ -3010,5 +3025,17 @@ if (ram_region) {                                                             \
+@@ -3010,5 +3025,24 @@ if (ram_region) {                                                             \
  bool translate_block_arm(u32 pc, bool ram_region)
  {
 +#if defined(SF2000_NOMMU)
@@ -126,23 +126,30 @@ index 8942ab3..7a9929c 100644
 +   * workspace was non-reentrant, so a per-translation stack workspace is
 +   * both relocatable and preserves the intended lifetime.
 +   */
-+  block_data_type block_data[MAX_BLOCK_SIZE] = {{0}};
-+  block_exit_type block_exits[MAX_EXITS] = {{0}};
++  /*
++   * Every entry consumed by the translator is populated by scan_block()
++   * before use.  The upstream global workspace is only zeroed once by BSS,
++   * then deliberately reused without clearing.  Preserve that contract:
++   * clearing 8 KiB for every generated block is both unnecessary and a
++   * severe cost on this CPU.
++   */
++  block_data_type block_data[MAX_BLOCK_SIZE];
++  block_exit_type block_exits[MAX_EXITS];
 +#endif
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
-@@ -3175,5 +3202,9 @@ bool translate_block_arm(u32 pc, bool ram_region)
+@@ -3175,5 +3209,9 @@ bool translate_block_arm(u32 pc, bool ram_region)
  bool translate_block_thumb(u32 pc, bool ram_region)
  {
 +#if defined(SF2000_NOMMU)
-+  block_data_type block_data[MAX_BLOCK_SIZE] = {{0}};
-+  block_exit_type block_exits[MAX_EXITS] = {{0}};
++  block_data_type block_data[MAX_BLOCK_SIZE];
++  block_exit_type block_exits[MAX_EXITS];
 +#endif
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
-@@ -3412,4 +3424,3 @@ void flush_dynarec_caches(void)
+@@ -3412,4 +3431,3 @@ void flush_dynarec_caches(void)
    iwram_code_max = 0x8000;
    flush_translation_cache_ram();
  }

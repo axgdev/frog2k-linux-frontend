@@ -23,7 +23,7 @@ GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-fsigned-char -fno-strict-aliasing -fwrapv \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections -DSMALL_TRANSLATION_CACHE \
-	-DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
+	-DMMAP_JIT_CACHE -DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
 	-DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -DHAVE_DYNAREC \
 	-DMIPS_ARCH -DSF2000 -DSF2000_NOMMU \
 	-DFRONTEND_SUPPORTS_RGB565

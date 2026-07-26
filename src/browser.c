@@ -292,6 +292,9 @@ static void launch_selected(void)
 		text(72, 92, "LOADING EMULATOR", 0xffff);
 		text(102, 108, name, 0x07ff);
 		text(48, 132, "PLEASE WAIT - SYSTEM IS ACTIVE", 0x07e0);
+		if (pwrite(framebuffer_fd, framebuffer,
+				(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
+			log_message("loading framebuffer write failed");
 		{
 			char *const argv[] = { (char *)core, path, NULL };
 			char *const envp[] = { NULL };

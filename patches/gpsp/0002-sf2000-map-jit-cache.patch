@@ -1,0 +1,22 @@
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index 0da4bc1..669fd70 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -621,6 +621,16 @@ void retro_init(void)
+ #if defined(HAVE_DYNAREC)
+   #if defined(MMAP_JIT_CACHE)
+    rom_translation_cache = map_jit_block(ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE);
++   if (!rom_translation_cache)
++   {
++      if (log_cb)
++         log_cb(RETRO_LOG_ERROR,
++                "Failed to allocate executable translation cache\n");
++      dynarec_enable = 0;
++      return;
++   }
+    ram_translation_cache = &rom_translation_cache[ROM_TRANSLATION_CACHE_SIZE];
++   rom_translation_ptr = rom_translation_cache;
++   ram_translation_ptr = ram_translation_cache;
+   #elif defined(_3DS)
+    if (__ctr_svchax && !translation_caches_inited)
+    {

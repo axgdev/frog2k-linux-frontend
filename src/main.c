@@ -130,8 +130,14 @@ static void fault_signal(int signal_number, siginfo_t *info, void *context)
 	cursor = append_hex(cursor, pc);
 	memcpy(cursor, " insn=", 6);
 	cursor += 6;
-	cursor = append_hex(cursor, pc ?
-		*(const uint32_t *)(uintptr_t)pc : 0);
+	/*
+	 * A signal handler cannot safely dereference the reported PC: SIGBUS
+	 * may describe an unmapped or unaligned instruction address, and a
+	 * second fault here hides the exception that we are trying to report.
+	 * The kernel exception trace retains the instruction when it is safe
+	 * to fetch; keep the user-space record focused on stable registers.
+	 */
+	cursor = append_hex(cursor, 0);
 	memcpy(cursor, " cause=", 7);
 	cursor += 7;
 	cursor = append_hex(cursor, cause);
@@ -199,6 +205,19 @@ static bool environment(unsigned command, void *data)
 	}
 	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
 		*(bool *)data = true;
+		return true;
+	case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
+		/*
+		 * Accept the structured v1 option table.  Returning false here
+		 * makes cores synthesize the deprecated string table at startup,
+		 * allocating and concatenating every option even though this
+		 * appliance frontend selects its few platform settings directly
+		 * through GET_VARIABLE.
+		 */
+		*(unsigned *)data = 1;
+		return true;
+	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
+	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL:
 		return true;
 	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
 		host.format = *(enum retro_pixel_format *)data;
@@ -499,7 +518,13 @@ static int open_audio(void)
 	software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
 	software.period_step = 1;
 	software.avail_min = 1024;
-	software.start_threshold = 1024;
+	/*
+	 * Prime four periods before starting SND0.  One period gave the weak
+	 * single CPU no scheduling margin: normal logger/GE bursts repeatedly
+	 * underrran ALSA even though the core's average production rate was
+	 * correct.  The 128 ms reservoir stays well below the 256 ms ring.
+	 */
+	software.start_threshold = 4096;
 	software.stop_threshold = 8192;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
