@@ -413,8 +413,8 @@ static void video(const void *data, unsigned width, unsigned height,
 			elapsed_ms -= (unsigned long)
 				(metrics_start.tv_nsec - now.tv_nsec) / 1000000ul;
 		fps_milli = elapsed_ms ?
-			((unsigned long)video_callbacks * 1000ul / elapsed_ms) *
-				1000ul : 0;
+			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
+				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
 			"video metric frames=%u elapsed_ms=%lu fps_milli=%lu presenter=%s audio=%s gba_pc=%08x\n",
 			video_callbacks, elapsed_ms, fps_milli,
@@ -554,23 +554,26 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 		if (host.audio_phase < host.audio_rate)
 			continue;
 		host.audio_phase -= host.audio_rate;
-		if (host.audio_count == sizeof(host.audio_buffer) /
-				sizeof(host.audio_buffer[0]))
-			audio_flush();
-		if (host.audio_count < sizeof(host.audio_buffer) /
-				sizeof(host.audio_buffer[0])) {
+		{
 			int32_t mixed = (int32_t)samples[i * 2] +
 				samples[i * 2 + 1];
 			int sample = mixed / 2;
 			unsigned magnitude = sample < 0 ?
 				(unsigned)-sample : (unsigned)sample;
 
-			host.audio_buffer[host.audio_count++] = (int16_t)sample;
 			audio_metrics.generated++;
 			if (magnitude > audio_metrics.peak)
 				audio_metrics.peak = magnitude;
-		} else
-			audio_metrics.dropped++;
+			if (host.audio_count == sizeof(host.audio_buffer) /
+					sizeof(host.audio_buffer[0]))
+				audio_flush();
+			if (host.audio_count < sizeof(host.audio_buffer) /
+					sizeof(host.audio_buffer[0]))
+				host.audio_buffer[host.audio_count++] =
+					(int16_t)sample;
+			else
+				audio_metrics.dropped++;
+		}
 	}
 	if (host.audio_count == sizeof(host.audio_buffer) /
 			sizeof(host.audio_buffer[0]))
@@ -784,6 +787,14 @@ int main(int argc, char **argv)
 		log_kmsg("ALSA unavailable; audio disabled\n");
 	frame_ns = (long)(1000000000.0 / host.fps);
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	{
+		char details[96];
+
+		snprintf(details, sizeof(details),
+			"timing frame_ns=%ld audio_core_hz=%u audio_output_hz=32000\n",
+			frame_ns, host.audio_rate);
+		log_kmsg(details);
+	}
 	log_kmsg("frontend running START+L exits\n");
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
