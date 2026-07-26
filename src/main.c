@@ -58,6 +58,10 @@ static int first_frame;
 static unsigned video_callbacks;
 static struct timespec metrics_start;
 extern uint32_t reg[] __attribute__((weak));
+static struct {
+	unsigned generated, submitted, dropped;
+	unsigned peak, eagain, xruns;
+} audio_metrics;
 
 static void log_kmsg(const char *message)
 {
@@ -396,6 +400,7 @@ static void video(const void *data, unsigned width, unsigned height,
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
 		unsigned long elapsed_ms;
+		unsigned long fps_milli;
 		char details[128];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
@@ -407,10 +412,20 @@ static void video(const void *data, unsigned width, unsigned height,
 		else
 			elapsed_ms -= (unsigned long)
 				(metrics_start.tv_nsec - now.tv_nsec) / 1000000ul;
+		fps_milli = elapsed_ms ?
+			((unsigned long)video_callbacks * 1000ul / elapsed_ms) *
+				1000ul : 0;
 		snprintf(details, sizeof(details),
-			"video metric frames=%u elapsed_ms=%lu presenter=%s audio=%s gba_pc=%08x\n",
-			video_callbacks, elapsed_ms, host.ge ? "GE" : "CPU",
+			"video metric frames=%u elapsed_ms=%lu fps_milli=%lu presenter=%s audio=%s gba_pc=%08x\n",
+			video_callbacks, elapsed_ms, fps_milli,
+			host.ge ? "GE" : "CPU",
 			host.pcm_fd >= 0 ? "DMA" : "off", reg ? reg[15] : 0);
+		log_kmsg(details);
+		snprintf(details, sizeof(details),
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u\n",
+			audio_metrics.generated, audio_metrics.submitted,
+			audio_metrics.dropped, audio_metrics.eagain,
+			audio_metrics.xruns, audio_metrics.peak, host.audio_count);
 		log_kmsg(details);
 	}
 }
@@ -511,11 +526,13 @@ static void audio_flush(void)
 	if (bytes < 0) {
 		if (errno == EPIPE) {
 			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
-			host.audio_count = 0;
-		}
+			audio_metrics.xruns++;
+		} else if (errno == EAGAIN)
+			audio_metrics.eagain++;
 		return;
 	}
 	consumed = (unsigned)bytes / sizeof(host.audio_buffer[0]);
+	audio_metrics.submitted += consumed;
 	if (consumed >= host.audio_count) {
 		host.audio_count = 0;
 	} else if (consumed) {
@@ -544,9 +561,16 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 				sizeof(host.audio_buffer[0])) {
 			int32_t mixed = (int32_t)samples[i * 2] +
 				samples[i * 2 + 1];
-			host.audio_buffer[host.audio_count++] =
-				(int16_t)(mixed / 2);
-		}
+			int sample = mixed / 2;
+			unsigned magnitude = sample < 0 ?
+				(unsigned)-sample : (unsigned)sample;
+
+			host.audio_buffer[host.audio_count++] = (int16_t)sample;
+			audio_metrics.generated++;
+			if (magnitude > audio_metrics.peak)
+				audio_metrics.peak = magnitude;
+		} else
+			audio_metrics.dropped++;
 	}
 	if (host.audio_count == sizeof(host.audio_buffer) /
 			sizeof(host.audio_buffer[0]))
