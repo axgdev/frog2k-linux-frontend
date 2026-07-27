@@ -100,6 +100,13 @@ outside the cores. This keeps later emulator-specific optimization optional
 and lets Linux and RTOS frontends share the same conversion and acceleration
 contracts.
 
+The presenter uses two source surfaces and fences before reuse.  This matches
+the HC15xx engine's running-plus-pending queue contract.  A third outstanding
+surface was tested on physical hardware and caused gpSP to continue executing
+behind a blank scanout, without improving frame rate.  First-frame diagnostics
+include hashes of both the core surface and the GE-written framebuffer so a
+core failure and a presentation failure are distinguishable after reset.
+
 The bFLT C++ runtime maps each allocation independently and returns it to the
 kernel on `free`. A fixed bump arena is unsafe for switching cores in one
 NOMMU process because it cannot reclaim a departed core's allocations.

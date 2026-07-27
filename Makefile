@@ -151,7 +151,7 @@ $(GPSP_DIR)/.sf2000-patched: $(GPSP_DIR)/.git $(GPSP_PATCHES)
 	done
 	touch '$@'
 
-$(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched
+$(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched Makefile
 	mkdir -p build
 	$(MAKE) -C $(GPSP_DIR) clean-objs platform=rs90 STATIC_LINKING=1
 	$(MAKE) -C $(GPSP_DIR) platform=rs90 STATIC_LINKING=1 \

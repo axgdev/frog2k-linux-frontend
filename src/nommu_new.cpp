@@ -71,7 +71,11 @@ static void mapping_release(void *memory)
 
 extern "C" void *__wrap_malloc(std::size_t bytes)
 {
-	return mapping_allocate(bytes ? bytes : 1u);
+	void *memory = mapping_allocate(bytes ? bytes : 1u);
+
+	if (!memory)
+		allocation_trace("malloc-failed", bytes, nullptr);
+	return memory;
 }
 
 extern "C" void __wrap_free(void *memory)
@@ -88,6 +92,8 @@ extern "C" void *__wrap_calloc(std::size_t count, std::size_t bytes)
 	void *memory = mapping_allocate(count * bytes);
 	if (memory)
 		std::memset(memory, 0, count * bytes);
+	else
+		allocation_trace("calloc-failed", count * bytes, nullptr);
 	return memory;
 }
 

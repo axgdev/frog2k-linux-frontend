@@ -41,7 +41,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DELAY_TARGET 5632
 #define AUDIO_DELAY_HIGH 7168
 #define AUDIO_FEEDBACK_INTERVAL 8u
-#define GE_SOURCE_BUFFERS 3u
+#define GE_SOURCE_BUFFERS 2u
 
 struct host {
 	int fb_fd, input_fd;
@@ -87,6 +87,7 @@ static unsigned uncapped_mode;
 static unsigned uncapped_chord_latched;
 static unsigned audio_suppressed;
 extern uint32_t reg[] __attribute__((weak));
+extern uint16_t *gba_screen_pixels __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
 	unsigned peak, eagain, xruns;
@@ -522,17 +523,30 @@ static void video(const void *data, unsigned width, unsigned height,
 			UINT_MAX : (unsigned)present_us;
 	}
 	if (!first_frame) {
-		char details[160];
+		uint32_t scanout_hash = frame_hash(host.fb, host.fb_height,
+			host.fb_stride * sizeof(*host.fb));
+		char details[192];
 		int fd = open(READY_MARKER,
 			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 
 		if (fd >= 0)
 			close(fd);
 		snprintf(details, sizeof(details),
-			"first frame %ux%u pitch=%lu format=%u hash=%08x fb=%ux%u stride=%u\n",
+			"first frame %ux%u pitch=%lu format=%u source_hash=%08x scanout_hash=%08x fb=%ux%u stride=%u\n",
 			width, height, (unsigned long)pitch, (unsigned)host.format, hash,
-			host.fb_width, host.fb_height, host.fb_stride * 2u);
+			scanout_hash, host.fb_width, host.fb_height,
+			host.fb_stride * 2u);
 		log_kmsg(details);
+#ifdef __mips__
+		(void)hc15xx_retained_mark(
+			(volatile struct hc15xx_retained_log *)(uintptr_t)
+				HC15XX_RETAINED_UNCACHED,
+			"frontend-first-source", 0x62u, hash);
+		(void)hc15xx_retained_mark(
+			(volatile struct hc15xx_retained_log *)(uintptr_t)
+				HC15XX_RETAINED_UNCACHED,
+			"frontend-first-scanout", 0x63u, scanout_hash);
+#endif
 		first_frame = 1;
 		video_callbacks = 0;
 		reset_metric_window();
@@ -993,11 +1007,11 @@ static int open_platform(void)
 			(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 			snprintf(details, sizeof(details),
-				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x source2=%08x bytes=%lu buffers=%u\n",
+				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u fenced_depth=%u\n",
 				host.fb_phys, host.ge_source_phys[0],
 				host.ge_source_phys[1],
-				host.ge_source_phys[2],
-				(unsigned long)host.ge_source_bytes, host.ge_buffers);
+				(unsigned long)host.ge_source_bytes, host.ge_buffers,
+				host.ge_buffers);
 			log_kmsg(details);
 		}
 	}
@@ -1081,6 +1095,14 @@ int main(int argc, char **argv)
 	log_kmsg("core init begin\n");
 	retro_init();
 	log_kmsg("core init complete\n");
+	if (&gba_screen_pixels) {
+		char details[96];
+
+		snprintf(details, sizeof(details),
+			"core framebuffer pointer=%p errno=%d\n",
+			(void *)gba_screen_pixels, errno);
+		log_kmsg(details);
+	}
 	game.path = argv[1];
 	if (!info.need_fullpath && sf2000_load_content(argv[1], &game) < 0) {
 		log_kmsg("ROM read failed\n");
