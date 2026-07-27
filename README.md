@@ -1,5 +1,8 @@
 # SF2000 Linux Frontend
 
+The module boundaries and real-time ownership rules are documented in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 A small Linux/NOMMU frontend for statically linked libretro cores on the
 SF2000. Hardware support belongs in `sf2000_linux`; this repository contains
 only application policy, libretro hosting, and the future game menu.

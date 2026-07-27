@@ -5,11 +5,11 @@
 #include "ge_api.h"
 #include "hc15xx_resampler.h"
 #include "hc15xx_retained.h"
+#include "sf2000_input.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fb.h>
-#include <linux/input.h>
 #include <limits.h>
 #include <signal.h>
 #include <sound/asound.h>
@@ -44,7 +44,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define GE_SOURCE_BUFFERS 2u
 
 struct host {
-	int fb_fd, input_fd;
+	int fb_fd;
 	uint16_t *fb;
 	size_t fb_bytes;
 	unsigned fb_width, fb_height, fb_stride;
@@ -62,14 +62,14 @@ struct host {
 	snd_pcm_sframes_t audio_delay;
 	struct hc15xx_resampler resampler;
 	int16_t audio_buffer[AUDIO_BUFFER_SAMPLES];
-	uint32_t keys;
 	enum retro_pixel_format format;
 	double fps;
 	const char *system_dir;
 	const char *save_dir;
+	struct sf2000_input input;
 };
 
-static struct host host = { .fb_fd = -1, .input_fd = -1, .pcm_fd = -1,
+static struct host host = { .fb_fd = -1, .pcm_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
 static int first_frame;
@@ -86,7 +86,6 @@ static unsigned interval_buffered_frames;
 static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
-static unsigned uncapped_chord_latched;
 static unsigned audio_suppressed;
 extern uint32_t reg[] __attribute__((weak));
 extern uint16_t *gba_screen_pixels __attribute__((weak));
@@ -385,10 +384,12 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	 * let GE stage the core-owned RGB565 callback surface into a managed
 	 * source and fence that short copy before the callback returns. The later
 	 * stretch remains asynchronous. This observes libretro's callback
-	 * lifetime while removing the full-frame CPU copy. Uncapped mode keeps
-	 * CPU-buffered delivery so GE and the core overlap without an extra fence.
+	 * lifetime while removing the full-frame CPU copy. Physical log139 showed
+	 * this path is also faster than CPU buffering in uncapped mode, because
+	 * the core can still overlap the asynchronous stretch after the staging
+	 * fence releases its callback surface.
 	 */
-	if (!uncapped_mode && host.format == RETRO_PIXEL_FORMAT_RGB565 &&
+	if (host.format == RETRO_PIXEL_FORMAT_RGB565 &&
 			pitch >= (size_t)width * sizeof(uint16_t) &&
 			source_bytes <= UINT_MAX &&
 			(uintptr_t)data + source_bytes >= (uintptr_t)data &&
@@ -918,25 +919,6 @@ static void audio_sample(int16_t left, int16_t right)
 	(void)audio_batch(pair, 1);
 }
 
-static unsigned key_bit(unsigned code)
-{
-	switch (code) {
-	case BTN_SOUTH: return 1u << RETRO_DEVICE_ID_JOYPAD_B;
-	case BTN_WEST: return 1u << RETRO_DEVICE_ID_JOYPAD_Y;
-	case BTN_SELECT: return 1u << RETRO_DEVICE_ID_JOYPAD_SELECT;
-	case BTN_START: return 1u << RETRO_DEVICE_ID_JOYPAD_START;
-	case BTN_DPAD_UP: return 1u << RETRO_DEVICE_ID_JOYPAD_UP;
-	case BTN_DPAD_DOWN: return 1u << RETRO_DEVICE_ID_JOYPAD_DOWN;
-	case BTN_DPAD_LEFT: return 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
-	case BTN_DPAD_RIGHT: return 1u << RETRO_DEVICE_ID_JOYPAD_RIGHT;
-	case BTN_EAST: return 1u << RETRO_DEVICE_ID_JOYPAD_A;
-	case BTN_NORTH: return 1u << RETRO_DEVICE_ID_JOYPAD_X;
-	case BTN_TL: return 1u << RETRO_DEVICE_ID_JOYPAD_L;
-	case BTN_TR: return 1u << RETRO_DEVICE_ID_JOYPAD_R;
-	default: return 0;
-	}
-}
-
 static void set_uncapped_mode(unsigned enable)
 {
 	char details[128];
@@ -975,53 +957,18 @@ static void set_uncapped_mode(unsigned enable)
 
 static void input_poll(void)
 {
-	struct input_event event;
-	const unsigned chord =
-		(1u << RETRO_DEVICE_ID_JOYPAD_SELECT) |
-		(1u << RETRO_DEVICE_ID_JOYPAD_R);
+	unsigned actions = sf2000_input_poll(&host.input);
 
-	while (host.input_fd >= 0 && read(host.input_fd, &event, sizeof(event)) ==
-			(ssize_t)sizeof(event)) {
-		unsigned bit;
-		if (event.type != EV_KEY || !(bit = key_bit(event.code)))
-			continue;
-		if (event.value)
-			host.keys |= bit;
-		else
-			host.keys &= ~bit;
-		/*
-		 * Detect the chord at the event boundary, not after draining the
-		 * fd.  An uncapped core can receive press and release in one poll;
-		 * inspecting only the final key state would then miss the toggle.
-		 */
-		if (event.value && (host.keys & chord) == chord &&
-				!uncapped_chord_latched) {
-			uncapped_chord_latched = 1;
-			set_uncapped_mode(!uncapped_mode);
-		} else if (!event.value && (bit & chord)) {
-			uncapped_chord_latched = 0;
-		}
-	}
-	if ((host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_START)) &&
-			(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_L)))
+	if (actions & SF2000_INPUT_TOGGLE_UNCAPPED)
+		set_uncapped_mode(!uncapped_mode);
+	if (actions & SF2000_INPUT_EXIT)
 		stopping = 1;
-	if ((host.keys & chord) != chord &&
-			!(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_SELECT)) &&
-			!(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_R)))
-		uncapped_chord_latched = 0;
 }
 
 static int16_t input_state(unsigned port, unsigned device, unsigned index,
 	unsigned id)
 {
-	(void)index;
-	if (port || device != RETRO_DEVICE_JOYPAD || id >= 32)
-		return 0;
-	if (uncapped_chord_latched &&
-			(id == RETRO_DEVICE_ID_JOYPAD_SELECT ||
-			 id == RETRO_DEVICE_ID_JOYPAD_R))
-		return 0;
-	return (host.keys & (1u << id)) != 0;
+	return sf2000_input_state(&host.input, port, device, index, id);
 }
 
 static int open_platform(void)
@@ -1048,8 +995,7 @@ static int open_platform(void)
 		host.fb = NULL;
 		return -1;
 	}
-	host.input_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-	if (host.input_fd < 0)
+	if (sf2000_input_open(&host.input, "/dev/input/event0") < 0)
 		return -1;
 	if (host.fb_phys && hcge_open_context(&host.ge_storage) == 0) {
 		unsigned i;
@@ -1111,8 +1057,7 @@ static void close_platform(void)
 		munmap(host.fb, host.fb_bytes);
 	if (host.fb_fd >= 0)
 		close(host.fb_fd);
-	if (host.input_fd >= 0)
-		close(host.input_fd);
+	sf2000_input_close(&host.input);
 }
 
 extern int sf2000_load_content(const char *path, struct retro_game_info *game);

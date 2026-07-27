@@ -1,0 +1,48 @@
+# Frontend architecture
+
+<!-- SPDX-License-Identifier: MIT -->
+
+The frontend is a small static libretro host, not an operating-system service.
+Its public boundaries are deliberately narrow:
+
+- `src/browser.c` owns content discovery and process launch. It does not link a
+  core or touch GE/audio devices.
+- `src/content.c` owns ROM loading and the NOMMU-safe content allocation
+  contract.
+- `src/sf2000_input.c` owns Linux evdev decoding, chord edge detection and the
+  libretro joypad state. It reports actions to the host instead of changing
+  emulation policy itself.
+- `src/main.c` owns one libretro session and coordinates presentation, PCM
+  pacing and lifecycle. The GE and resampler implementations remain reusable
+  libraries in the sibling `sf2000_linux` repository.
+- `src/nommu_new.cpp` supplies the bounded allocation policy required by
+  C++ cores on uClinux.
+
+Core code must not know framebuffer physical addresses, ALSA ioctls, retained
+RAM, or SF2000 key codes. Platform modules must not call `retro_run()` or
+select core options. This allows input, storage/browser, hardware libraries,
+and individual cores to be developed and tested independently.
+
+`SF2000_HOST_OBJECTS` in the Makefile is the single definition of the platform
+host. Gambatte and gpSP link those same objects, so a platform change cannot
+silently produce two different hosts and common sources compile only once.
+
+## Frame ownership
+
+Libretro owns a video callback pointer only until the callback returns. For a
+KSEG0 RGB565 surface, GE copies it into a frontend-managed source and the host
+fences that short copy before returning. Scaling from the managed snapshot is
+asynchronous and overlaps the next core frame. CPU staging exists only for
+non-addressable or converted input. Metrics distinguish these paths with
+`ge_stage_frames` and `buffered_frames`.
+
+## Real-time rules
+
+The emulation thread may append one telemetry record to tmpfs every 300 frames.
+It must not write the SD card or synchronously print periodic metrics. The
+supervisor imports the tmpfs journal after the core exits. Audio and video
+callbacks allocate no memory after initialization.
+
+Any new backend should provide an explicit state object, open/close ownership,
+and host-side tests. Avoid backend globals and avoid exposing Linux or HC15xx
+details through the libretro callback interface.

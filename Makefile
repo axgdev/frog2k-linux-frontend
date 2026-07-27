@@ -19,6 +19,10 @@ AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
 AUDIO_SOURCES := $(AUDIO_DIR)/hc15xx_resampler.c
 PLATFORM_DIR := $(SF2000_LINUX_DIR)/platform
 PLATFORM_SOURCES := $(PLATFORM_DIR)/hc15xx_retained.c
+FRONTEND_SOURCES := src/main.c src/sf2000_input.c
+SF2000_HOST_OBJECTS := build/host-main.o build/host-input.o \
+	build/host-ge-linux.o build/host-ge-node.o build/host-audio.o \
+	build/host-retained.o build/host-nommu-new.o build/host-content.o
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
@@ -49,36 +53,41 @@ SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 
 all: check
 
-build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
+build/frontend-check: $(FRONTEND_SOURCES) src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
 	mkdir -p build
 	$(CC) $(CFLAGS) -I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include -o $@ \
-		src/main.c src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
+		$(FRONTEND_SOURCES) src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
 
 build/nommu-allocator-check: src/nommu_new.cpp tests/nommu_allocator_test.cpp
 	mkdir -p build
 	$(CXX) -O2 -std=c++17 -Wall -Wextra -Werror -o $@ $^
 
-check: build/frontend-check build/nommu-allocator-check
+build/input-check: src/sf2000_input.c tests/input_test.c include/sf2000_input.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ src/sf2000_input.c tests/input_test.c
+
+check: build/frontend-check build/nommu-allocator-check build/input-check
 	./build/nommu-allocator-check
+	./build/input-check
 
 sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend \
-		src/main.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(CORE)
+		$(FRONTEND_SOURCES) $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(CORE)
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend
 
 demo:
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend-demo \
-		src/main.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) tests/dummy_core.c
+		$(FRONTEND_SOURCES) $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) tests/dummy_core.c
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend-demo
 
 frogui:
 	test -f "$(FROGUI_CORE)"
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
-		-o build/sf2000-frontend-frogui src/main.c $(GE_SOURCES) \
+		-o build/sf2000-frontend-frogui $(FRONTEND_SOURCES) $(GE_SOURCES) \
 		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) src/frogui_adapter.c \
 		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-frontend-frogui
@@ -89,42 +98,52 @@ browser:
 		-o build/sf2000-browser src/browser.c
 	$(SF2000_FLTHDR) -s 131072 build/sf2000-browser
 
-gambatte:
+gambatte: $(SF2000_HOST_OBJECTS)
 	$(MAKE) $(GAMBATTE_CORE) $(LIBRETRO_COMMON)
-	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-host.o src/main.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-ge-linux.o $(GE_DIR)/hcge_linux.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-ge-node.o $(GE_DIR)/hcge_node.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-audio.o $(AUDIO_SOURCES)
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-retained.o $(PLATFORM_SOURCES)
-	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
-		-c -o build/gambatte-nommu-new.o src/nommu_new.cpp
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-content.o src/content.c
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
-		-o build/sf2000-gambatte build/gambatte-host.o build/gambatte-ge-linux.o \
-		build/gambatte-ge-node.o build/gambatte-audio.o build/gambatte-retained.o \
-		build/gambatte-nommu-new.o $(GAMBATTE_CORE) \
-		$(LIBRETRO_COMMON) build/gambatte-content.o -lm -Wl,--wrap=malloc \
+		-o build/sf2000-gambatte $(SF2000_HOST_OBJECTS) $(GAMBATTE_CORE) \
+		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc \
 		-Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gambatte
 
-gpsp: $(GPSP_CORE)
-	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-host.o src/main.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-ge-linux.o $(GE_DIR)/hcge_linux.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-ge-node.o $(GE_DIR)/hcge_node.c
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-audio.o $(AUDIO_SOURCES)
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-retained.o $(PLATFORM_SOURCES)
-	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-content.o src/content.c
-	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
-		-c -o build/gpsp-nommu-new.o src/nommu_new.cpp
+gpsp: $(GPSP_CORE) $(SF2000_HOST_OBJECTS)
 	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-gpsp \
-		build/gpsp-host.o build/gpsp-ge-linux.o build/gpsp-ge-node.o \
-		build/gpsp-audio.o build/gpsp-retained.o build/gpsp-nommu-new.o $(GPSP_CORE) \
-		build/gpsp-content.o -lm \
+		$(SF2000_HOST_OBJECTS) $(GPSP_CORE) -lm \
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gpsp
+
+build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/host-input.o: src/sf2000_input.c include/sf2000_input.h include/libretro_min.h
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/host-ge-linux.o: $(GE_DIR)/hcge_linux.c
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/host-ge-node.o: $(GE_DIR)/hcge_node.c
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/host-audio.o: $(AUDIO_SOURCES)
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $(AUDIO_SOURCES)
+
+build/host-retained.o: $(PLATFORM_SOURCES)
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $(PLATFORM_SOURCES)
+
+build/host-nommu-new.o: src/nommu_new.cpp
+	mkdir -p build
+	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) -c -o $@ $<
+
+build/host-content.o: src/content.c
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
 $(GAMBATTE_DIR)/.git:
 	mkdir -p .deps
