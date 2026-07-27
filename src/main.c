@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "libretro_min.h"
 #include "ge_api.h"
+#include "hc15xx_resampler.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -29,6 +30,8 @@ extern int cacheflush(void *address, int bytes, int cache);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define ACTIVE_MARKER "/run/sf2000-frontend-active"
+#define AUDIO_BUFFER_SAMPLES 4096u
+#define AUDIO_DROP_SAMPLES 1024u
 
 struct host {
 	int fb_fd, input_fd;
@@ -43,8 +46,9 @@ struct host {
 	size_t ge_source_bytes;
 	unsigned ge_width, ge_height;
 	int pcm_fd;
-	unsigned audio_rate, audio_phase, audio_count;
-	int16_t audio_buffer[1024];
+	unsigned audio_rate, audio_head, audio_count;
+	struct hc15xx_resampler resampler;
+	int16_t audio_buffer[AUDIO_BUFFER_SAMPLES];
 	uint32_t keys;
 	enum retro_pixel_format format;
 	double fps;
@@ -58,6 +62,7 @@ static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
 static struct timespec metrics_start;
+static int kmsg_fd = -1;
 extern uint32_t reg[] __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
@@ -81,16 +86,16 @@ static void mark_active(void)
 
 static void log_kmsg(const char *message)
 {
-	char line[160];
-	int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	char line[384];
 	int length;
 
-	if (fd < 0)
+	if (kmsg_fd < 0)
+		kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	if (kmsg_fd < 0)
 		return;
 	length = snprintf(line, sizeof(line), "<6>sf2000-frontend: %s", message);
 	if (length > 0)
-		(void)write(fd, line, (size_t)length);
-	close(fd);
+		(void)write(kmsg_fd, line, (size_t)length);
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -431,13 +436,13 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.fb_width, host.fb_height, host.fb_stride * 2u);
 		log_kmsg(details);
 		first_frame = 1;
+		video_callbacks = 0;
 		(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
-		char details[160];
-		snd_pcm_sframes_t pcm_delay = -1;
+		char details[384];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -452,19 +457,12 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"video metric frames=%u elapsed_ms=%lu fps_milli=%lu presenter=%s audio=%s gba_pc=%08x\n",
-			video_callbacks, elapsed_ms, fps_milli,
-			host.ge ? "GE" : "CPU",
-			host.pcm_fd >= 0 ? "DMA" : "off", reg ? reg[15] : 0);
-		log_kmsg(details);
-		if (host.pcm_fd >= 0)
-			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DELAY, &pcm_delay);
-		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u hw_delay=%ld\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u frames=%u elapsed_ms=%lu fps_milli=%lu presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.peak,
-			host.audio_count, (long)pcm_delay);
+			host.audio_count, video_callbacks, elapsed_ms, fps_milli,
+			host.ge ? "GE" : "CPU", reg ? reg[15] : 0);
 		log_kmsg(details);
 	}
 }
@@ -553,7 +551,9 @@ static int open_audio(void)
 	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS, &software) < 0 ||
 			ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
 		goto fail;
-	log_kmsg("ALSA 32kHz mono DMA presenter ready\n");
+	if (hc15xx_resampler_init(&host.resampler, host.audio_rate, 32000u) < 0)
+		goto fail;
+	log_kmsg("ALSA 32kHz mono DMA presenter ready linear-resampler\n");
 	return 0;
 fail:
 	close(host.pcm_fd);
@@ -563,29 +563,34 @@ fail:
 
 static void audio_flush(void)
 {
-	ssize_t bytes;
-	unsigned consumed;
+	const unsigned capacity = sizeof(host.audio_buffer) /
+		sizeof(host.audio_buffer[0]);
 
-	if (host.pcm_fd < 0 || !host.audio_count)
+	if (host.pcm_fd < 0)
 		return;
-	bytes = write(host.pcm_fd, host.audio_buffer,
-		host.audio_count * sizeof(host.audio_buffer[0]));
-	if (bytes < 0) {
-		if (errno == EPIPE) {
-			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
-			audio_metrics.xruns++;
-		} else if (errno == EAGAIN)
-			audio_metrics.eagain++;
-		return;
-	}
-	consumed = (unsigned)bytes / sizeof(host.audio_buffer[0]);
-	audio_metrics.submitted += consumed;
-	if (consumed >= host.audio_count) {
-		host.audio_count = 0;
-	} else if (consumed) {
+	while (host.audio_count) {
+		unsigned contiguous = capacity - host.audio_head;
+		ssize_t bytes;
+		unsigned consumed;
+
+		if (contiguous > host.audio_count)
+			contiguous = host.audio_count;
+		bytes = write(host.pcm_fd, host.audio_buffer + host.audio_head,
+			contiguous * sizeof(host.audio_buffer[0]));
+		if (bytes < 0) {
+			if (errno == EPIPE) {
+				(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
+				audio_metrics.xruns++;
+			} else if (errno == EAGAIN)
+				audio_metrics.eagain++;
+			return;
+		}
+		consumed = (unsigned)bytes / sizeof(host.audio_buffer[0]);
+		if (!consumed)
+			return;
+		audio_metrics.submitted += consumed;
+		host.audio_head = (host.audio_head + consumed) % capacity;
 		host.audio_count -= consumed;
-		memmove(host.audio_buffer, host.audio_buffer + consumed,
-			host.audio_count * sizeof(host.audio_buffer[0]));
 	}
 }
 
@@ -597,42 +602,35 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 		return frames;
 	audio_flush();
 	for (i = 0; i < frames; i++) {
-		host.audio_phase += 32000u;
-		if (host.audio_phase < host.audio_rate)
-			continue;
-		host.audio_phase -= host.audio_rate;
-		{
-			int32_t mixed = (int32_t)samples[i * 2] +
-				samples[i * 2 + 1];
-			int sample = mixed / 2;
-			unsigned magnitude = sample < 0 ?
-				(unsigned)-sample : (unsigned)sample;
+		const unsigned capacity = sizeof(host.audio_buffer) /
+			sizeof(host.audio_buffer[0]);
+		int16_t sample;
+		int emitted = hc15xx_resampler_push_stereo_s16(&host.resampler,
+			samples[i * 2], samples[i * 2 + 1], &sample);
+		unsigned magnitude;
 
-			audio_metrics.generated++;
-			if (magnitude > audio_metrics.peak)
-				audio_metrics.peak = magnitude;
-			if (host.audio_count == sizeof(host.audio_buffer) /
-					sizeof(host.audio_buffer[0]))
-				audio_flush();
-			if (host.audio_count < sizeof(host.audio_buffer) /
-					sizeof(host.audio_buffer[0]))
-				host.audio_buffer[host.audio_count++] =
-					(int16_t)sample;
-			else {
-				/*
-				 * Keep current audio after a long nonblocking stall.  Retaining
-				 * the oldest full block makes recovery audibly race through
-				 * stale sound before catching the game again.
-				 */
-				audio_metrics.dropped += host.audio_count;
-				host.audio_count = 0;
-				host.audio_buffer[host.audio_count++] =
-					(int16_t)sample;
-			}
+		if (emitted <= 0)
+			continue;
+		magnitude = sample < 0 ? (unsigned)-(int)sample : (unsigned)sample;
+		audio_metrics.generated++;
+		if (magnitude > audio_metrics.peak)
+			audio_metrics.peak = magnitude;
+		if (host.audio_count == capacity)
+			audio_flush();
+		if (host.audio_count == capacity) {
+			unsigned discard = AUDIO_DROP_SAMPLES;
+
+			if (discard > host.audio_count)
+				discard = host.audio_count;
+			host.audio_head = (host.audio_head + discard) % capacity;
+			host.audio_count -= discard;
+			audio_metrics.dropped += discard;
 		}
+		host.audio_buffer[(host.audio_head + host.audio_count) % capacity] =
+			sample;
+		host.audio_count++;
 	}
-	if (host.audio_count == sizeof(host.audio_buffer) /
-			sizeof(host.audio_buffer[0]))
+	if (host.audio_count >= 1024u)
 		audio_flush();
 	return frames;
 }

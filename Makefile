@@ -14,6 +14,8 @@ COMMON_DIR := .deps/libretro-common
 SF2000_LINUX_DIR ?= ../sf2000_linux
 GE_DIR := $(SF2000_LINUX_DIR)/ge
 GE_SOURCES := $(GE_DIR)/hcge_linux.c $(GE_DIR)/hcge_node.c
+AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
+AUDIO_SOURCES := $(AUDIO_DIR)/hc15xx_resampler.c
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
@@ -35,7 +37,8 @@ COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_compat.o
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
-SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float -I$(GE_DIR)
+SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float \
+	-I$(GE_DIR) -I$(AUDIO_DIR)
 SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 	-Wl,--gc-sections
 
@@ -43,10 +46,10 @@ SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
 
 all: check
 
-build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES)
+build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES) $(AUDIO_SOURCES)
 	mkdir -p build
-	$(CC) $(CFLAGS) -I$(GE_DIR) -o $@ src/main.c src/content.c \
-		tests/dummy_core.c $(GE_SOURCES)
+	$(CC) $(CFLAGS) -I$(GE_DIR) -I$(AUDIO_DIR) -o $@ \
+		src/main.c src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES)
 
 check: build/frontend-check
 
@@ -54,20 +57,21 @@ sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend \
-		src/main.c $(GE_SOURCES) $(CORE)
+		src/main.c $(GE_SOURCES) $(AUDIO_SOURCES) $(CORE)
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend
 
 demo:
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend-demo \
-		src/main.c $(GE_SOURCES) tests/dummy_core.c
+		src/main.c $(GE_SOURCES) $(AUDIO_SOURCES) tests/dummy_core.c
 	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend-demo
 
 frogui:
 	test -f "$(FROGUI_CORE)"
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
-		-o build/sf2000-frontend-frogui src/main.c $(GE_SOURCES) src/frogui_adapter.c \
+		-o build/sf2000-frontend-frogui src/main.c $(GE_SOURCES) \
+		$(AUDIO_SOURCES) src/frogui_adapter.c \
 		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-frontend-frogui
 
@@ -83,12 +87,14 @@ gambatte:
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-host.o src/main.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-ge-linux.o $(GE_DIR)/hcge_linux.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-ge-node.o $(GE_DIR)/hcge_node.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-audio.o $(AUDIO_SOURCES)
 	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
 		-c -o build/gambatte-nommu-new.o src/nommu_new.cpp
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gambatte-content.o src/content.c
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
 		-o build/sf2000-gambatte build/gambatte-host.o build/gambatte-ge-linux.o \
-		build/gambatte-ge-node.o build/gambatte-nommu-new.o $(GAMBATTE_CORE) \
+		build/gambatte-ge-node.o build/gambatte-audio.o \
+		build/gambatte-nommu-new.o $(GAMBATTE_CORE) \
 		$(LIBRETRO_COMMON) build/gambatte-content.o -lm -Wl,--wrap=malloc \
 		-Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free
@@ -99,12 +105,14 @@ gpsp: $(GPSP_CORE)
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-host.o src/main.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-ge-linux.o $(GE_DIR)/hcge_linux.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-ge-node.o $(GE_DIR)/hcge_node.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-audio.o $(AUDIO_SOURCES)
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o build/gpsp-content.o src/content.c
 	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
 		-c -o build/gpsp-nommu-new.o src/nommu_new.cpp
 	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-gpsp \
 		build/gpsp-host.o build/gpsp-ge-linux.o build/gpsp-ge-node.o \
-		build/gpsp-nommu-new.o $(GPSP_CORE) build/gpsp-content.o -lm \
+		build/gpsp-audio.o build/gpsp-nommu-new.o $(GPSP_CORE) \
+		build/gpsp-content.o -lm \
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
 	$(SF2000_FLTHDR) -s 524288 build/sf2000-gpsp
 
