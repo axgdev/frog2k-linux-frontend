@@ -69,6 +69,10 @@ static unsigned interval_late_frames;
 static unsigned interval_max_late_us;
 static unsigned interval_max_run_us;
 static unsigned previous_xruns;
+static unsigned profile_frame_counter;
+static unsigned uncapped_mode;
+static unsigned uncapped_chord_latched;
+static unsigned audio_suppressed;
 extern uint32_t reg[] __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
@@ -100,6 +104,16 @@ static void start_metrics_logging(void)
 	 */
 	metrics_fd = open(METRICS_PATH,
 		O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+}
+
+static void reset_metric_window(void)
+{
+	video_callbacks = 0;
+	interval_late_frames = 0;
+	interval_max_late_us = 0;
+	interval_max_run_us = 0;
+	previous_xruns = audio_metrics.xruns;
+	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -224,6 +238,12 @@ static bool environment(unsigned command, void *data)
 			 * work as its legacy 65536 Hz output.
 			 */
 			variable->value = "32768";
+			return true;
+		}
+		if (variable && variable->key &&
+				strcmp(variable->key, "gpsp_frameskip") == 0) {
+			/* Benchmark and normal modes both present every emulated frame. */
+			variable->value = "disabled";
 			return true;
 		}
 		return false;
@@ -469,7 +489,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		log_kmsg(details);
 		first_frame = 1;
 		video_callbacks = 0;
-		(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
+		reset_metric_window();
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
 		unsigned long elapsed_ms;
@@ -489,14 +509,16 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u max_run_us=%u presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u mode=%s presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
 			audio_metrics.peak,
-			host.audio_count, video_callbacks, elapsed_ms, fps_milli,
+			host.audio_count, audio_suppressed, video_callbacks,
+			elapsed_ms, fps_milli,
 			pacing_resets, interval_late_frames, interval_max_late_us,
-			interval_max_run_us, host.ge ? "GE" : "CPU",
+			interval_max_run_us, uncapped_mode ? "uncapped" : "normal",
+			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0);
 		if (metrics_fd >= 0)
 			(void)write(metrics_fd, details, strlen(details));
@@ -645,9 +667,13 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 {
 	size_t i;
 
+	if (uncapped_mode) {
+		audio_suppressed += frames > UINT_MAX - audio_suppressed ?
+			UINT_MAX - audio_suppressed : (unsigned)frames;
+		return frames;
+	}
 	if (host.pcm_fd < 0 || !host.audio_rate)
 		return frames;
-	audio_flush();
 	for (i = 0; i < frames; i++) {
 		const unsigned capacity = sizeof(host.audio_buffer) /
 			sizeof(host.audio_buffer[0]);
@@ -707,9 +733,45 @@ static unsigned key_bit(unsigned code)
 	}
 }
 
+static void set_uncapped_mode(unsigned enable)
+{
+	char details[128];
+
+	enable = !!enable;
+	if (uncapped_mode == enable)
+		return;
+	uncapped_mode = enable;
+	host.audio_head = 0;
+	host.audio_count = 0;
+	if (host.pcm_fd >= 0) {
+		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
+		(void)hc15xx_resampler_init(&host.resampler, host.audio_rate,
+			32000u);
+		if (!enable)
+			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
+	}
+	reset_metric_window();
+	snprintf(details, sizeof(details),
+		"mode event mode=%s audio=%s pacing=%s full_frame=1\n",
+		enable ? "uncapped" : "normal",
+		enable ? "suppressed" : "enabled",
+		enable ? "disabled" : "core");
+	if (metrics_fd >= 0)
+		(void)write(metrics_fd, details, strlen(details));
+#ifdef __mips__
+	(void)hc15xx_retained_mark(
+		(volatile struct hc15xx_retained_log *)(uintptr_t)
+			HC15XX_RETAINED_UNCACHED,
+		"frontend-mode", 0x61u, enable);
+#endif
+}
+
 static void input_poll(void)
 {
 	struct input_event event;
+	const unsigned chord =
+		(1u << RETRO_DEVICE_ID_JOYPAD_SELECT) |
+		(1u << RETRO_DEVICE_ID_JOYPAD_R);
 
 	while (host.input_fd >= 0 && read(host.input_fd, &event, sizeof(event)) ==
 			(ssize_t)sizeof(event)) {
@@ -720,10 +782,26 @@ static void input_poll(void)
 			host.keys |= bit;
 		else
 			host.keys &= ~bit;
+		/*
+		 * Detect the chord at the event boundary, not after draining the
+		 * fd.  An uncapped core can receive press and release in one poll;
+		 * inspecting only the final key state would then miss the toggle.
+		 */
+		if (event.value && (host.keys & chord) == chord &&
+				!uncapped_chord_latched) {
+			uncapped_chord_latched = 1;
+			set_uncapped_mode(!uncapped_mode);
+		} else if (!event.value && (bit & chord)) {
+			uncapped_chord_latched = 0;
+		}
 	}
 	if ((host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_START)) &&
 			(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_L)))
 		stopping = 1;
+	if ((host.keys & chord) != chord &&
+			!(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_SELECT)) &&
+			!(host.keys & (1u << RETRO_DEVICE_ID_JOYPAD_R)))
+		uncapped_chord_latched = 0;
 }
 
 static int16_t input_state(unsigned port, unsigned device, unsigned index,
@@ -731,6 +809,10 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index,
 {
 	(void)index;
 	if (port || device != RETRO_DEVICE_JOYPAD || id >= 32)
+		return 0;
+	if (uncapped_chord_latched &&
+			(id == RETRO_DEVICE_ID_JOYPAD_SELECT ||
+			 id == RETRO_DEVICE_ID_JOYPAD_R))
 		return 0;
 	return (host.keys & (1u << id)) != 0;
 }
@@ -834,6 +916,7 @@ int main(int argc, char **argv)
 	struct retro_game_info game = { 0 };
 	struct timespec deadline;
 	long frame_ns;
+	int deadline_valid = 1;
 	struct sigaction fault_action;
 
 	if (argc != 2) {
@@ -907,31 +990,53 @@ int main(int argc, char **argv)
 			frame_ns, host.audio_rate);
 		log_kmsg(details);
 	}
-	log_kmsg("frontend running START+L exits\n");
+	log_kmsg("frontend running START+L exits SELECT+R toggles uncapped full-frame mode\n");
 	start_metrics_logging();
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
 		struct timespec run_start;
 		struct timespec now;
-		uint64_t run_us;
+		int profile_sample;
 
-		(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
+		/*
+		 * One sampled frame per second is enough to identify long core
+		 * stalls.  Taking a second clock syscall on every frame measurably
+		 * penalizes gpSP on this no-MMU single-core target.
+		 */
+		profile_sample = !uncapped_mode &&
+			(++profile_frame_counter % 60u) == 0;
+		if (profile_sample)
+			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
 		retro_run();
+		if (uncapped_mode) {
+			deadline_valid = 0;
+			continue;
+		}
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		if (profile_sample) {
+			uint64_t run_us =
+				(uint64_t)(now.tv_sec - run_start.tv_sec) * 1000000u;
+
+			if (now.tv_nsec >= run_start.tv_nsec)
+				run_us += (uint64_t)(now.tv_nsec - run_start.tv_nsec) /
+					1000u;
+			else
+				run_us -= (uint64_t)(run_start.tv_nsec - now.tv_nsec) /
+					1000u;
+			if (run_us > interval_max_run_us)
+				interval_max_run_us = run_us > UINT_MAX ?
+					UINT_MAX : (unsigned)run_us;
+		}
+		if (!deadline_valid) {
+			deadline = now;
+			deadline_valid = 1;
+		}
 		deadline.tv_nsec += frame_ns;
 		while (deadline.tv_nsec >= 1000000000L) {
 			deadline.tv_nsec -= 1000000000L;
 			deadline.tv_sec++;
 		}
-		(void)clock_gettime(CLOCK_MONOTONIC, &now);
-		run_us = (uint64_t)(now.tv_sec - run_start.tv_sec) * 1000000u;
-		if (now.tv_nsec >= run_start.tv_nsec)
-			run_us += (uint64_t)(now.tv_nsec - run_start.tv_nsec) / 1000u;
-		else
-			run_us -= (uint64_t)(run_start.tv_nsec - now.tv_nsec) / 1000u;
-		if (run_us > interval_max_run_us)
-			interval_max_run_us = run_us > UINT_MAX ?
-				UINT_MAX : (unsigned)run_us;
 		if (now.tv_sec > deadline.tv_sec ||
 				(now.tv_sec == deadline.tv_sec &&
 				 now.tv_nsec > deadline.tv_nsec)) {

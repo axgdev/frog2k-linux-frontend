@@ -18,6 +18,14 @@ from a game to the browser, then from the browser to the console.
 Files below a case-insensitive `GBA` directory launch the statically linked
 gpSP runner with its MIPS dynarec enabled.
 
+While a core is running, SELECT+R toggles an uncapped full-frame benchmark.
+Every libretro video callback is still presented through GE, but audio
+conversion/output and frame pacing are suspended so the measured FPS exposes
+the core, host, cache, and graphics-presentation ceiling. Press SELECT+R again
+to resume normal pacing and freshly prime ALSA. Mode transitions and
+300-frame windows are retained in `loglinux.txt`; `mode=uncapped`,
+`fps_milli`, and `suppressed` identify a valid benchmark interval.
+
 The core host implements the libretro lifecycle, ROM full-path loading,
 absolute frame pacing, SF2000 evdev joypad mapping, GE-accelerated RGB565
 conversion/scaling, and 32 kHz mono ALSA DMA playback. Presentation uses two
@@ -25,9 +33,10 @@ ownership-tracked GE source surfaces, allowing emulation to overlap the
 previous frame's scale operation without ever modifying an in-flight surface.
 Audio uses a 4096-sample circular staging queue and the platform's portable
 fixed-point linear stereo-to-mono resampler; ALSA underrun recovery retains
-current audio instead of replaying stale blocks. ALSA is primed with 128 ms of
-audio lead. Low-rate metrics include interval underruns, late frames, maximum
-lateness, and maximum core-frame runtime; one write appends each record to
+current audio instead of replaying stale blocks. Whole-period batching halves
+PCM write calls, while ALSA is primed with 128 ms of audio lead. Low-rate
+metrics include interval underruns, late frames, maximum lateness, and sampled
+core-frame runtime; one write appends each record to
 tmpfs, and the platform logger imports it only after gameplay. The real-time
 thread therefore never sends periodic telemetry through printk, UART, or FAT.
 One compact cumulative health word is also written to the platform's retained
