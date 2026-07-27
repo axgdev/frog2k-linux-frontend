@@ -519,12 +519,14 @@ static int open_audio(void)
 	software.period_step = 1;
 	software.avail_min = 1024;
 	/*
-	 * Prime four periods before starting SND0.  One period gave the weak
-	 * single CPU no scheduling margin: normal logger/GE bursts repeatedly
-	 * underrran ALSA even though the core's average production rate was
-	 * correct.  The 128 ms reservoir stays well below the 256 ms ring.
+	 * HC1512 SND0 must be armed when the first complete period is
+	 * published.  Deferring START for several periods can leave its
+	 * producer/consumer handshake stopped with a full ALSA ring: writes
+	 * then return EAGAIN forever without an ALSA xrun.  The 918 MHz
+	 * performance state supplies the scheduling margin that was formerly
+	 * sought with a larger hardware start threshold.
 	 */
-	software.start_threshold = 4096;
+	software.start_threshold = 1024;
 	software.stop_threshold = 8192;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
