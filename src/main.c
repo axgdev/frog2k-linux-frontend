@@ -33,6 +33,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define METRICS_PATH "/run/sf2000-frontend-metrics"
 #define AUDIO_BUFFER_SAMPLES 4096u
 #define AUDIO_DROP_SAMPLES 1024u
+#define AUDIO_CONVERT_SAMPLES 1024u
 
 struct host {
 	int fb_fd, input_fd;
@@ -68,6 +69,7 @@ static int metrics_fd = -1;
 static unsigned interval_late_frames;
 static unsigned interval_max_late_us;
 static unsigned interval_max_run_us;
+static unsigned interval_sampled_present_us;
 static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
@@ -112,6 +114,7 @@ static void reset_metric_window(void)
 	interval_late_frames = 0;
 	interval_max_late_us = 0;
 	interval_max_run_us = 0;
+	interval_sampled_present_us = 0;
 	previous_xruns = audio_metrics.xruns;
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 }
@@ -370,10 +373,21 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	if (!first_frame)
 		log_kmsg("GE first present copy begin\n");
 	if (host.format == RETRO_PIXEL_FORMAT_RGB565) {
-		for (y = 0; y < height; y++)
-			memcpy(source_buffer + y * width,
-				(const uint8_t *)data + y * pitch,
-				width * sizeof(uint16_t));
+		size_t row_bytes = width * sizeof(uint16_t);
+
+		/*
+		 * gpSP exposes a tightly packed 240x160 RGB565 surface.  Copy it
+		 * as one transfer rather than making 160 libc calls per frame.
+		 * Cores with padded scanlines, including Gambatte, retain the
+		 * general row-copy path.
+		 */
+		if (pitch == row_bytes)
+			memcpy(source_buffer, data, row_bytes * height);
+		else
+			for (y = 0; y < height; y++)
+				memcpy(source_buffer + y * width,
+					(const uint8_t *)data + y * pitch,
+					row_bytes);
 	} else {
 		for (y = 0; y < height; y++) {
 			const uint32_t *input = (const uint32_t *)
@@ -433,6 +447,8 @@ static void video(const void *data, unsigned width, unsigned height,
 {
 	unsigned out_w, out_h, left, top;
 	uint32_t hash;
+	struct timespec present_start;
+	int profile_present;
 
 	video_callbacks++;
 	if (!data || !host.fb || !width || !height) {
@@ -457,6 +473,9 @@ static void video(const void *data, unsigned width, unsigned height,
 	out_h = host.fb_height;
 	left = 0;
 	top = 0;
+	profile_present = first_frame && (video_callbacks % 300u) == 0;
+	if (profile_present)
+		(void)clock_gettime(CLOCK_MONOTONIC, &present_start);
 	if (ge_present(data, width, height, pitch, out_w, out_h, left, top) < 0) {
 		if (host.ge) {
 			unsigned i;
@@ -474,6 +493,22 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.ge_pending = 0;
 		}
 		cpu_present(data, width, height, pitch, out_w, out_h, left, top);
+	}
+	if (profile_present) {
+		struct timespec present_end;
+		uint64_t present_us;
+
+		(void)clock_gettime(CLOCK_MONOTONIC, &present_end);
+		present_us = (uint64_t)(present_end.tv_sec - present_start.tv_sec) *
+			1000000u;
+		if (present_end.tv_nsec >= present_start.tv_nsec)
+			present_us += (uint64_t)
+				(present_end.tv_nsec - present_start.tv_nsec) / 1000u;
+		else
+			present_us -= (uint64_t)
+				(present_start.tv_nsec - present_end.tv_nsec) / 1000u;
+		interval_sampled_present_us = present_us > UINT_MAX ?
+			UINT_MAX : (unsigned)present_us;
 	}
 	if (!first_frame) {
 		char details[160];
@@ -494,7 +529,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		struct timespec now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
-		char details[384];
+		char details[448];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -509,7 +544,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u mode=%s presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u mode=%s presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -517,7 +552,8 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.audio_count, audio_suppressed, video_callbacks,
 			elapsed_ms, fps_milli,
 			pacing_resets, interval_late_frames, interval_max_late_us,
-			interval_max_run_us, uncapped_mode ? "uncapped" : "normal",
+			interval_max_run_us, interval_sampled_present_us,
+			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0);
 		if (metrics_fd >= 0)
@@ -535,6 +571,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_late_frames = 0;
 		interval_max_late_us = 0;
 		interval_max_run_us = 0;
+		interval_sampled_present_us = 0;
 	}
 }
 
@@ -665,7 +702,8 @@ static void audio_flush(void)
 
 static size_t audio_batch(const int16_t *samples, size_t frames)
 {
-	size_t i;
+	int16_t converted[AUDIO_CONVERT_SAMPLES];
+	size_t offset = 0;
 
 	if (uncapped_mode) {
 		audio_suppressed += frames > UINT_MAX - audio_suppressed ?
@@ -674,34 +712,45 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 	}
 	if (host.pcm_fd < 0 || !host.audio_rate)
 		return frames;
-	for (i = 0; i < frames; i++) {
-		const unsigned capacity = sizeof(host.audio_buffer) /
-			sizeof(host.audio_buffer[0]);
-		int16_t sample;
-		int emitted = hc15xx_resampler_push_stereo_s16(&host.resampler,
-			samples[i * 2], samples[i * 2 + 1], &sample);
-		unsigned magnitude;
+	while (offset < frames) {
+		size_t input_frames = frames - offset;
+		size_t produced;
+		size_t i;
 
-		if (emitted <= 0)
-			continue;
-		magnitude = sample < 0 ? (unsigned)-(int)sample : (unsigned)sample;
-		audio_metrics.generated++;
-		if (magnitude > audio_metrics.peak)
-			audio_metrics.peak = magnitude;
-		if (host.audio_count == capacity)
-			audio_flush();
-		if (host.audio_count == capacity) {
-			unsigned discard = AUDIO_DROP_SAMPLES;
+		if (input_frames > AUDIO_CONVERT_SAMPLES)
+			input_frames = AUDIO_CONVERT_SAMPLES;
+		produced = hc15xx_resampler_process_stereo_s16(&host.resampler,
+			samples + offset * 2, input_frames, converted,
+			AUDIO_CONVERT_SAMPLES);
+		offset += input_frames;
+		for (i = 0; i < produced; ++i) {
+			const unsigned capacity = sizeof(host.audio_buffer) /
+				sizeof(host.audio_buffer[0]);
+			int16_t sample = converted[i];
+			unsigned magnitude;
 
-			if (discard > host.audio_count)
-				discard = host.audio_count;
-			host.audio_head = (host.audio_head + discard) % capacity;
-			host.audio_count -= discard;
-			audio_metrics.dropped += discard;
+			magnitude = sample < 0 ? (unsigned)-(int)sample :
+				(unsigned)sample;
+			audio_metrics.generated++;
+			if (magnitude > audio_metrics.peak)
+				audio_metrics.peak = magnitude;
+			if (host.audio_count == capacity)
+				audio_flush();
+			if (host.audio_count == capacity) {
+				unsigned discard = AUDIO_DROP_SAMPLES;
+
+				if (discard > host.audio_count)
+					discard = host.audio_count;
+				host.audio_head = (host.audio_head + discard) %
+					capacity;
+				host.audio_count -= discard;
+				audio_metrics.dropped += discard;
+			}
+			host.audio_buffer[
+				(host.audio_head + host.audio_count) % capacity] =
+				sample;
+			host.audio_count++;
 		}
-		host.audio_buffer[(host.audio_head + host.audio_count) % capacity] =
-			sample;
-		host.audio_count++;
 	}
 	if (host.audio_count >= 1024u)
 		audio_flush();
@@ -1004,8 +1053,8 @@ int main(int argc, char **argv)
 		 * stalls.  Taking a second clock syscall on every frame measurably
 		 * penalizes gpSP on this no-MMU single-core target.
 		 */
-		profile_sample = !uncapped_mode &&
-			(++profile_frame_counter % 60u) == 0;
+		profile_sample = (++profile_frame_counter %
+			(uncapped_mode ? 300u : 60u)) == 0;
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
 		retro_run();

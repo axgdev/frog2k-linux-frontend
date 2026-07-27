@@ -1,4 +1,5 @@
 CC ?= cc
+CXX ?= c++
 CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-uclinux-uclibc-
 SF2000_CC ?= $(CROSS_COMPILE)gcc
 SF2000_CXX ?= $(CROSS_COMPILE)g++
@@ -53,7 +54,12 @@ build/frontend-check: src/main.c src/content.c tests/dummy_core.c include/libret
 	$(CC) $(CFLAGS) -I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include -o $@ \
 		src/main.c src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
 
-check: build/frontend-check
+build/nommu-allocator-check: src/nommu_new.cpp tests/nommu_allocator_test.cpp
+	mkdir -p build
+	$(CXX) -O2 -std=c++17 -Wall -Wextra -Werror -o $@ $^
+
+check: build/frontend-check build/nommu-allocator-check
+	./build/nommu-allocator-check
 
 sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }

@@ -24,7 +24,9 @@ conversion/output and frame pacing are suspended so the measured FPS exposes
 the core, host, cache, and graphics-presentation ceiling. Press SELECT+R again
 to resume normal pacing and freshly prime ALSA. Mode transitions and
 300-frame windows are retained in `loglinux.txt`; `mode=uncapped`,
-`fps_milli`, and `suppressed` identify a valid benchmark interval.
+`fps_milli`, `suppressed`, `sampled_max_run_us`, and
+`sampled_present_us` identify a valid benchmark interval and separate core
+cost from display-presentation cost.
 
 The core host implements the libretro lifecycle, ROM full-path loading,
 absolute frame pacing, SF2000 evdev joypad mapping, GE-accelerated RGB565
@@ -36,7 +38,7 @@ fixed-point linear stereo-to-mono resampler; ALSA underrun recovery retains
 current audio instead of replaying stale blocks. Whole-period batching halves
 PCM write calls, while ALSA is primed with 128 ms of audio lead. Low-rate
 metrics include interval underruns, late frames, maximum lateness, and sampled
-core-frame runtime; one write appends each record to
+core-frame and GE-presentation runtime; one write appends each record to
 tmpfs, and the platform logger imports it only after gameplay. The real-time
 thread therefore never sends periodic telemetry through printk, UART, or FAT.
 One compact cumulative health word is also written to the platform's retained
@@ -94,3 +96,9 @@ modules; register programming, cache ownership, DMA and interrupt policy stay
 outside the cores. This keeps later emulator-specific optimization optional
 and lets Linux and RTOS frontends share the same conversion and acceleration
 contracts.
+
+The bFLT C++ runtime maps each allocation independently and returns it to the
+kernel on `free`. A fixed bump arena is unsafe for switching cores in one
+NOMMU process because it cannot reclaim a departed core's allocations.
+`make check` includes repeated allocation/free/reallocation cycles to prevent
+that lifecycle leak from returning.

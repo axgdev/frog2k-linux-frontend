@@ -9,20 +9,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-struct allocation_header {
+struct alignas(16) allocation_header {
 	std::size_t mapping_bytes;
 	std::size_t requested_bytes;
 };
-
-/*
- * Keep transient core allocations out of the fixed arena once they are large
- * enough to consume a substantial fraction of it.  Gambatte has a 90 KiB
- * allocation after several smaller permanent allocations; treating that as
- * "small" exhausted the arena even though the system still had free memory.
- */
-static constexpr std::size_t mmap_threshold = 64u * 1024u;
-static unsigned char small_arena[256u * 1024u];
-static std::size_t small_arena_used;
 
 static void allocation_trace(const char *result, std::size_t bytes, void *memory)
 {
@@ -48,18 +38,15 @@ static void *mapping_allocate(std::size_t bytes)
 		errno = ENOMEM;
 		return nullptr;
 	}
-	if (total < mmap_threshold) {
-		const std::size_t aligned = (total + 15u) & ~std::size_t(15u);
-		if (aligned > sizeof(small_arena) - small_arena_used)
-			return nullptr;
-		allocation_header *header = reinterpret_cast<allocation_header *>(
-			small_arena + small_arena_used);
-		small_arena_used += aligned;
-		header->mapping_bytes = ~std::size_t(0);
-		header->requested_bytes = bytes;
-		return header + 1;
-	}
-	const std::size_t mapping_bytes = (total + 4095u) & ~std::size_t(4095u);
+	/*
+	 * NOMMU cannot grow a conventional brk heap safely around independently
+	 * loaded flat binaries.  Give every allocation an anonymous mapping so
+	 * free() returns it to the kernel.  The former fixed bump arena never
+	 * reclaimed transient objects and eventually turned valid workloads
+	 * into an unrecoverable C++ exception.
+	 */
+	const std::size_t mapping_bytes = (total + 4095u) &
+		~std::size_t(4095u);
 	void *mapping = mmap(nullptr, mapping_bytes, PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
@@ -77,8 +64,6 @@ static void mapping_release(void *memory)
 	if (memory) {
 		allocation_header *header =
 			static_cast<allocation_header *>(memory) - 1;
-		if (header->mapping_bytes == ~std::size_t(0))
-			return;
 		if (header->mapping_bytes)
 			(void)munmap(header, header->mapping_bytes);
 	}
@@ -118,6 +103,10 @@ extern "C" void *__wrap_realloc(void *memory, std::size_t bytes)
 		return nullptr;
 	}
 	old_header = static_cast<allocation_header *>(memory) - 1;
+	if (bytes <= old_header->mapping_bytes - sizeof(allocation_header)) {
+		old_header->requested_bytes = bytes;
+		return memory;
+	}
 	replacement = mapping_allocate(bytes);
 	if (!replacement)
 		return nullptr;
