@@ -61,6 +61,7 @@ static struct host host = { .fb_fd = -1, .input_fd = -1, .pcm_fd = -1,
 static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
+static unsigned pacing_resets;
 static struct timespec metrics_start;
 static int kmsg_fd = -1;
 static int metrics_logging;
@@ -505,12 +506,13 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u frames=%u elapsed_ms=%lu fps_milli=%lu presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.peak,
 			host.audio_count, video_callbacks, elapsed_ms, fps_milli,
-			host.ge ? "GE" : "CPU", reg ? reg[15] : 0);
+			pacing_resets, host.ge ? "GE" : "CPU",
+			reg ? reg[15] : 0);
 		log_kmsg(details);
 	}
 }
@@ -914,13 +916,31 @@ int main(int argc, char **argv)
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
+		struct timespec now;
+
 		retro_run();
 		deadline.tv_nsec += frame_ns;
 		while (deadline.tv_nsec >= 1000000000L) {
 			deadline.tv_nsec -= 1000000000L;
 			deadline.tv_sec++;
 		}
-		(void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		if (now.tv_sec > deadline.tv_sec ||
+				(now.tv_sec == deadline.tv_sec &&
+				 now.tv_nsec > deadline.tv_nsec)) {
+			/*
+			 * A slow frame is already visible and its audio is current.
+			 * Replaying every missed deadline only floods ALSA and makes
+			 * the game race through stale work before returning to real
+			 * time.  Rebase once and continue at the core's requested
+			 * cadence.
+			 */
+			deadline = now;
+			pacing_resets++;
+		} else {
+			(void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
+				&deadline, NULL);
+		}
 	}
 	retro_unload_game();
 	retro_deinit();

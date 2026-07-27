@@ -27,7 +27,9 @@ Audio uses a 4096-sample circular staging queue and the platform's portable
 fixed-point linear stereo-to-mono resampler; ALSA underrun recovery retains
 current audio instead of replaying stale blocks. Low-rate metrics use a
 persistent descriptor and never query ALSA synchronously from the emulation
-thread.
+thread. Absolute frame pacing rebases after a missed deadline rather than
+running a burst of stale frames; this prevents expensive first-frame setup from
+overflowing the audio path.
 
 The frontend publishes a
 PID-validated activity marker before ROM loading so low-priority system
