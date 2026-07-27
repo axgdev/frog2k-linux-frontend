@@ -31,11 +31,14 @@ thread. Absolute frame pacing rebases after a missed deadline rather than
 running a burst of stale frames; this prevents expensive first-frame setup from
 overflowing the audio path.
 
-The frontend publishes a
-PID-validated activity marker before ROM loading so low-priority system
-profiling cannot contend with emulator reads or real-time audio on the single
-SD/MMC channel. The integrated image covers browsing, ROM loading, emulation,
-video, audio, input, saves, and clean process handoff.
+The SF2000 platform supervisor establishes a synchronized, RAM-journaled
+performance session before launching this application. That keeps logging
+diagnostics intact without allowing logger FAT traffic to contend with ROM
+reads or real-time audio on the single SD/MMC channel. Owning the session in
+the supervisor also covers browser/core exec handoff and failure exits without
+putting platform policy in this application. The integrated image covers
+browsing, ROM loading, emulation, video, audio, input, saves, and clean process
+handoff.
 
 Build checks:
 

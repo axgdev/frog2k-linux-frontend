@@ -29,7 +29,6 @@ extern int cacheflush(void *address, int bytes, int cache);
 #endif
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
-#define ACTIVE_MARKER "/run/sf2000-frontend-active"
 #define AUDIO_BUFFER_SAMPLES 4096u
 #define AUDIO_DROP_SAMPLES 1024u
 
@@ -70,21 +69,6 @@ static struct {
 	unsigned generated, submitted, dropped;
 	unsigned peak, eagain, xruns;
 } audio_metrics;
-
-static void mark_active(void)
-{
-	char text[24];
-	int active = open(ACTIVE_MARKER,
-		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-	int length;
-
-	if (active < 0)
-		return;
-	length = snprintf(text, sizeof(text), "%ld\n", (long)getpid());
-	if (length > 0)
-		(void)write(active, text, (size_t)length);
-	close(active);
-}
 
 static void log_kmsg(const char *message)
 {
@@ -844,7 +828,6 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	log_kmsg("entry\n");
-	mark_active();
 	memset(&fault_action, 0, sizeof(fault_action));
 	fault_action.sa_sigaction = fault_signal;
 	fault_action.sa_flags = SA_SIGINFO;
@@ -947,7 +930,6 @@ int main(int argc, char **argv)
 	close_platform();
 	free((void *)game.data);
 	log_kmsg("returned cleanly\n");
-	(void)unlink(ACTIVE_MARKER);
 	/* The process owns the core and all of its mappings.  Avoid running
 	 * C++ static destructors after retro_deinit(); they duplicate core
 	 * teardown and are not part of the libretro lifecycle. */
