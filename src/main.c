@@ -28,6 +28,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #endif
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
+#define ACTIVE_MARKER "/run/sf2000-frontend-active"
 
 struct host {
 	int fb_fd, input_fd;
@@ -43,7 +44,7 @@ struct host {
 	unsigned ge_width, ge_height;
 	int pcm_fd;
 	unsigned audio_rate, audio_phase, audio_count;
-	int16_t audio_buffer[2048];
+	int16_t audio_buffer[1024];
 	uint32_t keys;
 	enum retro_pixel_format format;
 	double fps;
@@ -60,8 +61,23 @@ static struct timespec metrics_start;
 extern uint32_t reg[] __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
-	unsigned peak, eagain, xruns, stale_resets;
+	unsigned peak, eagain, xruns;
 } audio_metrics;
+
+static void mark_active(void)
+{
+	char text[24];
+	int active = open(ACTIVE_MARKER,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	int length;
+
+	if (active < 0)
+		return;
+	length = snprintf(text, sizeof(text), "%ld\n", (long)getpid());
+	if (length > 0)
+		(void)write(active, text, (size_t)length);
+	close(active);
+}
 
 static void log_kmsg(const char *message)
 {
@@ -444,11 +460,11 @@ static void video(const void *data, unsigned width, unsigned height,
 		if (host.pcm_fd >= 0)
 			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DELAY, &pcm_delay);
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u stale=%u peak=%u queued=%u hw_delay=%ld\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u hw_delay=%ld\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
-			audio_metrics.xruns, audio_metrics.stale_resets,
-			audio_metrics.peak, host.audio_count, (long)pcm_delay);
+			audio_metrics.xruns, audio_metrics.peak,
+			host.audio_count, (long)pcm_delay);
 		log_kmsg(details);
 	}
 }
@@ -609,7 +625,6 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 				 * stale sound before catching the game again.
 				 */
 				audio_metrics.dropped += host.audio_count;
-				audio_metrics.stale_resets++;
 				host.audio_count = 0;
 				host.audio_buffer[host.audio_count++] =
 					(int16_t)sample;
@@ -769,6 +784,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	log_kmsg("entry\n");
+	mark_active();
 	memset(&fault_action, 0, sizeof(fault_action));
 	fault_action.sa_sigaction = fault_signal;
 	fault_action.sa_flags = SA_SIGINFO;
@@ -776,7 +792,6 @@ int main(int argc, char **argv)
 	(void)sigaction(SIGILL, &fault_action, NULL);
 	(void)sigaction(SIGBUS, &fault_action, NULL);
 	(void)sigaction(SIGSEGV, &fault_action, NULL);
-	(void)unlink(READY_MARKER);
 	if (open_platform() < 0) {
 		log_kmsg("platform open failed\n");
 		perror("sf2000-frontend: platform");
@@ -853,6 +868,7 @@ int main(int argc, char **argv)
 	close_platform();
 	free((void *)game.data);
 	log_kmsg("returned cleanly\n");
+	(void)unlink(ACTIVE_MARKER);
 	/* The process owns the core and all of its mappings.  Avoid running
 	 * C++ static destructors after retro_deinit(); they duplicate core
 	 * teardown and are not part of the libretro lifecycle. */

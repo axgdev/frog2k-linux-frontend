@@ -19,6 +19,7 @@
 extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
+#define ACTIVE_MARKER "/run/sf2000-frontend-active"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
 #define GPSP_PATH "/usr/bin/sf2000-gpsp"
 #define SD_ROOT "/mnt/sd"
@@ -65,6 +66,21 @@ static struct entry entries[MAX_ENTRIES];
 static unsigned entry_count, selected, first;
 static uint16_t framebuffer[MAX_FRAME_PIXELS];
 static int framebuffer_fd = -1;
+
+static void mark_active(void)
+{
+	char text[24];
+	int active = open(ACTIVE_MARKER,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	int length;
+
+	if (active < 0)
+		return;
+	length = snprintf(text, sizeof(text), "%ld\n", (long)getpid());
+	if (length > 0)
+		(void)write(active, text, (size_t)length);
+	close(active);
+}
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
 
@@ -323,6 +339,7 @@ int main(void)
 	struct input_event event;
 	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 	int input, start = 0, l = 0, exit_latched = 0;
+	mark_active();
 
 	if (fb < 0 || ioctl(fb, FBIOGET_FSCREENINFO, &fix) < 0 ||
 			ioctl(fb, FBIOGET_VSCREENINFO, &var) < 0 || var.bits_per_pixel != 16)
@@ -375,6 +392,7 @@ int main(void)
 	}
 done:
 	log_message("returned cleanly");
+	(void)unlink(ACTIVE_MARKER);
 	close(input); close(fb);
 	_exit(0);
 }

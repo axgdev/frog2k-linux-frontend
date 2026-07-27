@@ -17,13 +17,12 @@ case-insensitive `GB` or `GBC` directory launches Gambatte. START+L returns
 from a game to the browser, then from the browser to the console.
 
 The core host implements the libretro lifecycle, ROM full-path loading,
-absolute frame pacing, SF2000 evdev joypad mapping, direct RGB565 framebuffer
-copy, XRGB8888 conversion, and centered downscaling. Native 320x240 RGB565 is
-published with one contiguous copy, and identical frames are not repeatedly
-written into the live scanout. Audio is consumed without blocking until the
-Linux ALSA DMA service has a stable application ABI. This first device test
-therefore covers browsing, ROM loading, emulation, video, input, saves, and
-clean process handoff, but is silent.
+absolute frame pacing, SF2000 evdev joypad mapping, GE-accelerated RGB565
+conversion/scaling, and 32 kHz mono ALSA DMA playback. It publishes a
+PID-validated activity marker before ROM loading so low-priority system
+profiling cannot contend with emulator reads or real-time audio on the single
+SD/MMC channel. The integrated image covers browsing, ROM loading, emulation,
+video, audio, input, saves, and clean process handoff.
 
 Build checks:
 
