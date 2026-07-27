@@ -34,6 +34,14 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_BUFFER_SAMPLES 4096u
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
+#define AUDIO_OUTPUT_RATE 32000u
+#define AUDIO_RECOVERY_RATE 32256u
+#define AUDIO_DRAIN_RATE 31744u
+#define AUDIO_DELAY_LOW 4096
+#define AUDIO_DELAY_TARGET 5632
+#define AUDIO_DELAY_HIGH 7168
+#define AUDIO_FEEDBACK_INTERVAL 8u
+#define GE_SOURCE_BUFFERS 3u
 
 struct host {
 	int fb_fd, input_fd;
@@ -43,12 +51,15 @@ struct host {
 	uint32_t fb_phys;
 	hcge_context ge_storage;
 	hcge_context *ge;
-	uint16_t *ge_source[2];
-	uint32_t ge_source_phys[2], ge_source_handle[2];
+	uint16_t *ge_source[GE_SOURCE_BUFFERS];
+	uint32_t ge_source_phys[GE_SOURCE_BUFFERS];
+	uint32_t ge_source_handle[GE_SOURCE_BUFFERS];
 	size_t ge_source_bytes;
 	unsigned ge_width, ge_height, ge_buffers, ge_next, ge_pending;
 	int pcm_fd;
 	unsigned audio_rate, audio_head, audio_count;
+	unsigned audio_resample_rate, audio_feedback_counter;
+	snd_pcm_sframes_t audio_delay;
 	struct hc15xx_resampler resampler;
 	int16_t audio_buffer[AUDIO_BUFFER_SAMPLES];
 	uint32_t keys;
@@ -529,7 +540,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		struct timespec now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
-		char details[448];
+		char details[512];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -544,12 +555,13 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u mode=%s presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u mode=%s presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
 			audio_metrics.peak,
-			host.audio_count, audio_suppressed, video_callbacks,
+			host.audio_count, (long)host.audio_delay,
+			host.audio_resample_rate, audio_suppressed, video_callbacks,
 			elapsed_ms, fps_milli,
 			pacing_resets, interval_late_frames, interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
@@ -634,7 +646,7 @@ static int open_audio(void)
 	pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_SUBFORMAT,
 		SNDRV_PCM_SUBFORMAT_STD);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS, 1);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE, 32000);
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE, AUDIO_OUTPUT_RATE);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 1024);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 8192);
@@ -645,20 +657,23 @@ static int open_audio(void)
 	software.period_step = 1;
 	software.avail_min = 1024;
 	/*
-	 * Prime four periods before START.  The kernel's HC15xx ring guard
-	 * prevents the equal-cursor/full-ring ambiguity, so this provides
-	 * 128 ms of scheduling lead without publishing a completely full
-	 * hardware ring or adding the full 256 ms buffer as input latency.
+	 * Prime seven periods before START.  The HC15xx ring guard keeps this
+	 * below the ambiguous completely-full cursor state.  The resulting
+	 * 224 ms lead absorbs ROM-cache and dynarec bursts on the single CPU.
 	 */
-	software.start_threshold = 4096;
+	software.start_threshold = AUDIO_DELAY_HIGH;
 	software.stop_threshold = 8192;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
 	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS, &software) < 0 ||
 			ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
 		goto fail;
-	if (hc15xx_resampler_init(&host.resampler, host.audio_rate, 32000u) < 0)
+	if (hc15xx_resampler_init(&host.resampler, host.audio_rate,
+			AUDIO_OUTPUT_RATE) < 0)
 		goto fail;
+	host.audio_resample_rate = AUDIO_OUTPUT_RATE;
+	host.audio_delay = 0;
+	host.audio_feedback_counter = 0;
 	log_kmsg("ALSA 32kHz mono DMA presenter ready linear-resampler\n");
 	return 0;
 fail:
@@ -687,6 +702,12 @@ static void audio_flush(void)
 			if (errno == EPIPE) {
 				(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
 				audio_metrics.xruns++;
+				if (hc15xx_resampler_set_output_rate(
+						&host.resampler,
+						AUDIO_RECOVERY_RATE) == 0)
+					host.audio_resample_rate =
+						AUDIO_RECOVERY_RATE;
+				host.audio_feedback_counter = 0;
 			} else if (errno == EAGAIN)
 				audio_metrics.eagain++;
 			return;
@@ -698,6 +719,84 @@ static void audio_flush(void)
 		host.audio_head = (host.audio_head + consumed) % capacity;
 		host.audio_count -= consumed;
 	}
+}
+
+static void audio_update_feedback(void)
+{
+	snd_pcm_sframes_t delay;
+	unsigned rate;
+
+	if (host.pcm_fd < 0 ||
+			++host.audio_feedback_counter < AUDIO_FEEDBACK_INTERVAL)
+		return;
+	host.audio_feedback_counter = 0;
+	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DELAY, &delay) < 0)
+		return;
+	host.audio_delay = delay;
+	rate = host.audio_resample_rate;
+	if (delay < AUDIO_DELAY_LOW)
+		rate = AUDIO_RECOVERY_RATE;
+	else if (delay >= AUDIO_DELAY_HIGH)
+		rate = AUDIO_DRAIN_RATE;
+	else if ((rate == AUDIO_RECOVERY_RATE &&
+			delay >= AUDIO_DELAY_TARGET) ||
+			(rate == AUDIO_DRAIN_RATE &&
+			 delay <= AUDIO_DELAY_TARGET))
+		rate = AUDIO_OUTPUT_RATE;
+	if (rate > host.audio_rate)
+		rate = host.audio_rate;
+	if (rate != host.audio_resample_rate &&
+			hc15xx_resampler_set_output_rate(&host.resampler, rate) == 0)
+		host.audio_resample_rate = rate;
+}
+
+static void audio_enqueue(const int16_t *samples, unsigned count)
+{
+	const unsigned capacity = sizeof(host.audio_buffer) /
+		sizeof(host.audio_buffer[0]);
+	unsigned tail;
+	unsigned first;
+	unsigned i;
+
+	if (!count)
+		return;
+	audio_metrics.generated += count;
+	for (i = 0; i < count; ++i) {
+		unsigned magnitude = samples[i] < 0 ?
+			(unsigned)-(int)samples[i] : (unsigned)samples[i];
+
+		if (magnitude > audio_metrics.peak)
+			audio_metrics.peak = magnitude;
+	}
+	if (count > capacity - host.audio_count)
+		audio_flush();
+	while (count > capacity - host.audio_count) {
+		unsigned discard = AUDIO_DROP_SAMPLES;
+
+		if (discard > host.audio_count)
+			discard = host.audio_count;
+		if (!discard)
+			break;
+		host.audio_head = (host.audio_head + discard) % capacity;
+		host.audio_count -= discard;
+		audio_metrics.dropped += discard;
+	}
+	if (count > capacity - host.audio_count) {
+		unsigned skip = count - (capacity - host.audio_count);
+
+		samples += skip;
+		count -= skip;
+		audio_metrics.dropped += skip;
+	}
+	tail = (host.audio_head + host.audio_count) % capacity;
+	first = capacity - tail;
+	if (first > count)
+		first = count;
+	memcpy(host.audio_buffer + tail, samples, first * sizeof(*samples));
+	if (first < count)
+		memcpy(host.audio_buffer, samples + first,
+			(count - first) * sizeof(*samples));
+	host.audio_count += count;
 }
 
 static size_t audio_batch(const int16_t *samples, size_t frames)
@@ -712,10 +811,10 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 	}
 	if (host.pcm_fd < 0 || !host.audio_rate)
 		return frames;
+	audio_update_feedback();
 	while (offset < frames) {
 		size_t input_frames = frames - offset;
 		size_t produced;
-		size_t i;
 
 		if (input_frames > AUDIO_CONVERT_SAMPLES)
 			input_frames = AUDIO_CONVERT_SAMPLES;
@@ -723,34 +822,7 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 			samples + offset * 2, input_frames, converted,
 			AUDIO_CONVERT_SAMPLES);
 		offset += input_frames;
-		for (i = 0; i < produced; ++i) {
-			const unsigned capacity = sizeof(host.audio_buffer) /
-				sizeof(host.audio_buffer[0]);
-			int16_t sample = converted[i];
-			unsigned magnitude;
-
-			magnitude = sample < 0 ? (unsigned)-(int)sample :
-				(unsigned)sample;
-			audio_metrics.generated++;
-			if (magnitude > audio_metrics.peak)
-				audio_metrics.peak = magnitude;
-			if (host.audio_count == capacity)
-				audio_flush();
-			if (host.audio_count == capacity) {
-				unsigned discard = AUDIO_DROP_SAMPLES;
-
-				if (discard > host.audio_count)
-					discard = host.audio_count;
-				host.audio_head = (host.audio_head + discard) %
-					capacity;
-				host.audio_count -= discard;
-				audio_metrics.dropped += discard;
-			}
-			host.audio_buffer[
-				(host.audio_head + host.audio_count) % capacity] =
-				sample;
-			host.audio_count++;
-		}
+		audio_enqueue(converted, (unsigned)produced);
 	}
 	if (host.audio_count >= 1024u)
 		audio_flush();
@@ -795,7 +867,10 @@ static void set_uncapped_mode(unsigned enable)
 	if (host.pcm_fd >= 0) {
 		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
 		(void)hc15xx_resampler_init(&host.resampler, host.audio_rate,
-			32000u);
+			AUDIO_OUTPUT_RATE);
+		host.audio_resample_rate = AUDIO_OUTPUT_RATE;
+		host.audio_delay = 0;
+		host.audio_feedback_counter = 0;
 		if (!enable)
 			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
 	}
@@ -899,7 +974,7 @@ static int open_platform(void)
 		host.ge = &host.ge_storage;
 		host.ge_source_bytes = (size_t)host.fb_width * host.fb_height *
 			sizeof(uint16_t);
-		for (i = 0; i < 2; i++) {
+		for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
 			host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
 				(unsigned int)host.ge_source_bytes,
 				&host.ge_source_phys[i], &host.ge_source_handle[i]);
@@ -918,9 +993,10 @@ static int open_platform(void)
 			(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 			snprintf(details, sizeof(details),
-				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u\n",
+				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x source2=%08x bytes=%lu buffers=%u\n",
 				host.fb_phys, host.ge_source_phys[0],
 				host.ge_source_phys[1],
+				host.ge_source_phys[2],
 				(unsigned long)host.ge_source_bytes, host.ge_buffers);
 			log_kmsg(details);
 		}

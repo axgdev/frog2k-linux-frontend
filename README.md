@@ -30,15 +30,18 @@ cost from display-presentation cost.
 
 The core host implements the libretro lifecycle, ROM full-path loading,
 absolute frame pacing, SF2000 evdev joypad mapping, GE-accelerated RGB565
-conversion/scaling, and 32 kHz mono ALSA DMA playback. Presentation uses two
+conversion/scaling, and 32 kHz mono ALSA DMA playback. Presentation uses three
 ownership-tracked GE source surfaces, allowing emulation to overlap the
 previous frame's scale operation without ever modifying an in-flight surface.
 Audio uses a 4096-sample circular staging queue and the platform's portable
 fixed-point linear stereo-to-mono resampler; ALSA underrun recovery retains
-current audio instead of replaying stale blocks. Whole-period batching halves
-PCM write calls, while ALSA is primed with 128 ms of audio lead. Low-rate
+current audio instead of replaying stale blocks. The resampler uses ALSA delay
+feedback to rebuild drained lead with a bounded 0.8% correction, then returns
+to the exact nominal rate. Whole-period batching halves PCM write calls, while
+ALSA is primed with 224 ms of audio lead. Low-rate
 metrics include interval underruns, late frames, maximum lateness, and sampled
-core-frame and GE-presentation runtime; one write appends each record to
+core-frame and GE-presentation runtime, plus PCM delay and active resampling
+rate; one write appends each record to
 tmpfs, and the platform logger imports it only after gameplay. The real-time
 thread therefore never sends periodic telemetry through printk, UART, or FAT.
 One compact cumulative health word is also written to the platform's retained
