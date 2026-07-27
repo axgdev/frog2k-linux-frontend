@@ -43,7 +43,7 @@ struct host {
 	unsigned ge_width, ge_height;
 	int pcm_fd;
 	unsigned audio_rate, audio_phase, audio_count;
-	int16_t audio_buffer[1024];
+	int16_t audio_buffer[2048];
 	uint32_t keys;
 	enum retro_pixel_format format;
 	double fps;
@@ -60,7 +60,7 @@ static struct timespec metrics_start;
 extern uint32_t reg[] __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
-	unsigned peak, eagain, xruns;
+	unsigned peak, eagain, xruns, stale_resets;
 } audio_metrics;
 
 static void log_kmsg(const char *message)
@@ -420,7 +420,8 @@ static void video(const void *data, unsigned width, unsigned height,
 		struct timespec now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
-		char details[128];
+		char details[160];
+		snd_pcm_sframes_t pcm_delay = -1;
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -440,11 +441,14 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.ge ? "GE" : "CPU",
 			host.pcm_fd >= 0 ? "DMA" : "off", reg ? reg[15] : 0);
 		log_kmsg(details);
+		if (host.pcm_fd >= 0)
+			(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DELAY, &pcm_delay);
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u stale=%u peak=%u queued=%u hw_delay=%ld\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
-			audio_metrics.xruns, audio_metrics.peak, host.audio_count);
+			audio_metrics.xruns, audio_metrics.stale_resets,
+			audio_metrics.peak, host.audio_count, (long)pcm_delay);
 		log_kmsg(details);
 	}
 }
@@ -526,7 +530,7 @@ static int open_audio(void)
 	 * performance state supplies the scheduling margin that was formerly
 	 * sought with a larger hardware start threshold.
 	 */
-	software.start_threshold = 1024;
+	software.start_threshold = 2048;
 	software.stop_threshold = 8192;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
@@ -598,8 +602,18 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 					sizeof(host.audio_buffer[0]))
 				host.audio_buffer[host.audio_count++] =
 					(int16_t)sample;
-			else
-				audio_metrics.dropped++;
+			else {
+				/*
+				 * Keep current audio after a long nonblocking stall.  Retaining
+				 * the oldest full block makes recovery audibly race through
+				 * stale sound before catching the game again.
+				 */
+				audio_metrics.dropped += host.audio_count;
+				audio_metrics.stale_resets++;
+				host.audio_count = 0;
+				host.audio_buffer[host.audio_count++] =
+					(int16_t)sample;
+			}
 		}
 	}
 	if (host.audio_count == sizeof(host.audio_buffer) /
