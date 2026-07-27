@@ -25,9 +25,15 @@ ownership-tracked GE source surfaces, allowing emulation to overlap the
 previous frame's scale operation without ever modifying an in-flight surface.
 Audio uses a 4096-sample circular staging queue and the platform's portable
 fixed-point linear stereo-to-mono resampler; ALSA underrun recovery retains
-current audio instead of replaying stale blocks. Low-rate metrics use a
-persistent descriptor and never query ALSA synchronously from the emulation
-thread. Absolute frame pacing rebases after a missed deadline rather than
+current audio instead of replaying stale blocks. ALSA is primed with 128 ms of
+audio lead. Low-rate metrics include interval underruns, late frames, maximum
+lateness, and maximum core-frame runtime; one write appends each record to
+tmpfs, and the platform logger imports it only after gameplay. The real-time
+thread therefore never sends periodic telemetry through printk, UART, or FAT.
+One compact cumulative health word is also written to the platform's retained
+RAM ring, allowing post-reset diagnosis without placing logging in a syscall
+or storage path.
+Absolute frame pacing rebases after a missed deadline rather than
 running a burst of stale frames; this prevents expensive first-frame setup from
 overflowing the audio path.
 

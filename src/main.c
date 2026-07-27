@@ -4,6 +4,7 @@
 #include "libretro_min.h"
 #include "ge_api.h"
 #include "hc15xx_resampler.h"
+#include "hc15xx_retained.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -29,6 +30,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #endif
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
+#define METRICS_PATH "/run/sf2000-frontend-metrics"
 #define AUDIO_BUFFER_SAMPLES 4096u
 #define AUDIO_DROP_SAMPLES 1024u
 
@@ -62,8 +64,11 @@ static int first_frame;
 static unsigned video_callbacks;
 static unsigned pacing_resets;
 static struct timespec metrics_start;
-static int kmsg_fd = -1;
-static int metrics_logging;
+static int metrics_fd = -1;
+static unsigned interval_late_frames;
+static unsigned interval_max_late_us;
+static unsigned interval_max_run_us;
+static unsigned previous_xruns;
 extern uint32_t reg[] __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
@@ -73,34 +78,28 @@ static struct {
 static void log_kmsg(const char *message)
 {
 	char line[384];
-	int fd;
+	int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	int length;
 
-	if (metrics_logging) {
-		if (kmsg_fd < 0)
-			kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-		fd = kmsg_fd;
-	} else {
-		fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-	}
 	if (fd < 0)
 		return;
 	length = snprintf(line, sizeof(line), "<6>sf2000-frontend: %s", message);
 	if (length > 0)
 		(void)write(fd, line, (size_t)length);
-	if (!metrics_logging)
-		close(fd);
+	close(fd);
 }
 
 static void start_metrics_logging(void)
 {
 	/*
-	 * Linux rate-limits writes per open /dev/kmsg file.  Keep startup
-	 * messages on short-lived files, then retain one low-rate descriptor
-	 * for the timed loop so metric collection cannot add open/close stalls.
+	 * printk synchronously feeds the 115200-baud console.  Even a single
+	 * detailed line can consume enough of the weak CPU's audio lead to
+	 * underrun SND0.  Append telemetry to tmpfs with one write instead;
+	 * sf2000-logd imports it into the persistent journal after the
+	 * performance session ends.
 	 */
-	metrics_logging = 1;
-	kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	metrics_fd = open(METRICS_PATH,
+		O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -490,14 +489,30 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u peak=%u queued=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u max_run_us=%u presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
-			audio_metrics.xruns, audio_metrics.peak,
+			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
+			audio_metrics.peak,
 			host.audio_count, video_callbacks, elapsed_ms, fps_milli,
-			pacing_resets, host.ge ? "GE" : "CPU",
+			pacing_resets, interval_late_frames, interval_max_late_us,
+			interval_max_run_us, host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0);
-		log_kmsg(details);
+		if (metrics_fd >= 0)
+			(void)write(metrics_fd, details, strlen(details));
+#ifdef __mips__
+		(void)hc15xx_retained_mark(
+			(volatile struct hc15xx_retained_log *)(uintptr_t)
+				HC15XX_RETAINED_UNCACHED,
+			"frontend-audio", 0x60u,
+			((audio_metrics.xruns > 0xffffu ? 0xffffu :
+				audio_metrics.xruns) << 16) |
+			(pacing_resets > 0xffffu ? 0xffffu : pacing_resets));
+#endif
+		previous_xruns = audio_metrics.xruns;
+		interval_late_frames = 0;
+		interval_max_late_us = 0;
+		interval_max_run_us = 0;
 	}
 }
 
@@ -571,14 +586,12 @@ static int open_audio(void)
 	software.period_step = 1;
 	software.avail_min = 1024;
 	/*
-	 * HC1512 SND0 must be armed when the first complete period is
-	 * published.  Deferring START for several periods can leave its
-	 * producer/consumer handshake stopped with a full ALSA ring: writes
-	 * then return EAGAIN forever without an ALSA xrun.  The 918 MHz
-	 * performance state supplies the scheduling margin that was formerly
-	 * sought with a larger hardware start threshold.
+	 * Prime four periods before START.  The kernel's HC15xx ring guard
+	 * prevents the equal-cursor/full-ring ambiguity, so this provides
+	 * 128 ms of scheduling lead without publishing a completely full
+	 * hardware ring or adding the full 256 ms buffer as input latency.
 	 */
-	software.start_threshold = 2048;
+	software.start_threshold = 4096;
 	software.stop_threshold = 8192;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
@@ -899,8 +912,11 @@ int main(int argc, char **argv)
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
+		struct timespec run_start;
 		struct timespec now;
+		uint64_t run_us;
 
+		(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
 		retro_run();
 		deadline.tv_nsec += frame_ns;
 		while (deadline.tv_nsec >= 1000000000L) {
@@ -908,9 +924,30 @@ int main(int argc, char **argv)
 			deadline.tv_sec++;
 		}
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		run_us = (uint64_t)(now.tv_sec - run_start.tv_sec) * 1000000u;
+		if (now.tv_nsec >= run_start.tv_nsec)
+			run_us += (uint64_t)(now.tv_nsec - run_start.tv_nsec) / 1000u;
+		else
+			run_us -= (uint64_t)(run_start.tv_nsec - now.tv_nsec) / 1000u;
+		if (run_us > interval_max_run_us)
+			interval_max_run_us = run_us > UINT_MAX ?
+				UINT_MAX : (unsigned)run_us;
 		if (now.tv_sec > deadline.tv_sec ||
 				(now.tv_sec == deadline.tv_sec &&
 				 now.tv_nsec > deadline.tv_nsec)) {
+			uint64_t late_us =
+				(uint64_t)(now.tv_sec - deadline.tv_sec) * 1000000u;
+
+			if (now.tv_nsec >= deadline.tv_nsec)
+				late_us += (uint64_t)(now.tv_nsec - deadline.tv_nsec) /
+					1000u;
+			else
+				late_us -= (uint64_t)(deadline.tv_nsec - now.tv_nsec) /
+					1000u;
+			interval_late_frames++;
+			if (late_us > interval_max_late_us)
+				interval_max_late_us = late_us > UINT_MAX ?
+					UINT_MAX : (unsigned)late_us;
 			/*
 			 * A slow frame is already visible and its audio is current.
 			 * Replaying every missed deadline only floods ALSA and makes
@@ -924,6 +961,10 @@ int main(int argc, char **argv)
 			(void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
 				&deadline, NULL);
 		}
+	}
+	if (metrics_fd >= 0) {
+		close(metrics_fd);
+		metrics_fd = -1;
 	}
 	retro_unload_game();
 	retro_deinit();
