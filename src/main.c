@@ -81,6 +81,8 @@ static unsigned interval_late_frames;
 static unsigned interval_max_late_us;
 static unsigned interval_max_run_us;
 static unsigned interval_sampled_present_us;
+static unsigned interval_ge_stage_frames;
+static unsigned interval_buffered_frames;
 static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
@@ -127,6 +129,8 @@ static void reset_metric_window(void)
 	interval_max_late_us = 0;
 	interval_max_run_us = 0;
 	interval_sampled_present_us = 0;
+	interval_ge_stage_frames = 0;
+	interval_buffered_frames = 0;
 	previous_xruns = audio_metrics.xruns;
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 }
@@ -361,6 +365,10 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	HCGERectangle source;
 	HCGERectangle destination;
 	uint16_t *source_buffer;
+	uint32_t source_phys;
+	uint32_t direct_phys = 0;
+	size_t source_bytes;
+	int direct;
 	unsigned source_index;
 	unsigned y;
 
@@ -369,6 +377,24 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 			(size_t)width * height * sizeof(uint16_t) >
 				host.ge_source_bytes)
 		return -1;
+	source_bytes = pitch * height;
+	if (height && source_bytes / height != pitch)
+		return -1;
+	/*
+	 * NOMMU maps physically contiguous allocations in KSEG0. In paced mode,
+	 * let GE stage the core-owned RGB565 callback surface into a managed
+	 * source and fence that short copy before the callback returns. The later
+	 * stretch remains asynchronous. This observes libretro's callback
+	 * lifetime while removing the full-frame CPU copy. Uncapped mode keeps
+	 * CPU-buffered delivery so GE and the core overlap without an extra fence.
+	 */
+	if (!uncapped_mode && host.format == RETRO_PIXEL_FORMAT_RGB565 &&
+			pitch >= (size_t)width * sizeof(uint16_t) &&
+			source_bytes <= UINT_MAX &&
+			(uintptr_t)data + source_bytes >= (uintptr_t)data &&
+			(uintptr_t)data + source_bytes <= 0xa0000000u)
+		direct_phys = hcge_linux_cached_phys(data);
+	direct = direct_phys != 0;
 	/*
 	 * Keep one complete source surface available while the GE consumes the
 	 * other.  The barrier before reuse is the ownership boundary: the CPU
@@ -383,8 +409,41 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	source_index = host.ge_next;
 	source_buffer = host.ge_source[source_index];
 	if (!first_frame)
-		log_kmsg("GE first present copy begin\n");
-	if (host.format == RETRO_PIXEL_FORMAT_RGB565) {
+		log_kmsg("GE first present source prepare begin\n");
+	if (direct) {
+		/*
+		 * Queue order first completes an older stretch, if any, then copies
+		 * this callback surface. The fence releases the core buffer while
+		 * the managed snapshot remains valid for asynchronous scaling.
+		 */
+		if (hcge_linux_cache_clean(host.ge, (void *)data,
+				(unsigned int)source_bytes) < 0)
+			return -1;
+		state = &host.ge->state;
+		memset(state, 0, sizeof(*state));
+		state->render_options = HCGE_DSRO_NONE;
+		state->drawingflags = HCGE_DSDRAW_NOFX;
+		state->blittingflags = HCGE_DSBLIT_NOFX;
+		state->destination.config.format = HCGE_DSPF_RGB16;
+		state->destination.config.size.w = (int)width;
+		state->destination.config.size.h = (int)height;
+		state->source.config.format = HCGE_DSPF_RGB16;
+		state->source.config.size.w = (int)width;
+		state->source.config.size.h = (int)height;
+		state->dst.phys = host.ge_source_phys[source_index];
+		state->dst.pitch = width * sizeof(uint16_t);
+		state->src.phys = direct_phys;
+		state->src.pitch = pitch;
+		state->accel = HCGE_DFXL_BLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		source = (HCGERectangle){ 0, 0, (int)width, (int)height };
+		if (!hcge_blit(host.ge, &source, 0, 0) ||
+				hcge_engine_sync(host.ge) < 0)
+			return -1;
+		host.ge_pending = 0;
+		source_phys = host.ge_source_phys[source_index];
+		interval_ge_stage_frames++;
+	} else if (host.format == RETRO_PIXEL_FORMAT_RGB565) {
 		size_t row_bytes = width * sizeof(uint16_t);
 
 		/*
@@ -400,6 +459,11 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 				memcpy(source_buffer + y * width,
 					(const uint8_t *)data + y * pitch,
 					row_bytes);
+		source_phys = host.ge_source_phys[source_index];
+		if (hcge_linux_cache_clean(host.ge, source_buffer,
+				width * height * sizeof(uint16_t)) < 0)
+			return -1;
+		interval_buffered_frames++;
 	} else {
 		for (y = 0; y < height; y++) {
 			const uint32_t *input = (const uint32_t *)
@@ -410,10 +474,12 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 			for (x = 0; x < width; x++)
 				output[x] = xrgb8888_to_565(input[x]);
 		}
+		source_phys = host.ge_source_phys[source_index];
+		if (hcge_linux_cache_clean(host.ge, source_buffer,
+				width * height * sizeof(uint16_t)) < 0)
+			return -1;
+		interval_buffered_frames++;
 	}
-	if (hcge_linux_cache_clean(host.ge, source_buffer,
-			width * height * sizeof(uint16_t)) < 0)
-		return -1;
 	if (!first_frame)
 		log_kmsg("GE first present cache clean\n");
 	state = &host.ge->state;
@@ -429,7 +495,7 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->source.config.size.h = (int)height;
 	state->dst.phys = host.fb_phys;
 	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
-	state->src.phys = host.ge_source_phys[source_index];
+	state->src.phys = source_phys;
 	state->src.pitch = width * sizeof(uint16_t);
 	state->accel = HCGE_DFXL_STRETCHBLIT;
 	hcge_set_state(host.ge, state, state->accel);
@@ -569,7 +635,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u mode=%s presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u mode=%s presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -579,6 +645,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			elapsed_ms, fps_milli,
 			pacing_resets, interval_late_frames, interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
+			interval_ge_stage_frames, interval_buffered_frames,
 			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0);
@@ -598,6 +665,8 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_max_late_us = 0;
 		interval_max_run_us = 0;
 		interval_sampled_present_us = 0;
+		interval_ge_stage_frames = 0;
+		interval_buffered_frames = 0;
 	}
 }
 
