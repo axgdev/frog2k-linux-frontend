@@ -41,10 +41,10 @@ struct host {
 	uint32_t fb_phys;
 	hcge_context ge_storage;
 	hcge_context *ge;
-	uint16_t *ge_source;
-	uint32_t ge_source_phys, ge_source_handle;
+	uint16_t *ge_source[2];
+	uint32_t ge_source_phys[2], ge_source_handle[2];
 	size_t ge_source_bytes;
-	unsigned ge_width, ge_height;
+	unsigned ge_width, ge_height, ge_buffers, ge_next, ge_pending;
 	int pcm_fd;
 	unsigned audio_rate, audio_head, audio_count;
 	struct hc15xx_resampler resampler;
@@ -63,6 +63,7 @@ static int first_frame;
 static unsigned video_callbacks;
 static struct timespec metrics_start;
 static int kmsg_fd = -1;
+static int metrics_logging;
 extern uint32_t reg[] __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped;
@@ -87,15 +88,34 @@ static void mark_active(void)
 static void log_kmsg(const char *message)
 {
 	char line[384];
+	int fd;
 	int length;
 
-	if (kmsg_fd < 0)
-		kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-	if (kmsg_fd < 0)
+	if (metrics_logging) {
+		if (kmsg_fd < 0)
+			kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+		fd = kmsg_fd;
+	} else {
+		fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	}
+	if (fd < 0)
 		return;
 	length = snprintf(line, sizeof(line), "<6>sf2000-frontend: %s", message);
 	if (length > 0)
-		(void)write(kmsg_fd, line, (size_t)length);
+		(void)write(fd, line, (size_t)length);
+	if (!metrics_logging)
+		close(fd);
+}
+
+static void start_metrics_logging(void)
+{
+	/*
+	 * Linux rate-limits writes per open /dev/kmsg file.  Keep startup
+	 * messages on short-lived files, then retain one low-rate descriptor
+	 * for the timed loop so metric collection cannot add open/close stalls.
+	 */
+	metrics_logging = 1;
+	kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -321,32 +341,47 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	hcge_state *state;
 	HCGERectangle source;
 	HCGERectangle destination;
+	uint16_t *source_buffer;
+	unsigned source_index;
 	unsigned y;
 
-	if (!host.ge || !host.ge_source || width > host.fb_width ||
+	if (!host.ge || !host.ge_buffers || width > host.fb_width ||
 			height > host.fb_height ||
 			(size_t)width * height * sizeof(uint16_t) >
 				host.ge_source_bytes)
 		return -1;
+	/*
+	 * Keep one complete source surface available while the GE consumes the
+	 * other.  The barrier before reuse is the ownership boundary: the CPU
+	 * never modifies a surface referenced by an outstanding node.  A
+	 * single-buffer allocation remains a correct synchronous fallback.
+	 */
+	if (host.ge_pending >= host.ge_buffers) {
+		if (hcge_engine_sync(host.ge) < 0)
+			return -1;
+		host.ge_pending = 0;
+	}
+	source_index = host.ge_next;
+	source_buffer = host.ge_source[source_index];
 	if (!first_frame)
 		log_kmsg("GE first present copy begin\n");
 	if (host.format == RETRO_PIXEL_FORMAT_RGB565) {
 		for (y = 0; y < height; y++)
-			memcpy(host.ge_source + y * width,
+			memcpy(source_buffer + y * width,
 				(const uint8_t *)data + y * pitch,
 				width * sizeof(uint16_t));
 	} else {
 		for (y = 0; y < height; y++) {
 			const uint32_t *input = (const uint32_t *)
 				((const uint8_t *)data + y * pitch);
-			uint16_t *output = host.ge_source + y * width;
+			uint16_t *output = source_buffer + y * width;
 			unsigned x;
 
 			for (x = 0; x < width; x++)
 				output[x] = xrgb8888_to_565(input[x]);
 		}
 	}
-	if (hcge_linux_cache_clean(host.ge, host.ge_source,
+	if (hcge_linux_cache_clean(host.ge, source_buffer,
 			width * height * sizeof(uint16_t)) < 0)
 		return -1;
 	if (!first_frame)
@@ -364,7 +399,7 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->source.config.size.h = (int)height;
 	state->dst.phys = host.fb_phys;
 	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
-	state->src.phys = host.ge_source_phys;
+	state->src.phys = host.ge_source_phys[source_index];
 	state->src.pitch = width * sizeof(uint16_t);
 	state->accel = HCGE_DFXL_STRETCHBLIT;
 	hcge_set_state(host.ge, state, state->accel);
@@ -375,10 +410,15 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		return -1;
 	if (!first_frame)
 		log_kmsg("GE first present submitted\n");
-	if (hcge_engine_sync(host.ge) < 0)
-		return -1;
-	if (!first_frame)
+	host.ge_pending++;
+	host.ge_next = (host.ge_next + 1u) % host.ge_buffers;
+	/* Make the first frame observable before publishing READY_MARKER. */
+	if (!first_frame) {
+		if (hcge_engine_sync(host.ge) < 0)
+			return -1;
+		host.ge_pending = 0;
 		log_kmsg("GE first present synchronized\n");
+	}
 	host.ge_width = width;
 	host.ge_height = height;
 	return 0;
@@ -415,11 +455,19 @@ static void video(const void *data, unsigned width, unsigned height,
 	top = 0;
 	if (ge_present(data, width, height, pitch, out_w, out_h, left, top) < 0) {
 		if (host.ge) {
+			unsigned i;
+
 			log_kmsg("GE present failed; using CPU renderer\n");
-			hcge_linux_free_buffer(host.ge, host.ge_source_handle);
-			host.ge_source = NULL;
+			(void)hcge_engine_sync(host.ge);
+			for (i = 0; i < host.ge_buffers; i++) {
+				(void)hcge_linux_free_buffer(host.ge,
+					host.ge_source_handle[i]);
+				host.ge_source[i] = NULL;
+			}
 			hcge_close_context(host.ge);
 			host.ge = NULL;
+			host.ge_buffers = 0;
+			host.ge_pending = 0;
 		}
 		cpu_present(data, width, height, pitch, out_w, out_h, left, top);
 	}
@@ -716,26 +764,34 @@ static int open_platform(void)
 	if (host.input_fd < 0)
 		return -1;
 	if (host.fb_phys && hcge_open_context(&host.ge_storage) == 0) {
+		unsigned i;
+
 		host.ge = &host.ge_storage;
 		host.ge_source_bytes = (size_t)host.fb_width * host.fb_height *
 			sizeof(uint16_t);
-		host.ge_source = hcge_linux_alloc_buffer(host.ge,
-			(unsigned int)host.ge_source_bytes, &host.ge_source_phys,
-			&host.ge_source_handle);
-		if (!host.ge_source) {
+		for (i = 0; i < 2; i++) {
+			host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
+				(unsigned int)host.ge_source_bytes,
+				&host.ge_source_phys[i], &host.ge_source_handle[i]);
+			if (!host.ge_source[i])
+				break;
+			host.ge_buffers++;
+		}
+		if (!host.ge_buffers) {
 			hcge_close_context(host.ge);
 			host.ge = NULL;
 		} else {
-			char details[160];
+			char details[192];
 
 			memset(host.fb, 0, host.fb_bytes);
 #ifdef __mips__
 			(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 			snprintf(details, sizeof(details),
-				"GE RGB565 stretch presenter ready fb_phys=%08x source=%08x bytes=%lu\n",
-				host.fb_phys, host.ge_source_phys,
-				(unsigned long)host.ge_source_bytes);
+				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u\n",
+				host.fb_phys, host.ge_source_phys[0],
+				host.ge_source_phys[1],
+				(unsigned long)host.ge_source_bytes, host.ge_buffers);
 			log_kmsg(details);
 		}
 	}
@@ -752,9 +808,13 @@ static void close_platform(void)
 		host.pcm_fd = -1;
 	}
 	if (host.ge) {
-		if (host.ge_source_handle)
-			(void)hcge_linux_free_buffer(host.ge,
-				host.ge_source_handle);
+		unsigned i;
+
+		(void)hcge_engine_sync(host.ge);
+		for (i = 0; i < host.ge_buffers; i++)
+			if (host.ge_source_handle[i])
+				(void)hcge_linux_free_buffer(host.ge,
+					host.ge_source_handle[i]);
 		hcge_close_context(host.ge);
 		host.ge = NULL;
 	}
@@ -850,6 +910,7 @@ int main(int argc, char **argv)
 		log_kmsg(details);
 	}
 	log_kmsg("frontend running START+L exits\n");
+	start_metrics_logging();
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {

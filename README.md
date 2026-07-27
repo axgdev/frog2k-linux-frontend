@@ -15,10 +15,21 @@ statically linked Gambatte runner. Press START+R from the console, browse with
 the DPAD, use A to open and B to go back. A `.gb` or `.gbc` file beneath a
 case-insensitive `GB` or `GBC` directory launches Gambatte. START+L returns
 from a game to the browser, then from the browser to the console.
+Files below a case-insensitive `GBA` directory launch the statically linked
+gpSP runner with its MIPS dynarec enabled.
 
 The core host implements the libretro lifecycle, ROM full-path loading,
 absolute frame pacing, SF2000 evdev joypad mapping, GE-accelerated RGB565
-conversion/scaling, and 32 kHz mono ALSA DMA playback. It publishes a
+conversion/scaling, and 32 kHz mono ALSA DMA playback. Presentation uses two
+ownership-tracked GE source surfaces, allowing emulation to overlap the
+previous frame's scale operation without ever modifying an in-flight surface.
+Audio uses a 4096-sample circular staging queue and the platform's portable
+fixed-point linear stereo-to-mono resampler; ALSA underrun recovery retains
+current audio instead of replaying stale blocks. Low-rate metrics use a
+persistent descriptor and never query ALSA synchronously from the emulation
+thread.
+
+The frontend publishes a
 PID-validated activity marker before ROM loading so low-priority system
 profiling cannot contend with emulator reads or real-time audio on the single
 SD/MMC channel. The integrated image covers browsing, ROM loading, emulation,
@@ -58,6 +69,8 @@ SF2000 Linux graphics performance benchmark.
 - SF2000 platform: small stable userspace interfaces over those drivers.
 - This application: menus, game metadata, save policy and libretro callbacks.
 
-The next application checkpoint is ALSA ring-buffer output followed by a GE
-submission API that avoids CPU conversion/scaling. Menu work should begin only
-after those platform interfaces are exercised in QEMU and on hardware.
+The application consumes the platform's source-compatible GE and audio
+modules; register programming, cache ownership, DMA and interrupt policy stay
+outside the cores. This keeps later emulator-specific optimization optional
+and lets Linux and RTOS frontends share the same conversion and acceleration
+contracts.
