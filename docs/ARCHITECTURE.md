@@ -12,8 +12,10 @@ Its public boundaries are deliberately narrow:
 - `src/sf2000_input.c` owns Linux evdev decoding, chord edge detection and the
   libretro joypad state. It reports actions to the host instead of changing
   emulation policy itself.
+- `src/sf2000_pacer.c` owns the absolute frame timeline and late-frame
+  recovery policy. It has no Linux device, libretro, audio, or GE dependency.
 - `src/main.c` owns one libretro session and coordinates presentation, PCM
-  pacing and lifecycle. The GE and resampler implementations remain reusable
+  delivery and lifecycle. The GE and resampler implementations remain reusable
   libraries in the sibling `sf2000_linux` repository.
 - `src/nommu_new.cpp` supplies the bounded allocation policy required by
   C++ cores on uClinux.
@@ -46,3 +48,8 @@ callbacks allocate no memory after initialization.
 Any new backend should provide an explicit state object, open/close ownership,
 and host-side tests. Avoid backend globals and avoid exposing Linux or HC15xx
 details through the libretro callback interface.
+
+The pacer preserves its absolute timeline after a sub-frame miss and omits
+that frame's sleep. A later inexpensive frame therefore catches up without a
+clock discontinuity. It rebases only after a complete frame interval has
+already been lost, when replaying stale emulation would overfill audio.

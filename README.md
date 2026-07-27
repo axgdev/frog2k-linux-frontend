@@ -50,9 +50,11 @@ thread therefore never sends periodic telemetry through printk, UART, or FAT.
 One compact cumulative health word is also written to the platform's retained
 RAM ring, allowing post-reset diagnosis without placing logging in a syscall
 or storage path.
-Absolute frame pacing rebases after a missed deadline rather than
-running a burst of stale frames; this prevents expensive first-frame setup from
-overflowing the audio path.
+Absolute frame pacing keeps its timeline across a sub-frame miss, allowing the
+next inexpensive frame to recover the delay without a discontinuity. It
+rebases only after a complete frame interval is lost; this prevents expensive
+first-frame setup from overflowing the audio path while avoiding repeated
+clock resets for harmless 2--5 ms scheduling jitter.
 
 The SF2000 platform supervisor establishes a synchronized, RAM-journaled
 performance session before launching this application. That keeps logging
@@ -110,13 +112,13 @@ behind a blank scanout, without improving frame rate.  First-frame diagnostics
 include hashes of both the core surface and the GE-written framebuffer so a
 core failure and a presentation failure are distinguishable after reset.
 
-For paced RGB565 cores whose framebuffer is in the NOMMU KSEG0 direct map, GE
+For RGB565 cores whose framebuffer is in the NOMMU KSEG0 direct map, GE
 copies the callback surface into the next managed source and the frontend
 fences that short operation before returning from the callback.  Scaling from
 the managed snapshot remains asynchronous.  This respects libretro's callback
-lifetime while removing CPU staging copies.  Uncapped mode deliberately keeps
-CPU-buffered delivery: without a pacing interval, that lets GE overlap the next
-emulated frame without adding a per-frame fence.  Metrics report
+lifetime while removing CPU staging copies. The same ownership-safe staging is
+used in normal and uncapped modes; physical log140 shows that this is faster
+than CPU-buffered delivery even without a pacing interval. Metrics report
 `ge_stage_frames` and `buffered_frames`, making both contracts testable.
 
 The bFLT C++ runtime maps each allocation independently and returns it to the

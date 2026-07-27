@@ -6,6 +6,7 @@
 #include "hc15xx_resampler.h"
 #include "hc15xx_retained.h"
 #include "sf2000_input.h"
+#include "sf2000_pacer.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -74,11 +75,9 @@ static struct host host = { .fb_fd = -1, .pcm_fd = -1,
 static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
-static unsigned pacing_resets;
 static struct timespec metrics_start;
 static int metrics_fd = -1;
-static unsigned interval_late_frames;
-static unsigned interval_max_late_us;
+static struct sf2000_pacer pacer;
 static unsigned interval_max_run_us;
 static unsigned interval_sampled_present_us;
 static unsigned interval_ge_stage_frames;
@@ -124,8 +123,7 @@ static void start_metrics_logging(void)
 static void reset_metric_window(void)
 {
 	video_callbacks = 0;
-	interval_late_frames = 0;
-	interval_max_late_us = 0;
+	sf2000_pacer_reset_interval(&pacer);
 	interval_max_run_us = 0;
 	interval_sampled_present_us = 0;
 	interval_ge_stage_frames = 0;
@@ -644,7 +642,8 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.audio_count, (long)host.audio_delay,
 			host.audio_resample_rate, audio_suppressed, video_callbacks,
 			elapsed_ms, fps_milli,
-			pacing_resets, interval_late_frames, interval_max_late_us,
+			pacer.resets, pacer.interval_late_frames,
+			pacer.interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
 			interval_ge_stage_frames, interval_buffered_frames,
 			uncapped_mode ? "uncapped" : "normal",
@@ -659,11 +658,10 @@ static void video(const void *data, unsigned width, unsigned height,
 			"frontend-audio", 0x60u,
 			((audio_metrics.xruns > 0xffffu ? 0xffffu :
 				audio_metrics.xruns) << 16) |
-			(pacing_resets > 0xffffu ? 0xffffu : pacing_resets));
+			(pacer.resets > 0xffffu ? 0xffffu : pacer.resets));
 #endif
 		previous_xruns = audio_metrics.xruns;
-		interval_late_frames = 0;
-		interval_max_late_us = 0;
+		sf2000_pacer_reset_interval(&pacer);
 		interval_max_run_us = 0;
 		interval_sampled_present_us = 0;
 		interval_ge_stage_frames = 0;
@@ -1069,7 +1067,6 @@ int main(int argc, char **argv)
 	struct retro_game_info game = { 0 };
 	struct timespec deadline;
 	long frame_ns;
-	int deadline_valid = 1;
 	struct sigaction fault_action;
 
 	if (argc != 2) {
@@ -1143,6 +1140,7 @@ int main(int argc, char **argv)
 		log_kmsg("ALSA unavailable; audio disabled\n");
 	frame_ns = (long)(1000000000.0 / host.fps);
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	sf2000_pacer_init(&pacer, frame_ns, &deadline);
 	{
 		char details[96];
 
@@ -1171,7 +1169,7 @@ int main(int argc, char **argv)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
 		retro_run();
 		if (uncapped_mode) {
-			deadline_valid = 0;
+			sf2000_pacer_invalidate(&pacer);
 			continue;
 		}
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1189,44 +1187,9 @@ int main(int argc, char **argv)
 				interval_max_run_us = run_us > UINT_MAX ?
 					UINT_MAX : (unsigned)run_us;
 		}
-		if (!deadline_valid) {
-			deadline = now;
-			deadline_valid = 1;
-		}
-		deadline.tv_nsec += frame_ns;
-		while (deadline.tv_nsec >= 1000000000L) {
-			deadline.tv_nsec -= 1000000000L;
-			deadline.tv_sec++;
-		}
-		if (now.tv_sec > deadline.tv_sec ||
-				(now.tv_sec == deadline.tv_sec &&
-				 now.tv_nsec > deadline.tv_nsec)) {
-			uint64_t late_us =
-				(uint64_t)(now.tv_sec - deadline.tv_sec) * 1000000u;
-
-			if (now.tv_nsec >= deadline.tv_nsec)
-				late_us += (uint64_t)(now.tv_nsec - deadline.tv_nsec) /
-					1000u;
-			else
-				late_us -= (uint64_t)(deadline.tv_nsec - now.tv_nsec) /
-					1000u;
-			interval_late_frames++;
-			if (late_us > interval_max_late_us)
-				interval_max_late_us = late_us > UINT_MAX ?
-					UINT_MAX : (unsigned)late_us;
-			/*
-			 * A slow frame is already visible and its audio is current.
-			 * Replaying every missed deadline only floods ALSA and makes
-			 * the game race through stale work before returning to real
-			 * time.  Rebase once and continue at the core's requested
-			 * cadence.
-			 */
-			deadline = now;
-			pacing_resets++;
-		} else {
+		if (sf2000_pacer_step(&pacer, &now, &deadline))
 			(void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
 				&deadline, NULL);
-		}
 	}
 	if (metrics_fd >= 0) {
 		close(metrics_fd);

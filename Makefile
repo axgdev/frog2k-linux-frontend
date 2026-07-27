@@ -19,8 +19,9 @@ AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
 AUDIO_SOURCES := $(AUDIO_DIR)/hc15xx_resampler.c
 PLATFORM_DIR := $(SF2000_LINUX_DIR)/platform
 PLATFORM_SOURCES := $(PLATFORM_DIR)/hc15xx_retained.c
-FRONTEND_SOURCES := src/main.c src/sf2000_input.c
+FRONTEND_SOURCES := src/main.c src/sf2000_input.c src/sf2000_pacer.c
 SF2000_HOST_OBJECTS := build/host-main.o build/host-input.o \
+	build/host-pacer.o \
 	build/host-ge-linux.o build/host-ge-node.o build/host-audio.o \
 	build/host-retained.o build/host-nommu-new.o build/host-content.o
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
@@ -66,9 +67,15 @@ build/input-check: src/sf2000_input.c tests/input_test.c include/sf2000_input.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ src/sf2000_input.c tests/input_test.c
 
-check: build/frontend-check build/nommu-allocator-check build/input-check
+build/pacer-check: src/sf2000_pacer.c tests/pacer_test.c include/sf2000_pacer.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ src/sf2000_pacer.c tests/pacer_test.c
+
+check: build/frontend-check build/nommu-allocator-check build/input-check \
+		build/pacer-check
 	./build/nommu-allocator-check
 	./build/input-check
+	./build/pacer-check
 
 sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
@@ -118,6 +125,10 @@ build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
 build/host-input.o: src/sf2000_input.c include/sf2000_input.h include/libretro_min.h
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/host-pacer.o: src/sf2000_pacer.c include/sf2000_pacer.h
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
