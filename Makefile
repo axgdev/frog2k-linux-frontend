@@ -41,7 +41,7 @@ GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-DGPSP_DYNAREC_SAFE_FALLBACK \
 	-DGPSP_ROM_BUFFER_MMAP -DGPSP_ROM_BUFFER_DEVICE \
 	-DROM_TRANSLATION_CACHE_SIZE=524288 \
-	-DRAM_TRANSLATION_CACHE_SIZE=131072 \
+	-DRAM_TRANSLATION_CACHE_SIZE=1048576 \
 	-DTRANSLATOR_WORKSPACE_SIZE=9216 \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
@@ -179,12 +179,9 @@ $(GPSP_DIR)/.git:
 	git -C $(GPSP_DIR) checkout --detach $(GPSP_REV)
 
 $(GPSP_DIR)/.sf2000-patched: $(GPSP_DIR)/.git $(GPSP_PATCHES)
+	git -C '$(GPSP_DIR)' reset --hard '$(GPSP_REV)'
 	for patch_file in $(GPSP_PATCHES); do \
-		if patch -d '$(GPSP_DIR)' -p1 --dry-run < "$$patch_file" >/dev/null; then \
-			patch -d '$(GPSP_DIR)' -p1 < "$$patch_file"; \
-		elif ! patch -d '$(GPSP_DIR)' -p1 --dry-run -R < "$$patch_file" >/dev/null; then \
-			exit 1; \
-		fi; \
+		patch -d '$(GPSP_DIR)' -p1 < "$$patch_file"; \
 	done
 	touch '$@'
 

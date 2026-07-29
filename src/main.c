@@ -161,17 +161,23 @@ static char *append_hex(char *output, unsigned long long value)
 
 static void fault_signal(int signal_number, siginfo_t *info, void *context)
 {
-	char message[320];
+	char message[512];
 	ucontext_t *machine = context;
 	char *cursor = message;
 	unsigned long long pc = machine ? machine->uc_mcontext.pc : 0;
 	unsigned long long cause = 0, badvaddr = 0, sp = 0, ra = 0;
+	unsigned long long at = 0, v0 = 0, a0 = 0, s0 = 0, gp = 0;
 	int fd;
 
 #ifdef __mips__
 	if (machine) {
 		cause = machine->uc_mcontext.hi1;
 		badvaddr = machine->uc_mcontext.lo1;
+		at = machine->uc_mcontext.gregs[1];
+		v0 = machine->uc_mcontext.gregs[2];
+		a0 = machine->uc_mcontext.gregs[4];
+		s0 = machine->uc_mcontext.gregs[16];
+		gp = machine->uc_mcontext.gregs[28];
 		sp = machine->uc_mcontext.gregs[29];
 		ra = machine->uc_mcontext.gregs[31];
 	}
@@ -212,6 +218,21 @@ static void fault_signal(int signal_number, siginfo_t *info, void *context)
 	memcpy(cursor, " ra=", 4);
 	cursor += 4;
 	cursor = append_hex(cursor, ra);
+	memcpy(cursor, " at=", 4);
+	cursor += 4;
+	cursor = append_hex(cursor, at);
+	memcpy(cursor, " v0=", 4);
+	cursor += 4;
+	cursor = append_hex(cursor, v0);
+	memcpy(cursor, " a0=", 4);
+	cursor += 4;
+	cursor = append_hex(cursor, a0);
+	memcpy(cursor, " s0=", 4);
+	cursor += 4;
+	cursor = append_hex(cursor, s0);
+	memcpy(cursor, " gp=", 4);
+	cursor += 4;
+	cursor = append_hex(cursor, gp);
 	memcpy(cursor, " gba_pc=", 8);
 	cursor += 8;
 	cursor = append_hex(cursor, reg ? reg[15] : 0);
