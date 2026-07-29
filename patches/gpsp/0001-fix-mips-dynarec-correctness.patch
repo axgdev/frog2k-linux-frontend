@@ -26,36 +26,51 @@ index d9a0f1d..4ffc8cc 100644
    dest = ((value) >> (shift)) | ((value) << (32 - (shift)))                   \
  
 diff --git a/cpu.h b/cpu.h
-index dd6cb89..03aa93d 100644
+index dd6cb89..6e2fe23 100644
 --- a/cpu.h
 +++ b/cpu.h
-@@ -155,6 +155,10 @@ extern u8 ram_translation_cache[RAM_TRANSLATION_CACHE_SIZE];
+@@ -155,6 +155,13 @@ extern u8 ram_translation_cache[RAM_TRANSLATION_CACHE_SIZE];
  #endif
  extern u8 *rom_translation_ptr;
  extern u8 *ram_translation_ptr;
 +extern u32 rom_translation_flush_count;
 +extern u32 ram_translation_flush_count;
++extern u32 ram_translation_capacity_flush_count;
++extern u32 ram_translation_store_flush_count;
++extern u32 ram_translation_dma_flush_count;
 +extern u32 rom_translation_peak;
 +extern u32 ram_translation_peak;
  
  #define MAX_TRANSLATION_GATES 8
  
+@@ -166,6 +173,8 @@ extern u32 rom_branch_hash[ROM_BRANCH_HASH_SIZE];
+ 
+ void flush_translation_cache_rom(void);
+ void flush_translation_cache_ram(void);
++void flush_translation_cache_ram_store(void);
++void flush_translation_cache_ram_dma(void);
+ void dump_translation_cache(void);
+ void init_dynarec_caches(void);
+ void flush_dynarec_caches(void);
 diff --git a/cpu_threaded.c b/cpu_threaded.c
-index 8942ab3..47d1dc2 100644
+index 8942ab3..0fd2134 100644
 --- a/cpu_threaded.c
 +++ b/cpu_threaded.c
-@@ -61,6 +61,10 @@ u32 ewram_code_max =  0U;
+@@ -61,6 +61,13 @@ u32 ewram_code_max =  0U;
  
  #define INITIAL_ROM_WATERMARK   16   // To avoid NULL aliasing
  u32 rom_cache_watermark = INITIAL_ROM_WATERMARK;
 +u32 rom_translation_flush_count;
 +u32 ram_translation_flush_count;
++u32 ram_translation_capacity_flush_count;
++u32 ram_translation_store_flush_count;
++u32 ram_translation_dma_flush_count;
 +u32 rom_translation_peak;
 +u32 ram_translation_peak;
  
  u8 *bios_swi_entrypoint = NULL;
  
-@@ -2653,12 +2657,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
+@@ -2653,12 +2660,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
      u8 *ret = block_lookup_translate_arm(pc);
@@ -72,7 +87,7 @@ index 8942ab3..47d1dc2 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
-@@ -2669,11 +2676,14 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
+@@ -2669,11 +2679,14 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
      u8 *ret = block_lookup_translate_thumb(pc);
@@ -88,7 +103,7 @@ index 8942ab3..47d1dc2 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
-@@ -2887,8 +2897,10 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
+@@ -2887,8 +2900,10 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
  #define MAX_BLOCK_SIZE   1024   // 2/4KiB blocks max
  #define MAX_EXITS          32   // This covers 99% blocks
  
@@ -99,7 +114,7 @@ index 8942ab3..47d1dc2 100644
  
  #define smc_write_arm_yes() {                                                 \
    intptr_t offset = (pc < 0x03000000) ? 0x40000 : -0x8000;                    \
-@@ -3009,6 +3021,12 @@ if (ram_region) {                                                             \
+@@ -3009,6 +3024,12 @@ if (ram_region) {                                                             \
  
  bool translate_block_arm(u32 pc, bool ram_region)
  {
@@ -112,7 +127,20 @@ index 8942ab3..47d1dc2 100644
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
-@@ -3174,6 +3192,12 @@ bool translate_block_arm(u32 pc, bool ram_region)
+@@ -3102,9 +3123,10 @@ bool translate_block_arm(u32 pc, bool ram_region)
+        the beginning. */
+ 
+     if(translation_ptr > translation_cache_limit) {
+-      if (ram_region)
++      if (ram_region) {
++        ram_translation_capacity_flush_count++;
+         flush_translation_cache_ram();
+-      else
++      } else
+         flush_translation_cache_rom();
+       return false;
+     }
+@@ -3174,6 +3196,12 @@ bool translate_block_arm(u32 pc, bool ram_region)
  
  bool translate_block_thumb(u32 pc, bool ram_region)
  {
@@ -125,7 +153,20 @@ index 8942ab3..47d1dc2 100644
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
-@@ -3341,6 +3365,12 @@ void init_bios_hooks(void)
+@@ -3264,9 +3292,10 @@ bool translate_block_thumb(u32 pc, bool ram_region)
+ 
+     if(translation_ptr > translation_cache_limit)
+     {
+-      if (ram_region)
++      if (ram_region) {
++        ram_translation_capacity_flush_count++;
+         flush_translation_cache_ram();
+-      else
++      } else
+         flush_translation_cache_rom();
+       return false;
+     }
+@@ -3341,6 +3370,12 @@ void init_bios_hooks(void)
  
  void flush_translation_cache_ram(void)
  {
@@ -138,8 +179,22 @@ index 8942ab3..47d1dc2 100644
    /* Flushes RAM caches avoiding doing too much work (ie. wiping unused memory) */
    flush_ram_count++;
    /*printf("ram flush %d (pc %x), %x to %x, %x to %x\n",
-@@ -3379,6 +3409,12 @@ void flush_translation_cache_ram(void)
+@@ -3377,8 +3412,26 @@ void flush_translation_cache_ram(void)
+   ram_block_tag = INITIAL_TOP_TAG;
+ }
  
++void flush_translation_cache_ram_store(void)
++{
++  ram_translation_store_flush_count++;
++  flush_translation_cache_ram();
++}
++
++void flush_translation_cache_ram_dma(void)
++{
++  ram_translation_dma_flush_count++;
++  flush_translation_cache_ram();
++}
++
  void flush_translation_cache_rom(void)
  {
 +  u32 used = (u32)(rom_translation_ptr - rom_translation_cache);
@@ -151,25 +206,28 @@ index 8942ab3..47d1dc2 100644
    /* We flush the generated code except for everything below the watermark. */
    last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
    rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
-@@ -3388,6 +3424,11 @@ void flush_translation_cache_rom(void)
+@@ -3388,6 +3441,14 @@ void flush_translation_cache_rom(void)
  
  void init_dynarec_caches(void)
  {
 +  rom_translation_flush_count = 0;
 +  ram_translation_flush_count = 0;
++  ram_translation_capacity_flush_count = 0;
++  ram_translation_store_flush_count = 0;
++  ram_translation_dma_flush_count = 0;
 +  rom_translation_peak = 0;
 +  ram_translation_peak = 0;
 +
    /* Initialize caches so that we can start initalizing the emitter. */
    rom_translation_ptr = last_rom_translation_ptr = &rom_translation_cache[0];
    memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
-@@ -3412,4 +3453,3 @@ void flush_dynarec_caches(void)
+@@ -3412,4 +3473,3 @@ void flush_dynarec_caches(void)
    iwram_code_max = 0x8000;
    flush_translation_cache_ram();
  }
 -
 diff --git a/gba_memory.c b/gba_memory.c
-index c3a1b29..e7b6055 100644
+index c3a1b29..a1a2dfb 100644
 --- a/gba_memory.c
 +++ b/gba_memory.c
 @@ -19,6 +19,13 @@
@@ -223,7 +281,44 @@ index c3a1b29..e7b6055 100644
  
  // LRU queue with the loaded blocks and what they map to
  struct {
-@@ -2261,9 +2277,7 @@ u8 *load_gamepak_page(u32 physical_index)
+@@ -1827,11 +1843,14 @@ const dma_region_type dma_region_map[17] =
+ #define dma_read_ext(type, tfsize)                                            \
+   read_value = read_memory##tfsize(type##_ptr)                                \
+ 
+-#define dma_write_iwram(type, tfsize)                                         \
+-  address##tfsize(iwram + 0x8000, type##_ptr & 0x7FFF) =                      \
+-                                          eswap##tfsize(read_value);          \
+-  if (address##tfsize(iwram, type##_ptr & 0x7FFF))                            \
++#define dma_write_iwram(type, tfsize) {                                       \
++  u32 wraddr = type##_ptr & 0x7FFF;                                           \
++  u##tfsize wrval = eswap##tfsize(read_value);                                \
++  if (address##tfsize(iwram, wraddr) &&                                       \
++      address##tfsize(iwram + 0x8000, wraddr) != wrval)                       \
+     alerts |= CPU_ALERT_SMC;                                                  \
++  address##tfsize(iwram + 0x8000, wraddr) = wrval;                            \
++}
+ 
+ #define dma_write_vram(type, tfsize) {                                        \
+   u32 wraddr = type##_ptr & 0x1FFFF;                                          \
+@@ -1851,10 +1870,14 @@ const dma_region_type dma_region_map[17] =
+ #define dma_write_ext(type, tfsize)                                           \
+   write_memory##tfsize(type##_ptr, read_value)                                \
+ 
+-#define dma_write_ewram(type, tfsize)                                         \
+-  address##tfsize(ewram, type##_ptr & 0x3FFFF) = eswap##tfsize(read_value);   \
+-  if (address##tfsize(ewram, (type##_ptr & 0x3FFFF) + 0x40000))               \
++#define dma_write_ewram(type, tfsize) {                                       \
++  u32 wraddr = type##_ptr & 0x3FFFF;                                          \
++  u##tfsize wrval = eswap##tfsize(read_value);                                \
++  if (address##tfsize(ewram, wraddr + 0x40000) &&                             \
++      address##tfsize(ewram, wraddr) != wrval)                                \
+     alerts |= CPU_ALERT_SMC;                                                  \
++  address##tfsize(ewram, wraddr) = wrval;                                     \
++}
+ 
+ #define print_line()                                                          \
+   dma_print(src_op, dest_op, tfsize);                                         \
+@@ -2261,9 +2284,7 @@ u8 *load_gamepak_page(u32 physical_index)
      physical_index %= rom_blocks;
  
    u32 entry = evict_gamepak_page();
@@ -234,7 +329,7 @@ index c3a1b29..e7b6055 100644
  
    // Fill in the entry
    gamepak_blk_queue[entry].phy_rom = physical_index;
-@@ -2275,6 +2289,8 @@ u8 *load_gamepak_page(u32 physical_index)
+@@ -2275,6 +2296,8 @@ u8 *load_gamepak_page(u32 physical_index)
    filestream_seek(gamepak_file_large, file_index * (32 * 1024), SEEK_SET);
    {
      u32 read_len = (u32)filestream_read(gamepak_file_large, swap_location, (32 * 1024));
@@ -243,7 +338,7 @@ index c3a1b29..e7b6055 100644
      if (read_len < (32 * 1024))
        memset(swap_location + read_len, 0xFF, (32 * 1024) - read_len);
    }
-@@ -2292,11 +2308,44 @@ u8 *load_gamepak_page(u32 physical_index)
+@@ -2292,11 +2315,44 @@ u8 *load_gamepak_page(u32 physical_index)
  void init_gamepak_buffer(void)
  {
    unsigned i;
@@ -290,7 +385,7 @@ index c3a1b29..e7b6055 100644
      if (!ptr)
        break;
      gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
-@@ -2310,7 +2359,7 @@ void init_gamepak_buffer(void)
+@@ -2310,7 +2366,7 @@ void init_gamepak_buffer(void)
    }
  
    gamepak_lru_head = 0;
@@ -299,7 +394,7 @@ index c3a1b29..e7b6055 100644
  }
  
  bool gamepak_must_swap(void)
-@@ -2323,6 +2372,18 @@ bool gamepak_must_swap(void)
+@@ -2323,6 +2379,18 @@ bool gamepak_must_swap(void)
    return gamepak_buffer_count * gamepak_buffer_blocksize < gamepak_size;
  }
  
@@ -318,7 +413,7 @@ index c3a1b29..e7b6055 100644
  void init_memory(void)
  {
    u32 map_offset = 0, i;
-@@ -2394,9 +2455,22 @@ void memory_term(void)
+@@ -2394,9 +2462,22 @@ void memory_term(void)
      gamepak_file_large = NULL;
    }
  
@@ -341,7 +436,7 @@ index c3a1b29..e7b6055 100644
    }
  
    if (gamepak_mini_rom)
-@@ -2606,6 +2680,8 @@ static s32 load_gamepak_raw(const char *name)
+@@ -2606,6 +2687,8 @@ static s32 load_gamepak_raw(const char *name)
    unsigned i, j;
    u32 raw_size;
    int64_t fsize;
@@ -350,7 +445,7 @@ index c3a1b29..e7b6055 100644
    gamepak_file_large = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                                         RETRO_VFS_FILE_ACCESS_HINT_NONE);
    if(gamepak_file_large)
-@@ -2654,7 +2730,8 @@ static s32 load_gamepak_raw(const char *name)
+@@ -2654,7 +2737,8 @@ static s32 load_gamepak_raw(const char *name)
  
          // Keep buffer[0] in sync with ROM start for header-based logic.
          if (gamepak_buffer_count > 0)
@@ -360,7 +455,7 @@ index c3a1b29..e7b6055 100644
  
          map_null(read, 0x8000000, 0xD000000);
          for (phyn = 0; phyn < map_blocks; phyn++)
-@@ -2701,10 +2778,13 @@ static s32 load_gamepak_raw(const char *name)
+@@ -2701,10 +2785,13 @@ static s32 load_gamepak_raw(const char *name)
          if (read_len < gamepak_buffer_blocksize)
            memset(gamepak_buffers[i] + read_len, 0xFF, gamepak_buffer_blocksize - read_len);
        }
@@ -377,7 +472,7 @@ index c3a1b29..e7b6055 100644
          u32 entry = evict_gamepak_page();
          gamepak_blk_queue[entry].phy_rom = phyn;
          // Map it to the read handlers now
-@@ -2928,7 +3008,8 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
+@@ -2928,7 +3015,8 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
  
     if (backup_type_reset == BACKUP_UNKN)
     {
@@ -387,7 +482,7 @@ index c3a1b29..e7b6055 100644
        detect_backup_subcircuit(gamepak_buffers[0], scan_size);
     }
  
-@@ -2960,6 +3041,13 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
+@@ -2960,6 +3048,13 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
  
     if (is_hack && is_pokemon_engine)
     {
@@ -457,7 +552,7 @@ index 625f46e..4560387 100644
  /* Should be an upperbound to the maximum number of bytes a single JIT'ed
     instruction can take. STM/LDM are tipically the biggest ones */
 diff --git a/libretro/libretro.c b/libretro/libretro.c
-index 46e958a..ae3c486 100644
+index 46e958a..8b38b48 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
 @@ -620,8 +620,20 @@ void retro_init(void)
@@ -506,7 +601,7 @@ index 46e958a..ae3c486 100644
  
     if (selected_bios != builtin_bios && gamepak_header_nonstandard)
     {
-@@ -1286,6 +1306,29 @@ bool retro_load_game_special(unsigned game_type,
+@@ -1286,6 +1306,35 @@ bool retro_load_game_special(unsigned game_type,
  
  void retro_unload_game(void)
  {
@@ -518,7 +613,7 @@ index 46e958a..ae3c486 100644
 +      rom_translation_peak = rom_used;
 +   if (ram_used > ram_translation_peak)
 +      ram_translation_peak = ram_used;
-+   if (log_cb)
++   if (log_cb) {
 +      log_cb(RETRO_LOG_INFO,
 +            "[gpSP JIT] rom_peak=%u rom_capacity=%u rom_flushes=%u "
 +            "ram_peak=%u ram_capacity=%u ram_flushes=%u\n",
@@ -526,6 +621,12 @@ index 46e958a..ae3c486 100644
 +            rom_translation_flush_count,
 +            ram_translation_peak, (u32)RAM_TRANSLATION_CACHE_SIZE,
 +            ram_translation_flush_count);
++      log_cb(RETRO_LOG_INFO,
++            "[gpSP JIT reason] capacity=%u store=%u dma=%u\n",
++            ram_translation_capacity_flush_count,
++            ram_translation_store_flush_count,
++            ram_translation_dma_flush_count);
++   }
 +#endif
 +
 +   if (log_cb)
@@ -559,7 +660,7 @@ index 46bb951..e59d6b9 100644
    #define _MAP_ITERATIONS            256   // Test -/+128MB in 1MB steps
    #define _MAP_STEP           (1024*1024)
 diff --git a/mips/mips_emit.h b/mips/mips_emit.h
-index 79d5183..bc47b66 100644
+index 79d5183..8077a90 100644
 --- a/mips/mips_emit.h
 +++ b/mips/mips_emit.h
 @@ -51,6 +51,7 @@ void mips_cheat_hook(void);
@@ -663,7 +764,71 @@ index 79d5183..bc47b66 100644
    } else if (region == 14) {
      // Read from flash, is a bit special, fn call
      emit_mem_call_ds(&read_backup, 0xFFFF);
-@@ -2653,13 +2668,26 @@ static void emit_phand(
+@@ -2254,6 +2269,8 @@ static void emit_pmemst_stub(
+   unsigned size, bool aligned, u8 **tr_ptr)
+ {
+   u8 *translation_ptr = *tr_ptr;
++  u8 *smc_no_code_branch = NULL;
++  u8 *smc_same_value_branch = NULL;
+   unsigned region = meminfo->region;
+   u32 base_addr = meminfo->baseptr;
+ 
+@@ -2323,12 +2340,41 @@ static void emit_pmemst_stub(
+     } else {
+       mips_emit_lb(reg_temp, reg_temp, base_addr);
+     }
+-    // If the data is non zero, we just wrote over code
+-    // Local-jump to the smc_write (which lives at offset:0)
+-    mips_emit_b(bne, reg_zero, reg_temp, branch_offset(&rom_translation_cache[SMC_WRITE_OFF]));
++    /*
++     * A write of the value already in RAM does not modify translated code.
++     * Games which repeatedly install the same IWRAM helper would otherwise
++     * discard every RAM translation on every identical copy.
++     */
++    smc_no_code_branch = translation_ptr;
++    mips_emit_b(beq, reg_zero, reg_temp, 0);
++    if (realsize == 2) {
++      mips_emit_addu(reg_a0, reg_a1, reg_zero);
++    } else if (realsize == 1) {
++      mips_emit_andi(reg_a0, reg_a1, 0xffff);
++    } else {
++      mips_emit_andi(reg_a0, reg_a1, 0xff);
++    }
++
++    if (realsize == 2) {
++      mips_emit_lw(reg_temp, reg_rv, base_addr);
++    } else if (realsize == 1) {
++      mips_emit_lhu(reg_temp, reg_rv, base_addr);
++    } else {
++      mips_emit_lbu(reg_temp, reg_rv, base_addr);
++    }
++
++    smc_same_value_branch = translation_ptr;
++    mips_emit_b(beq, reg_temp, reg_a0, 0);
++    mips_emit_nop();
++
++    // A changed code byte must still take the full SMC invalidation path.
++    mips_emit_b(beq, reg_zero, reg_zero,
++                branch_offset(&rom_translation_cache[SMC_WRITE_OFF]));
+   }
+ 
+-  // Store the data (delay slot from the SMC branch)
++  // Store changed data in the SMC branch delay slot, or ordinary RAM here.
++  if (smc_no_code_branch)
++    generate_branch_patch_conditional(smc_no_code_branch, translation_ptr);
+   if (realsize == 2) {
+     mips_emit_sw(reg_a1, reg_rv, base_addr);
+   } else if (realsize == 1) {
+@@ -2345,6 +2391,8 @@ static void emit_pmemst_stub(
+     generate_function_return_swap_delay();
+   }
+   else {
++    if (smc_same_value_branch)
++      generate_branch_patch_conditional(smc_same_value_branch, translation_ptr);
+     mips_emit_jr(mips_reg_ra);
+     mips_emit_nop();
+   }
+@@ -2653,13 +2701,26 @@ static void emit_phand(
    mips_emit_addu(reg_temp, reg_temp, reg_base); // Add to the base_reg the table offset
    mips_emit_lw(reg_rv,   reg_temp, tbloff);     // Get func addr from 1st table
    mips_emit_lw(reg_temp, reg_temp, tbloff2);    // Get opcode from 2nd table
@@ -692,7 +857,7 @@ index 79d5183..bc47b66 100644
      mips_emit_jr(reg_rv);
      #ifdef MIPS_HAS_R2_INSTS
        mips_emit_synci(mips_reg_ra, -8);
-@@ -2805,9 +2833,22 @@ void init_emitter(bool must_swap) {
+@@ -2805,9 +2866,22 @@ void init_emitter(bool must_swap) {
  
  u32 execute_arm_translate_internal(u32 cycles, void *regptr);
  u32 execute_arm_translate(u32 cycles) {
@@ -719,7 +884,7 @@ index 79d5183..bc47b66 100644
 -
 -
 diff --git a/mips/mips_stub.S b/mips/mips_stub.S
-index 34b0446..e90fa4e 100644
+index 34b0446..6619c8c 100644
 --- a/mips/mips_stub.S
 +++ b/mips/mips_stub.S
 @@ -18,17 +18,41 @@
@@ -800,7 +965,16 @@ index 34b0446..e90fa4e 100644
  
  
  # Called on I/O writes that have side-effects
-@@ -359,13 +389,11 @@ lookup_pc_noflags:
+@@ -326,7 +356,7 @@ defsymbl(write_io_epilogue)
+   andi $4, $19, CPU_ALERT_SMC     # check if SMC code happened
+   beqz $4, 1f                     # skip if no SMC happened
+   nop
+-  cfncall flush_translation_cache_ram, 4
++  cfncall flush_translation_cache_ram_dma, 11
+ 
+ 1:
+   andi $4, $19, CPU_ALERT_IRQ     # check if IRQ was raised
+@@ -359,19 +389,17 @@ lookup_pc_noflags:
  
    cfncall block_lookup_address_thumb, 2  # get Thumb address
    restore_registers
@@ -816,6 +990,13 @@ index 34b0446..e90fa4e 100644
  
  
  defsymbl(smc_write)
+   sw $6, REG_PC($16)              # save PC
+   save_registers
+-  cfncall flush_translation_cache_ram, 4
++  cfncall flush_translation_cache_ram_store, 10
+   b lookup_pc_noflags
+   lw $1, REG_CPSR($16)            # (delay)
+ 
 @@ -485,8 +513,7 @@ defsymbl(execute_store_cpsr)
    addu $4, $2, $0                      # load new address in $4
    cfncall block_lookup_address_arm, 1  # GBA address is in $4
@@ -843,7 +1024,16 @@ index 34b0446..e90fa4e 100644
  
  .bss
  .align 6
-@@ -633,4 +658,3 @@ defsymbl(ram_translation_cache)
+@@ -610,6 +635,8 @@ fnptrs:
+   .long execute_store_cpsr_body        # 7
+   .long process_cheats                 # 8
+   .long check_and_raise_interrupts     # 9
++  .long flush_translation_cache_ram_store # 10
++  .long flush_translation_cache_ram_dma # 11
+ 
+ #if !defined(MMAP_JIT_CACHE)
+ 
+@@ -633,4 +660,3 @@ defsymbl(ram_translation_cache)
  #if defined(__linux__) && defined(__ELF__)
    .section .note.GNU-stack,"",%progbits
  #endif
