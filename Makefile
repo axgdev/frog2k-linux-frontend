@@ -1,9 +1,8 @@
 CC ?= cc
 CXX ?= c++
-CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-uclinux-uclibc-
+CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-linux-uclibc-
 SF2000_CC ?= $(CROSS_COMPILE)gcc
 SF2000_CXX ?= $(CROSS_COMPILE)g++
-SF2000_FLTHDR ?= $(CROSS_COMPILE)flthdr
 CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
@@ -33,7 +32,7 @@ GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
-	-G0 -mno-abicalls -fno-pic -fomit-frame-pointer -ffast-math \
+	-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
 	-fsigned-char -fno-strict-aliasing -fwrapv \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections \
@@ -55,11 +54,19 @@ COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
 SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float \
+	-fPIC -mabicalls \
 	-I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include
-SF2000_LDFLAGS := -static -Wl,-elf2flt=-r -Wl,--no-check-sections \
+SF2000_SYSROOT ?= $(shell $(SF2000_CC) -print-sysroot)
+SF2000_CRT_DIR ?= $(SF2000_SYSROOT)/usr/lib
+SF2000_STARTFILES = $(SF2000_CRT_DIR)/rcrt1.o $(SF2000_CRT_DIR)/crti.o \
+	$(shell $(SF2000_CC) -print-file-name=crtbeginS.o)
+SF2000_ENDFILES = $(shell $(SF2000_CC) -print-file-name=crtendS.o) \
+	$(SF2000_CRT_DIR)/crtn.o
+SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
+	-Wl,--no-dynamic-linker -Wl,-z,text \
 	-Wl,--gc-sections
 
-.PHONY: all clean check sf2000 demo frogui browser gambatte gpsp integrated
+.PHONY: all clean check elf-audit sf2000 demo frogui browser gambatte gpsp integrated
 
 all: check
 
@@ -86,48 +93,62 @@ check: build/frontend-check build/nommu-allocator-check build/input-check \
 	./build/input-check
 	./build/pacer-check
 
+elf-audit:
+	@set -e; \
+	for executable in build/sf2000-*; do \
+		test -f "$$executable" || continue; \
+		$(CROSS_COMPILE)readelf -h "$$executable" | \
+			grep -Eq 'Type:[[:space:]]+DYN' || exit 1; \
+		! $(CROSS_COMPILE)readelf -l "$$executable" | grep -q INTERP || exit 1; \
+		$(CROSS_COMPILE)readelf -rW "$$executable" | \
+			awk '/R_MIPS_/ && ($$2 !~ /^0000000[03]$$/ || \
+				($$3 != "R_MIPS_REL32" && $$3 != "R_MIPS_NONE")) { exit 1 }'; \
+	done
+
 sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend \
-		$(FRONTEND_SOURCES) $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(CORE)
-	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend
+		$(SF2000_STARTFILES) $(FRONTEND_SOURCES) $(GE_SOURCES) \
+		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(CORE) $(SF2000_ENDFILES)
 
 demo:
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend-demo \
-		$(FRONTEND_SOURCES) $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) tests/dummy_core.c
-	$(SF2000_FLTHDR) -s 262144 build/sf2000-frontend-demo
+		$(SF2000_STARTFILES) $(FRONTEND_SOURCES) $(GE_SOURCES) \
+		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) tests/dummy_core.c \
+		$(SF2000_ENDFILES)
 
 frogui:
 	test -f "$(FROGUI_CORE)"
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
-		-o build/sf2000-frontend-frogui $(FRONTEND_SOURCES) $(GE_SOURCES) \
+		-o build/sf2000-frontend-frogui $(SF2000_STARTFILES) \
+		$(FRONTEND_SOURCES) $(GE_SOURCES) \
 		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) src/frogui_adapter.c \
-		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free
-	$(SF2000_FLTHDR) -s 524288 build/sf2000-frontend-frogui
+		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free \
+		$(SF2000_ENDFILES)
 
 browser:
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
-		-o build/sf2000-browser src/browser.c
-	$(SF2000_FLTHDR) -s 131072 build/sf2000-browser
+		-o build/sf2000-browser $(SF2000_STARTFILES) src/browser.c \
+		$(SF2000_ENDFILES)
 
 gambatte: $(SF2000_HOST_OBJECTS)
 	$(MAKE) $(GAMBATTE_CORE) $(LIBRETRO_COMMON)
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
-		-o build/sf2000-gambatte $(SF2000_HOST_OBJECTS) $(GAMBATTE_CORE) \
+		-o build/sf2000-gambatte $(SF2000_STARTFILES) \
+		$(SF2000_HOST_OBJECTS) $(GAMBATTE_CORE) \
 		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc \
 		-Wl,--wrap=calloc \
-		-Wl,--wrap=realloc -Wl,--wrap=free
-	$(SF2000_FLTHDR) -s 524288 build/sf2000-gambatte
+		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
 
 gpsp: $(GPSP_CORE) $(SF2000_HOST_OBJECTS)
 	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-gpsp \
-		$(SF2000_HOST_OBJECTS) $(GPSP_CORE) -lm \
-		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
-	$(SF2000_FLTHDR) -s 524288 build/sf2000-gpsp
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(GPSP_CORE) -lm \
+		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
+		-Wl,--wrap=free $(SF2000_ENDFILES)
 
 build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
 	mkdir -p build
@@ -216,12 +237,14 @@ $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	done
 	touch '$@'
 
-$(GAMBATTE_CORE): $(GAMBATTE_DIR)/.sf2000-patched
+$(GAMBATTE_CORE): $(GAMBATTE_DIR)/.sf2000-patched Makefile
 	mkdir -p build
-	CFLAGS='-Os -EL -march=mips32 -msoft-float -G0 -mno-abicalls -fno-pic -ffast-math -ffunction-sections -fdata-sections' \
-	CXXFLAGS='-Os -EL -march=mips32 -msoft-float -G0 -mno-abicalls -fno-pic -ffast-math -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti' \
+	$(MAKE) -C $(GAMBATTE_DIR) -f Makefile.libretro clean \
+		platform=unix STATIC_LINKING=1
+	CFLAGS='-Os -EL -march=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -ffunction-sections -fdata-sections' \
+	CXXFLAGS='-Os -EL -march=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti' \
 	$(MAKE) -C $(GAMBATTE_DIR) -f Makefile.libretro platform=unix \
-		STATIC_LINKING=1 VIDEO_RGB565=1 HAVE_NETWORK=0 fpic= \
+		STATIC_LINKING=1 VIDEO_RGB565=1 HAVE_NETWORK=0 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
 
