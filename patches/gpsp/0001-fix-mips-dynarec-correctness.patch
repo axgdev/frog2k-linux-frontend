@@ -1,16 +1,3 @@
-diff --git a/Makefile b/Makefile
-index f5e3bf2..5b355f1 100644
---- a/Makefile
-+++ b/Makefile
-@@ -633,7 +633,7 @@ else
- endif
- 
- cpu_threaded.o: cpu_threaded.c
--	$(CC) $(INCFLAGS) $(CFLAGS) $(OPTIMIZE) -Wno-unused-variable -Wno-unused-label -c  -o $@ $<
-+	$(if $(CPU_THREADED_CC),$(CPU_THREADED_CC),$(CC)) $(INCFLAGS) $(CFLAGS) $(if $(CPU_THREADED_OPTIMIZE),$(CPU_THREADED_OPTIMIZE),$(OPTIMIZE)) -Wno-unused-variable -Wno-unused-label -c  -o $@ $<
- 
- %.o: %.S
- 	$(CC) $(ASFLAGS) $(CFLAGS) $(OPTIMIZE) -c -o $@ $<
 diff --git a/Makefile.common b/Makefile.common
 index 9742c05..608275f 100644
 --- a/Makefile.common
@@ -23,54 +10,26 @@ index 9742c05..608275f 100644
               $(LIBRETRO_COMM_DIR)/file/file_path.c \
               $(LIBRETRO_COMM_DIR)/file/file_path_io.c \
               $(LIBRETRO_COMM_DIR)/streams/file_stream.c \
-@@ -44,4 +43,3 @@ ifeq ($(HAVE_DYNAREC), 1)
-   endif
- endif
- 
--
 diff --git a/common.h b/common.h
-index d9a0f1d..2ff0016 100644
+index d9a0f1d..4ffc8cc 100644
 --- a/common.h
 +++ b/common.h
-@@ -40,6 +40,16 @@
+@@ -40,6 +40,10 @@
    #endif
  #endif
  
-+#ifdef SF2000
-+#define SF2000_GPSP_DYNAREC_LOOKUP_FAILED 0x7ffffffeu
-+void unifrog_core_load_progress(const char *stage, unsigned current,
-+  unsigned total);
-+#define sf2000_load_progress(stage, current, total) \
-+  unifrog_core_load_progress((stage), (unsigned)(current), (unsigned)(total))
-+#else
-+#define sf2000_load_progress(stage, current, total) ((void)0)
++#ifdef GPSP_DYNAREC_SAFE_FALLBACK
++#define GPSP_DYNAREC_LOOKUP_FAILED 0x7ffffffeu
 +#endif
 +
  #define ror(dest, value, shift)                                               \
    dest = ((value) >> (shift)) | ((value) << (32 - (shift)))                   \
  
 diff --git a/cpu_threaded.c b/cpu_threaded.c
-index 8942ab3..7a9929c 100644
+index 8942ab3..970cc9d 100644
 --- a/cpu_threaded.c
 +++ b/cpu_threaded.c
-@@ -249,7 +249,16 @@ typedef struct
-   }
- #elif defined(MIPS_ARCH)
-   void platform_cache_sync(void *baseaddr, void *endptr) {
-+#ifdef SF2000
-+    /* The HC15xx has physically indexed 32-byte cache lines.  Generated
-+     * blocks frequently begin at the permanent-cache watermark; flushing an
-+     * exact, unaligned byte range can leave the shared boundary line stale. */
-+    uintptr_t begin = (uintptr_t)baseaddr & ~(uintptr_t)31;
-+    uintptr_t end = ((uintptr_t)endptr + 31) & ~(uintptr_t)31;
-+    __builtin___clear_cache((char *)begin, (char *)end);
-+#else
-     __builtin___clear_cache(baseaddr, endptr);
-+#endif
-   }
- #else
-   /* x86 CPUs have icache consistency checks */
-@@ -2653,12 +2662,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
+@@ -2653,12 +2653,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
      u8 *ret = block_lookup_translate_arm(pc);
@@ -87,7 +46,7 @@ index 8942ab3..7a9929c 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
-@@ -2669,11 +2681,14 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
+@@ -2669,11 +2672,14 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
      u8 *ret = block_lookup_translate_thumb(pc);
@@ -103,95 +62,112 @@ index 8942ab3..7a9929c 100644
    printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
    fflush(stdout);
    return NULL;
-@@ -2887,8 +2902,8 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
+@@ -2887,8 +2893,10 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
  #define MAX_BLOCK_SIZE   1024   // 2/4KiB blocks max
  #define MAX_EXITS          32   // This covers 99% blocks
--
-+#if !defined(SF2000_NOMMU)
+ 
++#if TRANSLATOR_WORKSPACE_SIZE == 0
  block_data_type block_data[MAX_BLOCK_SIZE];
  block_exit_type block_exits[MAX_EXITS];
 +#endif
--
+ 
  #define smc_write_arm_yes() {                                                 \
    intptr_t offset = (pc < 0x03000000) ? 0x40000 : -0x8000;                    \
-@@ -3010,5 +3025,24 @@ if (ram_region) {                                                             \
+@@ -3009,6 +3017,12 @@ if (ram_region) {                                                             \
+ 
  bool translate_block_arm(u32 pc, bool ram_region)
  {
-+#if defined(SF2000_NOMMU)
-+  /*
-+   * A Linux/NOMMU bFLT executable is relocated at load time.  Keeping these
-+   * work arrays in BSS makes the MIPS HI16/LO16 reference depend on a text
-+   * relocation which the flat loader cannot represent reliably.  The
-+   * translator already has a 512 KiB process stack, and its old global
-+   * workspace was non-reentrant, so a per-translation stack workspace is
-+   * both relocatable and preserves the intended lifetime.
-+   */
-+  /*
-+   * Every entry consumed by the translator is populated by scan_block()
-+   * before use.  The upstream global workspace is only zeroed once by BSS,
-+   * then deliberately reused without clearing.  Preserve that contract:
-+   * clearing 8 KiB for every generated block is both unnecessary and a
-+   * severe cost on this CPU.
-+   */
-+  block_data_type block_data[MAX_BLOCK_SIZE];
-+  block_exit_type block_exits[MAX_EXITS];
++#if TRANSLATOR_WORKSPACE_SIZE > 0
++  block_data_type *block_data = (block_data_type *)
++    (ram_translation_cache + RAM_TRANSLATION_CACHE_SIZE);
++  block_exit_type *block_exits = (block_exit_type *)
++    (block_data + MAX_BLOCK_SIZE);
 +#endif
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
-@@ -3175,5 +3209,9 @@ bool translate_block_arm(u32 pc, bool ram_region)
+@@ -3174,6 +3188,12 @@ bool translate_block_arm(u32 pc, bool ram_region)
+ 
  bool translate_block_thumb(u32 pc, bool ram_region)
  {
-+#if defined(SF2000_NOMMU)
-+  block_data_type block_data[MAX_BLOCK_SIZE];
-+  block_exit_type block_exits[MAX_EXITS];
++#if TRANSLATOR_WORKSPACE_SIZE > 0
++  block_data_type *block_data = (block_data_type *)
++    (ram_translation_cache + RAM_TRANSLATION_CACHE_SIZE);
++  block_exit_type *block_exits = (block_exit_type *)
++    (block_data + MAX_BLOCK_SIZE);
 +#endif
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
-@@ -3412,4 +3431,3 @@ void flush_dynarec_caches(void)
-   iwram_code_max = 0x8000;
-   flush_translation_cache_ram();
- }
--
-diff --git a/gba_memory.c b/gba_memory.c
-index c3a1b29..269de36 100644
---- a/gba_memory.c
-+++ b/gba_memory.c
-@@ -2695,6 +2695,7 @@ static s32 load_gamepak_raw(const char *name)
-     // Proceed to read the whole ROM or as much as possible.
-     for (i = 0; i < ldblks; i++)
-     {
-+	  sf2000_load_progress("ROM cache", i, ldblks);
-       // Load 1MB chunk and map it
-       {
-         u32 read_len = (u32)filestream_read(gamepak_file_large, gamepak_buffers[i], gamepak_buffer_blocksize);
-@@ -2711,6 +2712,7 @@ static s32 load_gamepak_raw(const char *name)
-         map_rom_entry(read, phyn, blkptr, rom_blocks);
-       }
-     } 
-+	 sf2000_load_progress("ROM cache", ldblks, ldblks);
- 
-     return 0;
-   }
 diff --git a/gpsp_config.h b/gpsp_config.h
-index 625f46e..33b5193 100644
+index 625f46e..4560387 100644
 --- a/gpsp_config.h
 +++ b/gpsp_config.h
-@@ -12,7 +12,10 @@
+@@ -12,13 +12,25 @@
  #endif
  
  /* Cache sizes and their config knobs */
--#if defined(SMALL_TRANSLATION_CACHE)
-+#if defined(SF2000_NOMMU)
-+  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 512)
-+  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 128)
-+#elif defined(SMALL_TRANSLATION_CACHE)
++#ifndef ROM_TRANSLATION_CACHE_SIZE
+ #if defined(SMALL_TRANSLATION_CACHE)
    #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)
-   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
+-  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
  #else
+   #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 10)
++#endif
++#endif
++
++#ifndef RAM_TRANSLATION_CACHE_SIZE
++#if defined(SMALL_TRANSLATION_CACHE)
++  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
++#else
+   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 512)
+ #endif
++#endif
++
++#ifndef TRANSLATOR_WORKSPACE_SIZE
++  #define TRANSLATOR_WORKSPACE_SIZE 0
++#endif
+ 
+ /* Should be an upperbound to the maximum number of bytes a single JIT'ed
+    instruction can take. STM/LDM are tipically the biggest ones */
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index 46e958a..5107559 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -620,8 +620,20 @@ void retro_init(void)
+ 
+ #if defined(HAVE_DYNAREC)
+   #if defined(MMAP_JIT_CACHE)
+-   rom_translation_cache = map_jit_block(ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE);
++   rom_translation_cache = map_jit_block(ROM_TRANSLATION_CACHE_SIZE +
++                                         RAM_TRANSLATION_CACHE_SIZE +
++                                         TRANSLATOR_WORKSPACE_SIZE);
++   if (!rom_translation_cache)
++   {
++      if (log_cb)
++         log_cb(RETRO_LOG_ERROR,
++                "Failed to allocate executable translation cache\n");
++      dynarec_enable = 0;
++      return;
++   }
+    ram_translation_cache = &rom_translation_cache[ROM_TRANSLATION_CACHE_SIZE];
++   rom_translation_ptr = rom_translation_cache;
++   ram_translation_ptr = ram_translation_cache;
+   #elif defined(_3DS)
+    if (__ctr_svchax && !translation_caches_inited)
+    {
+@@ -722,7 +734,8 @@ void retro_deinit(void)
+    memory_term();
+ 
+ #if defined(MMAP_JIT_CACHE) && defined(HAVE_DYNAREC)
+-   unmap_jit_block(rom_translation_cache, ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE);
++   unmap_jit_block(rom_translation_cache, ROM_TRANSLATION_CACHE_SIZE +
++                   RAM_TRANSLATION_CACHE_SIZE + TRANSLATOR_WORKSPACE_SIZE);
+ #endif
+ #if defined(_3DS) && defined(HAVE_DYNAREC)
+ 
 diff --git a/memmap.c b/memmap.c
-index 46bb951..41cc27c 100644
+index 46bb951..b50598e 100644
 --- a/memmap.c
 +++ b/memmap.c
 @@ -29,7 +29,7 @@
@@ -203,36 +179,11 @@ index 46bb951..41cc27c 100644
  #elif defined(ARM64_ARCH)
    #define _MAP_ITERATIONS            256   // Test -/+128MB in 1MB steps
    #define _MAP_STEP           (1024*1024)
-@@ -102,6 +102,11 @@ bool validate_addr_section_mips(void *ptr, unsigned size, unsigned max_offset_mb
- 
- 	// Posix implementation
- 	void *map_jit_block(unsigned size) {
-+#if defined(SF2000_NOMMU)
-+		void *p = mmap((void *)0, size, PROT_READ|PROT_WRITE|PROT_EXEC,
-+		                    MAP_ANON|MAP_SHARED, -1, 0);
-+		return p == MAP_FAILED ? 0 : p;
-+#else
- 		unsigned i;
- 		uintptr_t base = (uintptr_t)(map_jit_block) & (~(_MAP_STEP - 1ULL));
- 		for (i = 0; i < _MAP_ITERATIONS; i++) {
-@@ -120,6 +125,7 @@ bool validate_addr_section_mips(void *ptr, unsigned size, unsigned max_offset_mb
- 			}
- 		}
- 		return 0;
-+#endif
- 	}
- 
- 	void unmap_jit_block(void *bufptr, unsigned size) {
-@@ -129,4 +135,3 @@ bool validate_addr_section_mips(void *ptr, unsigned size, unsigned max_offset_mb
- #endif /* WIN32 */
- 
- #endif /* MMAP_JIT_CACHE */
--
 diff --git a/mips/mips_emit.h b/mips/mips_emit.h
-index 79d5183..47e4f51 100644
+index 79d5183..1bbe0a5 100644
 --- a/mips/mips_emit.h
 +++ b/mips/mips_emit.h
-@@ -1512,7 +1512,8 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address)
+@@ -1512,9 +1512,10 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address)
  #define thumb_data_proc_mov_hi()                                              \
  {                                                                             \
    thumb_decode_hireg_op();                                                    \
@@ -243,7 +194,9 @@ index 79d5183..47e4f51 100644
 +  mips_emit_addu(arm_to_mips_reg[dest_rd], arm_to_mips_reg[rs], reg_zero);    \
 +  check_store_reg_pc_thumb(dest_rd);                                          \
  }                                                                             \
-@@ -2653,13 +2653,16 @@ static void emit_phand(
+ 
+ #define thumb_load_pc(_rd)                                                    \
+@@ -2653,13 +2654,16 @@ static void emit_phand(
    mips_emit_addu(reg_temp, reg_temp, reg_base); // Add to the base_reg the table offset
    mips_emit_lw(reg_rv,   reg_temp, tbloff);     // Get func addr from 1st table
    mips_emit_lw(reg_temp, reg_temp, tbloff2);    // Get opcode from 2nd table
@@ -254,7 +207,7 @@ index 79d5183..47e4f51 100644
      mips_emit_cache(0x1A, mips_reg_ra, -8);
      mips_emit_jr(reg_rv);                       // Jump directly to target for speed
      mips_emit_cache(0x08, mips_reg_ra, -8);
-+  #elif defined(SF2000)
++  #elif defined(GPSP_DYNAREC_NO_SMC_PATCH)
 +    mips_emit_jr(reg_rv);
 +    mips_emit_nop();
    #else
@@ -262,19 +215,14 @@ index 79d5183..47e4f51 100644
      mips_emit_jr(reg_rv);
      #ifdef MIPS_HAS_R2_INSTS
        mips_emit_synci(mips_reg_ra, -8);
-@@ -2801,13 +2804,20 @@ void init_emitter(bool must_swap) {
-   rom_cache_watermark = (u32)(translation_ptr - rom_translation_cache);
- 
-   init_bios_hooks();
-+
- }
+@@ -2805,7 +2809,15 @@ void init_emitter(bool must_swap) {
  
  u32 execute_arm_translate_internal(u32 cycles, void *regptr);
  u32 execute_arm_translate(u32 cycles) {
 -  return execute_arm_translate_internal(cycles, &reg[0]);
 +  u32 ret = execute_arm_translate_internal(cycles, &reg[0]);
-+#ifdef SF2000
-+  if (ret == SF2000_GPSP_DYNAREC_LOOKUP_FAILED) {
++#ifdef GPSP_DYNAREC_SAFE_FALLBACK
++  if (ret == GPSP_DYNAREC_LOOKUP_FAILED) {
 +    clear_gamepak_stickybits();
 +    execute_arm(cycles);
 +    return 0;
@@ -284,17 +232,17 @@ index 79d5183..47e4f51 100644
  }
  
  #endif
--
--
 diff --git a/mips/mips_stub.S b/mips/mips_stub.S
-index 34b0446..be0a9df 100644
+index 34b0446..e90fa4e 100644
 --- a/mips/mips_stub.S
 +++ b/mips/mips_stub.S
-@@ -18,19 +18,34 @@
+@@ -18,17 +18,41 @@
  
  #include "../gpsp_config.h"
  
-+#define SF2000_GPSP_DYNAREC_LOOKUP_FAILED 0x7ffffffe
++#ifdef GPSP_DYNAREC_SAFE_FALLBACK
++#define GPSP_DYNAREC_LOOKUP_FAILED 0x7ffffffe
++#endif
 +
  // This is also defined in sys/asm.h but doesn't seem portable?
  #ifdef __mips64
@@ -313,8 +261,9 @@ index 34b0446..be0a9df 100644
 +  #define SZREG 4
 +  #define REG_L lw
 +  #define REG_S sw
- #endif
- 
++#endif
++
++#ifdef GPSP_DYNAREC_SAFE_FALLBACK
 +.macro jump_translated_result
 +  beqz $2, translated_lookup_failed
 +  addiu $1, $0, -4
@@ -322,11 +271,15 @@ index 34b0446..be0a9df 100644
 +  jr $2
 +  nop
 +.endm
-+
++#else
++.macro jump_translated_result
++  jr $2
++  nop
++.endm
+ #endif
+ 
  #define defsymbl(symbol) \
- .type symbol, %function ;\
- .global symbol ;         \
-@@ -298,22 +313,26 @@ defsymbl(mips_indirect_branch_arm)
+@@ -298,23 +322,29 @@ defsymbl(mips_indirect_branch_arm)
    save_registers
    cfncall block_lookup_address_arm, 1
    restore_registers
@@ -350,15 +303,18 @@ index 34b0446..be0a9df 100644
 -  jr $2                           # $2 = value returned
 +  jump_translated_result          # $2 = value returned
 +
++#ifdef GPSP_DYNAREC_SAFE_FALLBACK
 +translated_lookup_failed:
 +  collapse_flags
 +  save_registers
-+  li $2, SF2000_GPSP_DYNAREC_LOOKUP_FAILED
++  li $2, GPSP_DYNAREC_LOOKUP_FAILED
 +  b return_to_main
    nop
++#endif
  
  
-@@ -359,13 +378,11 @@ lookup_pc_noflags:
+ # Called on I/O writes that have side-effects
+@@ -359,13 +389,11 @@ lookup_pc_noflags:
  
    cfncall block_lookup_address_thumb, 2  # get Thumb address
    restore_registers
@@ -374,7 +330,7 @@ index 34b0446..be0a9df 100644
  
  
  defsymbl(smc_write)
-@@ -485,8 +502,7 @@ defsymbl(execute_store_cpsr)
+@@ -485,8 +513,7 @@ defsymbl(execute_store_cpsr)
    addu $4, $2, $0                      # load new address in $4
    cfncall block_lookup_address_arm, 1  # GBA address is in $4
    restore_registers                    # restore registers
@@ -384,7 +340,7 @@ index 34b0446..be0a9df 100644
  
  
  # $4: new spsr
-@@ -542,14 +558,12 @@ defsymbl(execute_arm_translate_internal)
+@@ -542,14 +569,12 @@ defsymbl(execute_arm_translate_internal)
  
    cfncall block_lookup_address_arm, 1
    restore_registers               # load initial register values
@@ -401,17 +357,3 @@ index 34b0446..be0a9df 100644
  
  .bss
  .align 6
-@@ -615,7 +629,7 @@ fnptrs:
- 
- # Make this section executable!
- .text
--#if defined(PSP) || defined(PS2)
-+#if defined(PSP) || defined(PS2) || defined(SF2000_NOMMU)
-   .section .bss
- #else
-   # Need to mark the section as awx (for Linux)
-@@ -633,4 +647,3 @@ defsymbl(ram_translation_cache)
- #if defined(__linux__) && defined(__ELF__)
-   .section .note.GNU-stack,"",%progbits
- #endif
--

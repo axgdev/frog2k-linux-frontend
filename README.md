@@ -126,3 +126,25 @@ kernel on `free`. A fixed bump arena is unsafe for switching cores in one
 NOMMU process because it cannot reclaim a departed core's allocations.
 `make check` includes repeated allocation/free/reallocation cycles to prevent
 that lifecycle leak from returning.
+
+## gpSP portability boundary
+
+SF2000 cache sizing and compiler policy live in this Makefile, not in gpSP.
+The host selects a 512 KiB ROM JIT cache, a 128 KiB RAM JIT cache, and a
+mapped 9 KiB translator workspace. Only `cpu_threaded.c` is compiled with the
+conservative switch lowering required by the bFLT relocation model; the rest
+of the core retains the normal optimized build.
+
+The pinned gpSP patch contains only behavior that cannot be supplied by a
+libretro frontend or Linux driver: MIPS32r1 assembly selection, a Thumb
+high-register emitter correctness fix, safe handling of failed dynarec
+lookups, non-self-modifying memory handlers for CPUs without an instruction
+cache synchronization opcode, executable-cache allocation validation, and a
+relocatable translator workspace. Cache sizes and each of those optional
+policies are compile-time defines, so another NOMMU MIPS host can reuse the
+fixes without inheriting SF2000 constants.
+
+UTF conversion is excluded because this minimal uClibc profile deliberately
+has no wide-character API and gpSP does not call that libretro-common unit.
+Applications that need Unicode should use a wchar-enabled system profile;
+there is no SF2000-specific replacement hidden in the core.

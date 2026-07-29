@@ -28,14 +28,20 @@ GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
+GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
+	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-G0 -mno-abicalls -fno-pic -fomit-frame-pointer -ffast-math \
 	-fsigned-char -fno-strict-aliasing -fwrapv \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
-	-ffunction-sections -fdata-sections -DSMALL_TRANSLATION_CACHE \
+	-ffunction-sections -fdata-sections \
 	-DMMAP_JIT_CACHE -DROM_BUFFER_SIZE=4 -DHAVE_STRINGS_H -DHAVE_STDINT_H \
 	-DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -DHAVE_DYNAREC \
-	-DMIPS_ARCH -DSF2000 -DSF2000_NOMMU \
+	-DMIPS_ARCH -DGPSP_DYNAREC_NO_SMC_PATCH \
+	-DGPSP_DYNAREC_SAFE_FALLBACK \
+	-DROM_TRANSLATION_CACHE_SIZE=524288 \
+	-DRAM_TRANSLATION_CACHE_SIZE=131072 \
+	-DTRANSLATOR_WORKSPACE_SIZE=9216 \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
@@ -184,13 +190,15 @@ $(GPSP_DIR)/.sf2000-patched: $(GPSP_DIR)/.git $(GPSP_PATCHES)
 $(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched Makefile
 	mkdir -p build
 	$(MAKE) -C $(GPSP_DIR) clean-objs platform=rs90 STATIC_LINKING=1
+	$(MAKE) -C $(GPSP_DIR) cpu_threaded.o platform=rs90 STATIC_LINKING=1 \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' CFLAGS='$(GPSP_CFLAGS)' \
+		OPTIMIZE='$(GPSP_TRANSLATOR_OPTIMIZE)'
 	$(MAKE) -C $(GPSP_DIR) platform=rs90 STATIC_LINKING=1 \
 		TARGET='$(abspath $@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' \
-		CPU_THREADED_CC='$(SF2000_CC)' \
 		CFLAGS='$(GPSP_CFLAGS)' \
-		OPTIMIZE='-Os -DNDEBUG' \
-		CPU_THREADED_OPTIMIZE='-Os -g -DNDEBUG -fno-expensive-optimizations -fno-jump-tables -fno-tree-switch-conversion -fno-strict-aliasing -fwrapv'
+		OPTIMIZE='-Os -DNDEBUG'
 	@if $(CROSS_COMPILE)objdump -dr --disassemble=translate_block_arm \
 		'$(GPSP_DIR)/cpu_threaded.o' | \
 		grep -Eq '[[:space:]]jr[[:space:]]+(a[0-3]|v[01]|t[0-9]|s[0-8]|gp|sp|fp)'; then \
