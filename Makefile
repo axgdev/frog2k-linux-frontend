@@ -28,6 +28,8 @@ GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
+GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) | sha256sum | cut -c1-16)
+GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -41,7 +43,7 @@ GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-DGPSP_DYNAREC_SAFE_FALLBACK \
 	-DGPSP_ROM_BUFFER_MMAP -DGPSP_ROM_BUFFER_DEVICE \
 	-DROM_TRANSLATION_CACHE_SIZE=524288 \
-	-DRAM_TRANSLATION_CACHE_SIZE=1048576 \
+	-DRAM_TRANSLATION_CACHE_SIZE=131072 \
 	-DTRANSLATOR_WORKSPACE_SIZE=9216 \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
@@ -178,14 +180,14 @@ $(GPSP_DIR)/.git:
 	git clone --filter=blob:none https://github.com/libretro/gpsp.git $(GPSP_DIR)
 	git -C $(GPSP_DIR) checkout --detach $(GPSP_REV)
 
-$(GPSP_DIR)/.sf2000-patched: $(GPSP_DIR)/.git $(GPSP_PATCHES)
+$(GPSP_PATCH_STAMP): $(GPSP_DIR)/.git $(GPSP_PATCHES)
 	git -C '$(GPSP_DIR)' reset --hard '$(GPSP_REV)'
 	for patch_file in $(GPSP_PATCHES); do \
 		patch -d '$(GPSP_DIR)' -p1 < "$$patch_file"; \
 	done
 	touch '$@'
 
-$(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched Makefile
+$(GPSP_CORE): $(GPSP_PATCH_STAMP) Makefile
 	mkdir -p build
 	$(MAKE) -C $(GPSP_DIR) clean-objs platform=rs90 STATIC_LINKING=1
 	$(MAKE) -C $(GPSP_DIR) cpu_threaded.o platform=rs90 STATIC_LINKING=1 \
