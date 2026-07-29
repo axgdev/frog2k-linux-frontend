@@ -21,6 +21,7 @@ extern long syscall(long number, ...);
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
 #define GPSP_PATH "/usr/bin/sf2000-gpsp"
+#define PLAYER_PATH "/usr/bin/sf2000-player"
 #define SD_ROOT "/mnt/sd"
 #define MAX_ENTRIES 128
 #define MAX_NAME 128
@@ -263,6 +264,25 @@ static int gba_path(const char *path)
 	return 0;
 }
 
+static int media_path(const char *p)
+{
+	const char *dot = strrchr(p, '.');
+	const char *exts[] = {
+		".mp3", ".aac", ".flac", ".wav", ".ogg",
+		".mp4", ".mkv", ".avi",
+		".png", ".jpg", ".jpeg", ".bmp", ".gif",
+	};
+	unsigned i;
+
+	if (!dot)
+		return 0;
+	for (i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+		if (!strcasecmp(dot, exts[i]))
+			return 1;
+	}
+	return 0;
+}
+
 static void launch_selected(void)
 {
 	char path[MAX_PATH], message[640];
@@ -276,7 +296,24 @@ static void launch_selected(void)
 		return;
 	}
 	if (!gameboy_path(path) && !gba_path(path)) {
-		log_message("unsupported file; use GB, GBC, or GBA directory");
+		if (media_path(path)) {
+			char *const argv[] = { (char *)PLAYER_PATH, path, NULL };
+			char *const envp[] = { NULL };
+
+			snprintf(message, sizeof(message), "launch Player %s", path);
+			log_message(message);
+			memset(framebuffer, 0, (size_t)height * stride * sizeof(*framebuffer));
+			text(72, 92, "OPENING MEDIA", 0xffff);
+			text(48, 132, "PLEASE WAIT - SYSTEM IS ACTIVE", 0x07e0);
+			if (pwrite(framebuffer_fd, framebuffer,
+					(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
+				log_message("loading framebuffer write failed");
+			execve(PLAYER_PATH, argv, envp);
+			snprintf(message, sizeof(message), "player exec failed errno=%d", errno);
+			log_message(message);
+			return;
+		}
+		log_message("unsupported file; use GB, GBC, GBA, or media files");
 		return;
 	}
 	{
