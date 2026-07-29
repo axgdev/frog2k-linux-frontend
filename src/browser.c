@@ -12,6 +12,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <sys/sysinfo.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -317,14 +318,37 @@ static void launch_selected(void)
 		return;
 	}
 	{
-		const char *core = gba_path(path) ? GPSP_PATH : GAMBATTE_PATH;
-		const char *name = gba_path(path) ? "gpSP" : "Gambatte";
+		const int gba = gba_path(path);
+		const char *core = gba ? GPSP_PATH : GAMBATTE_PATH;
+		const char *name = gba ? "gpSP" : "Gambatte";
+
+		if (gba) {
+			struct sysinfo info;
+			const unsigned long minimum = 40ul * 1024ul * 1024ul;
+
+			if (sysinfo(&info) == 0 &&
+			    (info.freeram + info.bufferram) * info.mem_unit < minimum) {
+				snprintf(message, sizeof(message),
+					 "gpSP needs 40 MiB free; available=%lu KiB",
+					 ((info.freeram + info.bufferram) * info.mem_unit) /
+					 1024ul);
+				log_message(message);
+				memset(framebuffer, 0,
+				       (size_t)height * stride * sizeof(*framebuffer));
+				text(50, 92, "NOT ENOUGH MEMORY FOR GPSP", 0xf800);
+				text(50, 116, "CLOSE OTHER APPLICATIONS", 0xffff);
+				(void)pwrite(framebuffer_fd, framebuffer,
+					     (size_t)height * stride *
+					     sizeof(*framebuffer), 0);
+				return;
+			}
+		}
 
 		snprintf(message, sizeof(message), "launch %s %s", name, path);
 		log_message(message);
-		/* exec of a large bFLT includes relocation and BSS setup on the weak
-		 * CPU.  Replace the browser before entering the kernel loader so this
-		 * unavoidable work never looks like a frozen selection screen. */
+		/* Replace the browser before the static-PIE loader allocates and
+		 * relocates the core, so the handoff never looks like a frozen
+		 * selection screen. */
 		memset(framebuffer, 0, (size_t)height * stride * sizeof(*framebuffer));
 		text(72, 92, "LOADING EMULATOR", 0xffff);
 		text(102, 108, name, 0x07ff);

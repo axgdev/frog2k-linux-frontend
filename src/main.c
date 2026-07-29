@@ -1060,6 +1060,19 @@ static void close_platform(void)
 
 extern int sf2000_load_content(const char *path, struct retro_game_info *game);
 
+static void retained_stage(const char *name, unsigned value)
+{
+#ifdef __mips__
+	(void)hc15xx_retained_mark(
+		(volatile struct hc15xx_retained_log *)(uintptr_t)
+			HC15XX_RETAINED_UNCACHED,
+		name, 0x64u, value);
+#else
+	(void)name;
+	(void)value;
+#endif
+}
+
 int main(int argc, char **argv)
 {
 	struct retro_system_info info;
@@ -1074,6 +1087,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	log_kmsg("entry\n");
+	retained_stage("frontend-entry", 1);
 	memset(&fault_action, 0, sizeof(fault_action));
 	fault_action.sa_sigaction = fault_signal;
 	fault_action.sa_flags = SA_SIGINFO;
@@ -1090,6 +1104,7 @@ int main(int argc, char **argv)
 	host.system_dir = "/mnt/sd/bios";
 	host.save_dir = "/mnt/sd/saves";
 	log_kmsg("platform ready\n");
+	retained_stage("frontend-platform", 2);
 	retro_set_environment(environment);
 	retro_set_video_refresh(video);
 	retro_set_audio_sample(audio_sample);
@@ -1104,8 +1119,10 @@ int main(int argc, char **argv)
 	memset(&info, 0, sizeof(info));
 	retro_get_system_info(&info);
 	log_kmsg("core init begin\n");
+	retained_stage("frontend-core-begin", 3);
 	retro_init();
 	log_kmsg("core init complete\n");
+	retained_stage("frontend-core-done", 4);
 	if (&gba_screen_pixels) {
 		char details[96];
 
@@ -1123,6 +1140,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	log_kmsg("ROM load begin\n");
+	retained_stage("frontend-rom-begin", 5);
 	if (!retro_load_game(&game)) {
 		log_kmsg("core rejected game\n");
 		fprintf(stderr, "sf2000-frontend: core rejected %s\n", argv[1]);
@@ -1132,6 +1150,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	log_kmsg("ROM load complete\n");
+	retained_stage("frontend-rom-done", 6);
 	retro_get_system_av_info(&av);
 	host.fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
 	host.audio_rate = av.timing.sample_rate > 1.0 ?
@@ -1150,6 +1169,7 @@ int main(int argc, char **argv)
 		log_kmsg(details);
 	}
 	log_kmsg("frontend running START+L exits SELECT+R toggles uncapped full-frame mode\n");
+	retained_stage("frontend-run", 7);
 	start_metrics_logging();
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);

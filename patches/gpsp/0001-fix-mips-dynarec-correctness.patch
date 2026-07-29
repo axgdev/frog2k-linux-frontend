@@ -29,7 +29,7 @@ diff --git a/cpu.h b/cpu.h
 index dd6cb89..6e2fe23 100644
 --- a/cpu.h
 +++ b/cpu.h
-@@ -155,6 +155,13 @@ extern u8 ram_translation_cache[RAM_TRANSLATION_CACHE_SIZE];
+@@ -155,6 +155,15 @@ extern u8 ram_translation_cache[RAM_TRANSLATION_CACHE_SIZE];
  #endif
  extern u8 *rom_translation_ptr;
  extern u8 *ram_translation_ptr;
@@ -40,6 +40,8 @@ index dd6cb89..6e2fe23 100644
 +extern u32 ram_translation_dma_flush_count;
 +extern u32 rom_translation_peak;
 +extern u32 ram_translation_peak;
++extern u32 jit_cache_sync_calls;
++extern u32 jit_cache_sync_failures;
  
  #define MAX_TRANSLATION_GATES 8
  
@@ -56,7 +58,7 @@ diff --git a/cpu_threaded.c b/cpu_threaded.c
 index 8942ab3..0fd2134 100644
 --- a/cpu_threaded.c
 +++ b/cpu_threaded.c
-@@ -61,6 +61,13 @@ u32 ewram_code_max =  0U;
+@@ -61,6 +61,15 @@ u32 ewram_code_max =  0U;
  
  #define INITIAL_ROM_WATERMARK   16   // To avoid NULL aliasing
  u32 rom_cache_watermark = INITIAL_ROM_WATERMARK;
@@ -67,9 +69,27 @@ index 8942ab3..0fd2134 100644
 +u32 ram_translation_dma_flush_count;
 +u32 rom_translation_peak;
 +u32 ram_translation_peak;
++u32 jit_cache_sync_calls;
++u32 jit_cache_sync_failures;
  
  u8 *bios_swi_entrypoint = NULL;
  
+@@ -247,8 +256,14 @@ u32 ewram_code_max =  0U;
+     __clear_cache(baseaddr, endptr);
+   }
+ #elif defined(MIPS_ARCH)
++  extern int cacheflush(void *address, int bytes, int cache);
+   void platform_cache_sync(void *baseaddr, void *endptr) {
+-    __builtin___clear_cache(baseaddr, endptr);
++    int length = (int)((char *)endptr - (char *)baseaddr);
++    if (length <= 0)
++      return;
++    jit_cache_sync_calls++;
++    if (cacheflush(baseaddr, length, 3) != 0)
++      jit_cache_sync_failures++;
+   }
+ #else
+   /* x86 CPUs have icache consistency checks */
 @@ -2653,12 +2660,15 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
    unsigned i;
    for (i = 0; i < 4; i++) {
@@ -206,7 +226,7 @@ index 8942ab3..0fd2134 100644
    /* We flush the generated code except for everything below the watermark. */
    last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
    rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
-@@ -3388,6 +3441,14 @@ void flush_translation_cache_rom(void)
+@@ -3388,6 +3441,16 @@ void flush_translation_cache_rom(void)
  
  void init_dynarec_caches(void)
  {
@@ -217,6 +237,8 @@ index 8942ab3..0fd2134 100644
 +  ram_translation_dma_flush_count = 0;
 +  rom_translation_peak = 0;
 +  ram_translation_peak = 0;
++  jit_cache_sync_calls = 0;
++  jit_cache_sync_failures = 0;
 +
    /* Initialize caches so that we can start initalizing the emitter. */
    rom_translation_ptr = last_rom_translation_ptr = &rom_translation_cache[0];
@@ -230,21 +252,17 @@ diff --git a/gba_memory.c b/gba_memory.c
 index c3a1b29..a1a2dfb 100644
 --- a/gba_memory.c
 +++ b/gba_memory.c
-@@ -19,6 +19,13 @@
+@@ -19,6 +19,9 @@
  
  #include "common.h"
  #include "streams/file_stream.h"
 +#ifdef GPSP_ROM_BUFFER_MMAP
 +#include <sys/mman.h>
 +#endif
-+#ifdef GPSP_ROM_BUFFER_DEVICE
-+#include <fcntl.h>
-+#include <unistd.h>
-+#endif
  
  /* Sound */
  #define gbc_sound_tone_control_low(channel, regn)                             \
-@@ -362,20 +369,29 @@ u8 gamepak_backup[1024 * 128];
+@@ -362,20 +369,27 @@ u8 gamepak_backup[1024 * 128];
  u32 dma_bus_val;
  dma_transfer_type dma[4];
  
@@ -276,8 +294,6 @@ index c3a1b29..a1a2dfb 100644
 -// We allocate in 1MB chunks.
 -const unsigned gamepak_buffer_blocksize = 1024*1024;
 +const unsigned gamepak_buffer_blocksize = GAMEPAK_BUFFER_PAGE_SIZE;
-+static u8 *gamepak_buffer_mapping;
-+static u32 gamepak_buffer_mapping_size;
  
  // LRU queue with the loaded blocks and what they map to
  struct {
@@ -338,7 +354,7 @@ index c3a1b29..a1a2dfb 100644
      if (read_len < (32 * 1024))
        memset(swap_location + read_len, 0xFF, (32 * 1024) - read_len);
    }
-@@ -2292,11 +2315,44 @@ u8 *load_gamepak_page(u32 physical_index)
+@@ -2292,11 +2315,22 @@ u8 *load_gamepak_page(u32 physical_index)
  void init_gamepak_buffer(void)
  {
    unsigned i;
@@ -349,28 +365,6 @@ index c3a1b29..a1a2dfb 100644
 +  // Allocate up to ROM_BUFFER_SIZE MiB without high-order NOMMU mappings.
    gamepak_buffer_count = 0;
 -  while (gamepak_buffer_count < ROM_BUFFER_SIZE)
-+  gamepak_buffer_mapping = NULL;
-+  gamepak_buffer_mapping_size = 0;
-+#ifdef GPSP_ROM_BUFFER_DEVICE
-+  {
-+    const u32 mapping_size = target_pages * GAMEPAK_BUFFER_PAGE_SIZE;
-+    int fd = open("/dev/sf2000-rombuf", O_RDWR);
-+    if (fd >= 0)
-+    {
-+      void *ptr = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
-+                       MAP_SHARED, fd, 0);
-+      close(fd);
-+      if (ptr != MAP_FAILED)
-+      {
-+        gamepak_buffer_mapping = (u8 *)ptr;
-+        gamepak_buffer_mapping_size = mapping_size;
-+        for (i = 0; i < target_pages; i++)
-+          gamepak_buffers[gamepak_buffer_count++] =
-+            gamepak_buffer_mapping + i * GAMEPAK_BUFFER_PAGE_SIZE;
-+      }
-+    }
-+  }
-+#endif
 +  while (gamepak_buffer_count < target_pages)
    {
 +#ifdef GPSP_ROM_BUFFER_MMAP
@@ -394,37 +388,23 @@ index c3a1b29..a1a2dfb 100644
  }
  
  bool gamepak_must_swap(void)
-@@ -2323,6 +2379,18 @@ bool gamepak_must_swap(void)
+@@ -2323,6 +2379,12 @@ bool gamepak_must_swap(void)
    return gamepak_buffer_count * gamepak_buffer_blocksize < gamepak_size;
  }
  
 +u8 *gamepak_direct_map_base(void)
 +{
-+  /*
-+   * The MIPS fast handler masks a cartridge address to 25 bits. Restrict it
-+   * to a maximum-size ROM in the explicitly contiguous board mapping; smaller
-+   * cartridges retain gpSP's exact mirroring behavior through readmap.
-+   */
-+  if (gamepak_buffer_mapping && gamepak_size == 32 * 1024 * 1024)
-+    return gamepak_buffer_mapping;
++  /* Paged on-demand mappings preserve exact cartridge mirroring. */
 +  return NULL;
 +}
 +
  void init_memory(void)
  {
    u32 map_offset = 0, i;
-@@ -2394,9 +2462,22 @@ void memory_term(void)
+@@ -2394,9 +2462,14 @@ void memory_term(void)
      gamepak_file_large = NULL;
    }
  
-+  if (gamepak_buffer_mapping)
-+  {
-+    munmap(gamepak_buffer_mapping, gamepak_buffer_mapping_size);
-+    gamepak_buffer_mapping = NULL;
-+    gamepak_buffer_mapping_size = 0;
-+    gamepak_buffer_count = 0;
-+  }
-+
    while (gamepak_buffer_count)
    {
 +#ifdef GPSP_ROM_BUFFER_MMAP
@@ -601,7 +581,7 @@ index 46e958a..8b38b48 100644
  
     if (selected_bios != builtin_bios && gamepak_header_nonstandard)
     {
-@@ -1286,6 +1306,35 @@ bool retro_load_game_special(unsigned game_type,
+@@ -1286,6 +1306,38 @@ bool retro_load_game_special(unsigned game_type,
  
  void retro_unload_game(void)
  {
@@ -626,6 +606,9 @@ index 46e958a..8b38b48 100644
 +            ram_translation_capacity_flush_count,
 +            ram_translation_store_flush_count,
 +            ram_translation_dma_flush_count);
++      log_cb(RETRO_LOG_INFO,
++            "[gpSP JIT cache] calls=%u failures=%u\n",
++            jit_cache_sync_calls, jit_cache_sync_failures);
 +   }
 +#endif
 +
