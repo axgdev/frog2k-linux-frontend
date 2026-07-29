@@ -138,11 +138,24 @@ of the core retains the normal optimized build.
 The pinned gpSP patch contains only behavior that cannot be supplied by a
 libretro frontend or Linux driver: MIPS32r1 assembly selection, a Thumb
 high-register emitter correctness fix, safe handling of failed dynarec
-lookups, non-self-modifying memory handlers for CPUs without an instruction
-cache synchronization opcode, executable-cache allocation validation, and a
-relocatable translator workspace. Cache sizes and each of those optional
-policies are compile-time defines, so another NOMMU MIPS host can reuse the
-fixes without inheriting SF2000 constants.
+lookups, executable-cache allocation validation, a relocatable translator
+workspace, and safe memory-handler specialization. The latter publishes
+modified JIT code through Linux's cache API only at a frame boundary, when no
+generated code is live. Until that boundary the generic handler remains
+valid. ROM hacks also skip inherited retail-game idle-loop addresses, which
+may refer to unrelated instructions after a hack moves or replaces code.
+
+An intrusive QEMU-only profile of Pokemon Unbound found 94--97% of gpSP core
+time in generated guest code. GBA scanline rendering used about 1--2%, audio
+less than 1%, and the frontend presentation path about 1.5 ms per frame.
+Safe handler specialization improved the two measured 300-frame intervals by
+roughly 1.0% and 1.8%, without frame skipping or reduced quality. The detailed
+profiler is not part of release builds; the frontend's low-overhead tmpfs
+metrics remain available for physical and QEMU runs.
+
+Cache sizes and each optional dynarec policy are compile-time defines, so
+another NOMMU MIPS host can reuse the fixes without inheriting SF2000
+constants.
 
 UTF conversion is excluded because this minimal uClibc profile deliberately
 has no wide-character API and gpSP does not call that libretro-common unit.

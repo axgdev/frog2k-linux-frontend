@@ -1,5 +1,5 @@
 diff --git a/Makefile.common b/Makefile.common
-index 9742c05..608275f 100644
+index 9742c05..28783ef 100644
 --- a/Makefile.common
 +++ b/Makefile.common
 @@ -23,7 +23,6 @@ SOURCES_C := $(CORE_DIR)/main.c \
@@ -99,6 +99,29 @@ index 8942ab3..970cc9d 100644
    u32 opcode = 0;
    u32 last_opcode;
    u32 condition;
+@@ -3412,4 +3432,3 @@ void flush_dynarec_caches(void)
+   iwram_code_max = 0x8000;
+   flush_translation_cache_ram();
+ }
+-
+diff --git a/gba_memory.c b/gba_memory.c
+index c3a1b29..f7f68b1 100644
+--- a/gba_memory.c
++++ b/gba_memory.c
+@@ -2960,6 +2960,13 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
+ 
+    if (is_hack && is_pokemon_engine)
+    {
++      /*
++       * gba_over.h idle-loop addresses describe the original retail image.
++       * ROM hacks commonly retain the game code while replacing or moving
++       * that code (Unbound's inherited BPRE address is erased padding).
++       * Applying the retail shortcut to unrelated instructions is unsafe.
++       */
++      idle_loop_target_pc = 0xFFFFFFFF;
+       backup_type_reset = BACKUP_FLASH;
+       flash_bank_cnt = FLASH_SIZE_128KB;
+       flash_device_id = FLASH_DEVICE_SANYO_128KB;
 diff --git a/gpsp_config.h b/gpsp_config.h
 index 625f46e..4560387 100644
 --- a/gpsp_config.h
@@ -166,8 +189,17 @@ index 46e958a..5107559 100644
  #endif
  #if defined(_3DS) && defined(HAVE_DYNAREC)
  
+diff --git a/main.c b/main.c
+index 6fb26fc..8031fbe 100644
+--- a/main.c
++++ b/main.c
+@@ -452,4 +452,3 @@ unsigned main_write_savestate(u8* dst)
+ 
+   return (unsigned int)(dst - startp);
+ }
+-
 diff --git a/memmap.c b/memmap.c
-index 46bb951..b50598e 100644
+index 46bb951..e59d6b9 100644
 --- a/memmap.c
 +++ b/memmap.c
 @@ -29,7 +29,7 @@
@@ -180,10 +212,18 @@ index 46bb951..b50598e 100644
    #define _MAP_ITERATIONS            256   // Test -/+128MB in 1MB steps
    #define _MAP_STEP           (1024*1024)
 diff --git a/mips/mips_emit.h b/mips/mips_emit.h
-index 79d5183..1bbe0a5 100644
+index 79d5183..2624c52 100644
 --- a/mips/mips_emit.h
 +++ b/mips/mips_emit.h
-@@ -1512,9 +1512,10 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address)
+@@ -51,6 +51,7 @@ void mips_cheat_hook(void);
+ u32 execute_spsr_restore(u32 address);
+ void execute_store_cpsr(u32 new_cpsr, u32 store_mask);
+ void execute_store_spsr(u32 new_spsr, u32 store_mask);
++void platform_cache_sync(void *baseaddr, void *endptr);
+ 
+ 
+ #define reg_base    mips_reg_s0
+@@ -1512,9 +1513,10 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address)
  #define thumb_data_proc_mov_hi()                                              \
  {                                                                             \
    thumb_decode_hireg_op();                                                    \
@@ -196,7 +236,15 @@ index 79d5183..1bbe0a5 100644
  }                                                                             \
  
  #define thumb_load_pc(_rd)                                                    \
-@@ -2653,13 +2654,16 @@ static void emit_phand(
+@@ -1969,6 +1971,7 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address)
+ #define ReOff_SaveR1   (REG_SAVE  * 4) // 3 save scratch regs
+ #define ReOff_SaveR2   (REG_SAVE2 * 4)
+ #define ReOff_SaveR3   (REG_SAVE3 * 4)
++#define ReOff_SaveR4   (REG_SAVE4 * 4)
+ #define ReOff_OamUpd   (OAM_UPDATED*4) // OAM_UPDATED
+ #define ReOff_GP_Save  (REG_SAVE5 * 4) // GP_SAVE
+ 
+@@ -2653,13 +2656,26 @@ static void emit_phand(
    mips_emit_addu(reg_temp, reg_temp, reg_base); // Add to the base_reg the table offset
    mips_emit_lw(reg_rv,   reg_temp, tbloff);     // Get func addr from 1st table
    mips_emit_lw(reg_temp, reg_temp, tbloff2);    // Get opcode from 2nd table
@@ -207,6 +255,16 @@ index 79d5183..1bbe0a5 100644
      mips_emit_cache(0x1A, mips_reg_ra, -8);
      mips_emit_jr(reg_rv);                       // Jump directly to target for speed
      mips_emit_cache(0x08, mips_reg_ra, -8);
++  #elif defined(GPSP_DYNAREC_SAFE_SMC_PATCH)
++    /*
++     * Linux/MIPS does not guarantee I/D cache coherence after a user-space
++     * code write. Mark the cache dirty and publish all patches at the frame
++     * boundary, when no translated code is executing. Both the old generic
++     * call and new specialised call are valid until then.
++    */
++    mips_emit_sw(reg_temp, mips_reg_ra, -8);    // Patch instruction!
++    mips_emit_jr(reg_rv);
++    mips_emit_sw(reg_base, reg_base, ReOff_SaveR4);
 +  #elif defined(GPSP_DYNAREC_NO_SMC_PATCH)
 +    mips_emit_jr(reg_rv);
 +    mips_emit_nop();
@@ -215,12 +273,19 @@ index 79d5183..1bbe0a5 100644
      mips_emit_jr(reg_rv);
      #ifdef MIPS_HAS_R2_INSTS
        mips_emit_synci(mips_reg_ra, -8);
-@@ -2805,7 +2809,15 @@ void init_emitter(bool must_swap) {
+@@ -2805,9 +2821,22 @@ void init_emitter(bool must_swap) {
  
  u32 execute_arm_translate_internal(u32 cycles, void *regptr);
  u32 execute_arm_translate(u32 cycles) {
 -  return execute_arm_translate_internal(cycles, &reg[0]);
 +  u32 ret = execute_arm_translate_internal(cycles, &reg[0]);
++  if (reg[REG_SAVE4]) {
++    platform_cache_sync(rom_translation_cache, rom_translation_ptr);
++    platform_cache_sync(ram_translation_cache, ram_translation_ptr);
++    last_rom_translation_ptr = rom_translation_ptr;
++    last_ram_translation_ptr = ram_translation_ptr;
++    reg[REG_SAVE4] = 0;
++  }
 +#ifdef GPSP_DYNAREC_SAFE_FALLBACK
 +  if (ret == GPSP_DYNAREC_LOOKUP_FAILED) {
 +    clear_gamepak_stickybits();
@@ -232,6 +297,8 @@ index 79d5183..1bbe0a5 100644
  }
  
  #endif
+-
+-
 diff --git a/mips/mips_stub.S b/mips/mips_stub.S
 index 34b0446..e90fa4e 100644
 --- a/mips/mips_stub.S
@@ -357,3 +424,8 @@ index 34b0446..e90fa4e 100644
  
  .bss
  .align 6
+@@ -633,4 +658,3 @@ defsymbl(ram_translation_cache)
+ #if defined(__linux__) && defined(__ELF__)
+   .section .note.GNU-stack,"",%progbits
+ #endif
+-
