@@ -66,7 +66,7 @@ SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 	-Wl,--no-dynamic-linker -Wl,-z,text \
 	-Wl,--gc-sections
 
-.PHONY: all clean check elf-audit sf2000 demo frogui browser gambatte gpsp integrated
+.PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser gambatte gpsp integrated
 
 all: check
 
@@ -104,6 +104,22 @@ elf-audit:
 			awk '/R_MIPS_/ && ($$2 !~ /^0000000[03]$$/ || \
 				($$3 != "R_MIPS_REL32" && $$3 != "R_MIPS_NONE")) { exit 1 }'; \
 	done
+	@if test -f build/sf2000-gpsp; then $(MAKE) gpsp-pic-audit; fi
+
+gpsp-pic-audit: build/sf2000-gpsp
+	@set -e; \
+	test "$$(grep -Fhxc '#if defined(PIC) || defined(__PIC__)' \
+		'$(GPSP_DIR)'/mips/mips_emit.h '$(GPSP_DIR)'/mips/mips_stub.S | \
+		awk '{ total += $$1 } END { print total + 0 }')" -eq 2; \
+	body="$$(mktemp)"; \
+	trap 'rm -f "$$body"' EXIT HUP INT TERM; \
+	$(CROSS_COMPILE)objdump -dr --disassemble=execute_store_cpsr '$<' > "$$body"; \
+	if grep -Eq 'lw[[:space:]]+t9,.*[(]gp[)]' "$$body"; then \
+		echo 'gpSP: dynarec C call still addresses the static-PIE GOT through emulated r13/$$gp' >&2; \
+		exit 1; \
+	fi; \
+	grep -Eq 'lw[[:space:]]+t9,.*[(]s0[)]' "$$body"; \
+	grep -Eq 'lw[[:space:]]+gp,.*[(]s0[)]' "$$body"
 
 sf2000:
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }

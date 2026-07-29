@@ -692,6 +692,15 @@ index 79d5183..8077a90 100644
  #define ReOff_OamUpd   (OAM_UPDATED*4) // OAM_UPDATED
  #define ReOff_GP_Save  (REG_SAVE5 * 4) // GP_SAVE
  
+@@ -2067,7 +2070,7 @@ static void emit_mem_access_loadop(
+   };
+ }
+ 
+-#ifdef PIC
++#if defined(PIC) || defined(__PIC__)
+   #define genccall(fn)                                         \
+     mips_emit_lui(mips_reg_t9, ((u32)fn) >> 16);               \
+     mips_emit_ori(mips_reg_t9, mips_reg_t9, ((u32)fn));        \
 @@ -2157,33 +2160,45 @@ static void emit_pmemld_stub(
    }
    
@@ -930,6 +939,15 @@ index 34b0446..6619c8c 100644
  #endif
  
  #define defsymbl(symbol) \
+@@ -214,7 +238,7 @@
+ 
+ # PIC ABI mandates to jump to target via $t9
+ 
+-#ifdef PIC
++#if defined(PIC) || defined(__PIC__)
+ .macro cfncall target, targetid
+   lw $t9, (FNPTRS_BASE + \targetid * 4)($16)
+   jalr $t9
 @@ -298,23 +322,29 @@ defsymbl(mips_indirect_branch_arm)
    save_registers
    cfncall block_lookup_address_arm, 1
