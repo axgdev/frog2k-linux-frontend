@@ -1,0 +1,111 @@
+diff --git a/cpu_threaded.c b/cpu_threaded.c
+index 7a9929c..cde2476 100644
+--- a/cpu_threaded.c
++++ b/cpu_threaded.c
+@@ -3026,22 +3026,15 @@ bool translate_block_arm(u32 pc, bool ram_region)
+ {
+ #if defined(SF2000_NOMMU)
+   /*
+-   * A Linux/NOMMU bFLT executable is relocated at load time.  Keeping these
+-   * work arrays in BSS makes the MIPS HI16/LO16 reference depend on a text
+-   * relocation which the flat loader cannot represent reliably.  The
+-   * translator already has a 512 KiB process stack, and its old global
+-   * workspace was non-reentrant, so a per-translation stack workspace is
+-   * both relocatable and preserves the intended lifetime.
+-   */
+-  /*
+-   * Every entry consumed by the translator is populated by scan_block()
+-   * before use.  The upstream global workspace is only zeroed once by BSS,
+-   * then deliberately reused without clearing.  Preserve that contract:
+-   * clearing 8 KiB for every generated block is both unnecessary and a
+-   * severe cost on this CPU.
++   * Keep upstream's single non-reentrant translator workspace, but place it
++   * after the mmap-backed JIT caches.  A bFLT BSS array needs unreliable text
++   * relocations, while an 8 KiB local array is multiplied by recursive block
++   * translation and can exhaust the NOMMU process stack.
+    */
+-  block_data_type block_data[MAX_BLOCK_SIZE];
+-  block_exit_type block_exits[MAX_EXITS];
++  block_data_type *block_data = (block_data_type *)
++    (ram_translation_cache + RAM_TRANSLATION_CACHE_SIZE);
++  block_exit_type *block_exits = (block_exit_type *)
++    (block_data + MAX_BLOCK_SIZE);
+ #endif
+   u32 opcode = 0;
+   u32 last_opcode;
+@@ -3209,8 +3202,10 @@ bool translate_block_arm(u32 pc, bool ram_region)
+ bool translate_block_thumb(u32 pc, bool ram_region)
+ {
+ #if defined(SF2000_NOMMU)
+-  block_data_type block_data[MAX_BLOCK_SIZE];
+-  block_exit_type block_exits[MAX_EXITS];
++  block_data_type *block_data = (block_data_type *)
++    (ram_translation_cache + RAM_TRANSLATION_CACHE_SIZE);
++  block_exit_type *block_exits = (block_exit_type *)
++    (block_data + MAX_BLOCK_SIZE);
+ #endif
+   u32 opcode = 0;
+   u32 last_opcode;
+@@ -3373,7 +3368,15 @@ void init_bios_hooks(void)
+   // SWI calls from ROM and RAM regardless of cache flushes.
+   rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
+   last_rom_translation_ptr = rom_translation_ptr;
++#ifdef SF2000
++  sf2000_load_progress("JIT BIOS hook begin", rom_cache_watermark,
++    (u32)rom_translation_cache);
++#endif
+   bios_swi_entrypoint = block_lookup_address_arm(0x8);
++#ifdef SF2000
++  sf2000_load_progress("JIT BIOS hook end", (u32)bios_swi_entrypoint,
++    (u32)rom_translation_ptr);
++#endif
+   rom_cache_watermark = (u32)(rom_translation_ptr - rom_translation_cache);
+ }
+ 
+diff --git a/gpsp_config.h b/gpsp_config.h
+index 33b5193..927cb6b 100644
+--- a/gpsp_config.h
++++ b/gpsp_config.h
+@@ -15,6 +15,7 @@
+ #if defined(SF2000_NOMMU)
+   #define ROM_TRANSLATION_CACHE_SIZE (1024 * 512)
+   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 128)
++  #define TRANSLATOR_WORKSPACE_SIZE  (1024 * 9)
+ #elif defined(SMALL_TRANSLATION_CACHE)
+   #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)
+   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
+@@ -23,6 +24,10 @@
+   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 512)
+ #endif
+ 
++#ifndef TRANSLATOR_WORKSPACE_SIZE
++  #define TRANSLATOR_WORKSPACE_SIZE 0
++#endif
++
+ /* Should be an upperbound to the maximum number of bytes a single JIT'ed
+    instruction can take. STM/LDM are tipically the biggest ones */
+ #define TRANSLATION_CACHE_LIMIT_THRESHOLD (1024 * 2)
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index 669fd70..5107559 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -620,7 +620,9 @@ void retro_init(void)
+ 
+ #if defined(HAVE_DYNAREC)
+   #if defined(MMAP_JIT_CACHE)
+-   rom_translation_cache = map_jit_block(ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE);
++   rom_translation_cache = map_jit_block(ROM_TRANSLATION_CACHE_SIZE +
++                                         RAM_TRANSLATION_CACHE_SIZE +
++                                         TRANSLATOR_WORKSPACE_SIZE);
+    if (!rom_translation_cache)
+    {
+       if (log_cb)
+@@ -732,7 +734,8 @@ void retro_deinit(void)
+    memory_term();
+ 
+ #if defined(MMAP_JIT_CACHE) && defined(HAVE_DYNAREC)
+-   unmap_jit_block(rom_translation_cache, ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE);
++   unmap_jit_block(rom_translation_cache, ROM_TRANSLATION_CACHE_SIZE +
++                   RAM_TRANSLATION_CACHE_SIZE + TRANSLATOR_WORKSPACE_SIZE);
+ #endif
+ #if defined(_3DS) && defined(HAVE_DYNAREC)

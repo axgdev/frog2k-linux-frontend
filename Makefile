@@ -190,7 +190,13 @@ $(GPSP_CORE): $(GPSP_DIR)/.sf2000-patched Makefile
 		CPU_THREADED_CC='$(SF2000_CC)' \
 		CFLAGS='$(GPSP_CFLAGS)' \
 		OPTIMIZE='-Os -DNDEBUG' \
-		CPU_THREADED_OPTIMIZE='-Os -g -DNDEBUG -fno-expensive-optimizations -fno-strict-aliasing -fwrapv'
+		CPU_THREADED_OPTIMIZE='-Os -g -DNDEBUG -fno-expensive-optimizations -fno-jump-tables -fno-tree-switch-conversion -fno-strict-aliasing -fwrapv'
+	@if $(CROSS_COMPILE)objdump -dr --disassemble=translate_block_arm \
+		'$(GPSP_DIR)/cpu_threaded.o' | \
+		grep -Eq '[[:space:]]jr[[:space:]]+(a[0-3]|v[01]|t[0-9]|s[0-8]|gp|sp|fp)'; then \
+		echo 'gpSP: computed jump remains in NOMMU ARM translator' >&2; \
+		exit 1; \
+	fi
 
 $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	for patch_file in $(GAMBATTE_PATCHES); do \
