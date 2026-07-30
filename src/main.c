@@ -34,13 +34,13 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define METRICS_PATH "/run/sf2000-frontend-metrics"
 #define AUDIO_BUFFER_SAMPLES 4096u
 #define AUDIO_DROP_SAMPLES 1024u
-#define AUDIO_CONVERT_SAMPLES 1024u
+#define AUDIO_CONVERT_SAMPLES 2048u
 #define AUDIO_OUTPUT_RATE 32000u
 #define AUDIO_RECOVERY_RATE 32256u
 #define AUDIO_DRAIN_RATE 31744u
-#define AUDIO_DELAY_LOW 4096
-#define AUDIO_DELAY_TARGET 5632
-#define AUDIO_DELAY_HIGH 7168
+#define AUDIO_DELAY_LOW 2048
+#define AUDIO_DELAY_TARGET 3072
+#define AUDIO_DELAY_HIGH 4096
 #define AUDIO_FEEDBACK_INTERVAL 8u
 #define GE_SOURCE_BUFFERS 2u
 
@@ -262,6 +262,16 @@ static bool environment(unsigned command, void *data)
 			variable->value = "disabled";
 			return true;
 		}
+		if (variable && variable->key &&
+				strcmp(variable->key, "fceumm_sndvolume") == 0) {
+			variable->value = "100";
+			return true;
+		}
+		if (variable && variable->key &&
+				strcmp(variable->key, "fceumm_sndrate_hint") == 0) {
+			variable->value = "32KHz";
+			return true;
+		}
 		return false;
 	}
 	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
@@ -295,6 +305,19 @@ static bool environment(unsigned command, void *data)
 	case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
 		((struct retro_log_callback *)data)->log = core_log;
 		return true;
+	case RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE:
+		*(unsigned *)data = AUDIO_OUTPUT_RATE;
+		return true;
+	case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: {
+		struct retro_framebuffer *fb = data;
+		if (!host.ge_buffers || host.format != RETRO_PIXEL_FORMAT_RGB565)
+			return false;
+		fb->data = host.ge_source[host.ge_next];
+		fb->pitch = (size_t)fb->width * sizeof(uint16_t);
+		fb->format = RETRO_PIXEL_FORMAT_RGB565;
+		fb->memory_flags = 0;
+		return true;
+	}
 	default:
 		return false;
 	}
@@ -409,7 +432,14 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	source_buffer = host.ge_source[source_index];
 	if (!first_frame)
 		log_kmsg("GE first present source prepare begin\n");
-	if (direct) {
+	if (data == (const void *)source_buffer &&
+			host.format == RETRO_PIXEL_FORMAT_RGB565) {
+		if (hcge_linux_cache_clean(host.ge, source_buffer,
+				(unsigned int)(width * height * sizeof(uint16_t))) < 0)
+			return -1;
+		source_phys = host.ge_source_phys[source_index];
+		interval_ge_stage_frames++;
+	} else if (direct) {
 		/*
 		 * Queue order first completes an older stretch, if any, then copies
 		 * this callback surface. The fence releases the core buffer while
@@ -756,7 +786,7 @@ static int open_audio(void)
 	host.audio_resample_rate = AUDIO_OUTPUT_RATE;
 	host.audio_delay = 0;
 	host.audio_feedback_counter = 0;
-	log_kmsg("ALSA 32kHz mono DMA presenter ready linear-resampler\n");
+	log_kmsg("ALSA mono DMA presenter ready linear-resampler\n");
 	return 0;
 fail:
 	close(host.pcm_fd);
@@ -1164,8 +1194,8 @@ int main(int argc, char **argv)
 		char details[96];
 
 		snprintf(details, sizeof(details),
-			"timing frame_ns=%ld audio_core_hz=%u audio_output_hz=32000\n",
-			frame_ns, host.audio_rate);
+			"timing frame_ns=%ld audio_core_hz=%u audio_output_hz=%u\n",
+			frame_ns, host.audio_rate, AUDIO_OUTPUT_RATE);
 		log_kmsg(details);
 	}
 	log_kmsg("frontend running START+L exits SELECT+R toggles uncapped full-frame mode\n");

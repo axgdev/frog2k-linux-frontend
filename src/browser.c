@@ -22,6 +22,7 @@ extern long syscall(long number, ...);
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
 #define GPSP_PATH "/usr/bin/sf2000-gpsp"
+#define FCEUMM_PATH "/usr/bin/sf2000-fceumm"
 #define PLAYER_PATH "/usr/bin/sf2000-player"
 #define SD_ROOT "/mnt/sd"
 #define MAX_ENTRIES 128
@@ -265,6 +266,22 @@ static int gba_path(const char *path)
 	return 0;
 }
 
+static int nes_path(const char *path)
+{
+	const char *extension = strrchr(path, '.');
+	const char *component = path;
+
+	while ((component = strchr(component, '/'))) {
+		const char *end = strchr(++component, '/');
+		size_t length = end ? (size_t)(end - component) : strlen(component);
+		if (length == 3 && !strncasecmp(component, "NES", 3))
+			return extension && !strcasecmp(extension, ".nes");
+		if (!end) break;
+		component = end;
+	}
+	return 0;
+}
+
 static int media_path(const char *p)
 {
 	const char *dot = strrchr(p, '.');
@@ -296,7 +313,7 @@ static void launch_selected(void)
 		scan_directory();
 		return;
 	}
-	if (!gameboy_path(path) && !gba_path(path)) {
+	if (!gameboy_path(path) && !gba_path(path) && !nes_path(path)) {
 		if (media_path(path)) {
 			char *const argv[] = { (char *)PLAYER_PATH, path, NULL };
 			char *const envp[] = { NULL };
@@ -314,13 +331,25 @@ static void launch_selected(void)
 			log_message(message);
 			return;
 		}
-		log_message("unsupported file; use GB, GBC, GBA, or media files");
+		log_message("unsupported file; use GB, GBC, GBA, NES, or media files");
 		return;
 	}
 	{
 		const int gba = gba_path(path);
-		const char *core = gba ? GPSP_PATH : GAMBATTE_PATH;
-		const char *name = gba ? "gpSP" : "Gambatte";
+		const int nes = nes_path(path);
+		const char *core;
+		const char *name;
+
+		if (gba) {
+			core = GPSP_PATH;
+			name = "gpSP";
+		} else if (nes) {
+			core = FCEUMM_PATH;
+			name = "FCEUMM";
+		} else {
+			core = GAMBATTE_PATH;
+			name = "Gambatte";
+		}
 
 		if (gba) {
 			struct sysinfo info;

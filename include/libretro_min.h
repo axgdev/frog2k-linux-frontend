@@ -14,6 +14,8 @@
 #define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 31
 #define RETRO_ENVIRONMENT_SET_GEOMETRY 37
 #define RETRO_ENVIRONMENT_GET_LOG_INTERFACE 27
+#define RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE 39
+#define RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER (40 | 0x10000)
 #define RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION 52
 #define RETRO_ENVIRONMENT_SET_CORE_OPTIONS 53
 #define RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL 54
@@ -66,6 +68,15 @@ enum retro_log_level {
 };
 typedef void (*retro_log_printf_t)(enum retro_log_level, const char *, ...);
 struct retro_log_callback { retro_log_printf_t log; };
+
+struct retro_framebuffer {
+	void *data;
+	unsigned width, height;
+	size_t pitch;
+	enum retro_pixel_format format;
+	unsigned access_flags;
+	unsigned memory_flags;
+};
 
 typedef bool (*retro_environment_t)(unsigned, void *);
 typedef void (*retro_video_refresh_t)(const void *, unsigned, unsigned, size_t);
