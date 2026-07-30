@@ -5,8 +5,9 @@
 The frontend is a small static libretro host, not an operating-system service.
 Its public boundaries are deliberately narrow:
 
-- `src/browser.c` owns content discovery and process launch. It does not link a
-  core or touch GE/audio devices.
+- `src/browser.c` owns the home menu, content discovery, core selection,
+  process launch, and the application performance-journal boundary. It does
+  not link a core or touch GE/audio devices.
 - `src/content.c` owns ROM loading and the NOMMU-safe content allocation
   contract.
 - `src/sf2000_input.c` owns Linux evdev decoding, chord edge detection and the
@@ -28,6 +29,17 @@ and individual cores to be developed and tested independently.
 `SF2000_HOST_OBJECTS` in the Makefile is the single definition of the platform
 host. Gambatte and gpSP link those same objects, so a platform change cannot
 silently produce two different hosts and common sources compile only once.
+
+The browser draws the loading card before it begins the synchronized
+performance session and calls `execve()`. The core host ignores video
+callbacks made from inside `retro_load_game()`, so a core cannot replace that
+card with an incomplete or blank setup frame. The first callback after
+`retro_load_game()` returns becomes the first owned game frame.
+
+START+SELECT is decoded once in `sf2000_input.c` and withheld from the core.
+`main.c` owns pause policy, registered libretro variables, fast-forward,
+frameskip, audio drop/re-prime, and clean core teardown. The kernel input
+driver never implements application chords or reboots.
 
 ## Frame ownership
 

@@ -39,34 +39,46 @@ struct font {
 
 struct translation {
 	const char *language;
-	const char *labels[SF2000_UI_INSTALL_CORE + 1];
+	const char *labels[SF2000_UI_FRAMESKIP + 1];
 };
 
 static const struct translation translations[] = {
 	{ "en", { "LIBRARY", "NO FILES", "OPEN", "BACK", "EXIT",
 		"LOADING EMULATOR", "PLEASE WAIT - SYSTEM IS ACTIVE",
 		"NOT ENOUGH MEMORY", "CLOSE OTHER APPLICATIONS",
-		"CORE IS NOT INSTALLED", "COPY THE CORE PACKAGE TO THE SD CARD" } },
+		"CORE IS NOT INSTALLED", "COPY THE CORE PACKAGE TO THE SD CARD",
+		"HOME", "SETTINGS", "RESET", "SAFE SHUTDOWN", "SELECT EMULATOR",
+		"RESUME", "FAST FORWARD", "FRAMESKIP" } },
 	{ "es", { "BIBLIOTECA", "SIN ARCHIVOS", "ABRIR", "ATRÁS", "SALIR",
 		"CARGANDO EMULADOR", "ESPERA - EL SISTEMA ESTÁ ACTIVO",
 		"MEMORIA INSUFICIENTE", "CIERRA OTRAS APLICACIONES",
-		"EL NÚCLEO NO ESTÁ INSTALADO", "COPIA EL NÚCLEO A LA TARJETA SD" } },
+		"EL NÚCLEO NO ESTÁ INSTALADO", "COPIA EL NÚCLEO A LA TARJETA SD",
+		"INICIO", "AJUSTES", "REINICIAR", "APAGADO SEGURO",
+		"ELIGE EMULADOR", "CONTINUAR", "AVANCE RÁPIDO", "SALTO DE FOTOGRAMAS" } },
 	{ "pt", { "BIBLIOTECA", "SEM ARQUIVOS", "ABRIR", "VOLTAR", "SAIR",
 		"CARREGANDO EMULADOR", "AGUARDE - SISTEMA ATIVO",
 		"MEMÓRIA INSUFICIENTE", "FECHE OUTROS APLICATIVOS",
-		"NÚCLEO NÃO INSTALADO", "COPIE O NÚCLEO PARA O CARTÃO SD" } },
+		"NÚCLEO NÃO INSTALADO", "COPIE O NÚCLEO PARA O CARTÃO SD",
+		"INÍCIO", "CONFIGURAÇÕES", "REINICIAR", "DESLIGAMENTO SEGURO",
+		"ESCOLHA O EMULADOR", "CONTINUAR", "AVANÇO RÁPIDO", "PULAR QUADROS" } },
 	{ "pl", { "BIBLIOTEKA", "BRAK PLIKÓW", "OTWÓRZ", "WSTECZ", "WYJDŹ",
 		"ŁADOWANIE EMULATORA", "CZEKAJ - SYSTEM DZIAŁA",
 		"ZA MAŁO PAMIĘCI", "ZAMKNIJ INNE APLIKACJE",
-		"RDZEŃ NIE JEST ZAINSTALOWANY", "SKOPIUJ RDZEŃ NA KARTĘ SD" } },
+		"RDZEŃ NIE JEST ZAINSTALOWANY", "SKOPIUJ RDZEŃ NA KARTĘ SD",
+		"START", "USTAWIENIA", "RESTART", "BEZPIECZNE WYŁĄCZENIE",
+		"WYBIERZ EMULATOR", "WZNÓW", "PRZEWIJANIE", "POMIJANIE KLATEK" } },
 	{ "vi", { "THƯ VIỆN", "KHÔNG CÓ TỆP", "MỞ", "QUAY LẠI", "THOÁT",
 		"ĐANG TẢI TRÌNH GIẢ LẬP", "VUI LÒNG ĐỢI - HỆ THỐNG ĐANG CHẠY",
 		"KHÔNG ĐỦ BỘ NHỚ", "ĐÓNG CÁC ỨNG DỤNG KHÁC",
-		"CHƯA CÀI ĐẶT LÕI", "CHÉP GÓI LÕI VÀO THẺ SD" } },
+		"CHƯA CÀI ĐẶT LÕI", "CHÉP GÓI LÕI VÀO THẺ SD",
+		"TRANG CHỦ", "CÀI ĐẶT", "KHỞI ĐỘNG LẠI", "TẮT AN TOÀN",
+		"CHỌN TRÌNH GIẢ LẬP", "TIẾP TỤC", "TUA NHANH", "BỎ QUA KHUNG" } },
 	{ "ja", { "ライブラリ", "ファイルなし", "ひらく", "もどる", "おわる",
 		"エミュレータをよみこみちゅう", "しばらくおまちください",
 		"メモリがたりません", "ほかのアプリをとじてください",
-		"コアがインストールされていません", "コアをSDカードへコピーしてください" } },
+		"コアがインストールされていません", "コアをSDカードへコピーしてください",
+		"ホーム", "せってい", "さいきどう", "あんぜんにでんげんをきる",
+		"エミュレータをえらぶ", "つづける", "はやおくり", "フレームスキップ" } },
 };
 
 static uint16_t parse_color(const char *value, uint16_t fallback)

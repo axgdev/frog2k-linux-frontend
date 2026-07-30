@@ -23,7 +23,10 @@
 extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
-#define EXIT_MARKER "/run/sf2000-browser-exit"
+#define PERFORMANCE_MARKER "/run/sf2000-performance-active"
+#define PERFORMANCE_READY_MARKER "/run/sf2000-performance-ready"
+#define RESET_MARKER "/run/sf2000-reboot-request"
+#define SHUTDOWN_MARKER "/run/sf2000-shutdown-request"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
 #define GPSP_PATH "/usr/bin/sf2000-gpsp"
 #define FCEUMM_PATH "/usr/bin/sf2000-fceumm"
@@ -75,6 +78,34 @@ static int framebuffer_fd = -1;
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
 static struct sf2000_ui ui;
+enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS };
+static enum browser_view view = VIEW_HOME;
+static void log_message(const char *message);
+
+static void begin_performance_session(void)
+{
+	unsigned attempt;
+	int marker = open(PERFORMANCE_MARKER,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+	if (marker >= 0)
+		close(marker);
+	for (attempt = 0; attempt < 100u &&
+			access(PERFORMANCE_READY_MARKER, F_OK) != 0; attempt++)
+		(void)poll(NULL, 0, 10);
+	if (access(PERFORMANCE_READY_MARKER, F_OK) != 0)
+		log_message("performance journal acknowledgement timeout");
+}
+
+static int write_frame(void)
+{
+	if (pwrite(framebuffer_fd, framebuffer,
+			(size_t)height * stride * sizeof(*framebuffer), 0) < 0) {
+		log_message("framebuffer write failed");
+		return -1;
+	}
+	return 0;
+}
 
 static void log_message(const char *message)
 {
@@ -172,7 +203,7 @@ static void scan_directory(void)
 	}
 }
 
-static void draw(void)
+static void draw_library(void)
 {
 	unsigned row, visible = height > 78 ? (height - 78) / 22u : 1u;
 	char line[MAX_NAME + 8];
@@ -216,15 +247,71 @@ static void draw(void)
 	}
 	sf2000_ui_fill(&ui, 0, (int)height - 29, (int)width, 29,
 		ui.config.panel);
-	snprintf(footer, sizeof(footer), "A %s   B %s   START+L %s",
+	snprintf(footer, sizeof(footer), "A %s   B %s",
 		sf2000_ui_label(&ui, SF2000_UI_OPEN),
-		sf2000_ui_label(&ui, SF2000_UI_BACK),
-		sf2000_ui_label(&ui, SF2000_UI_EXIT));
+		sf2000_ui_label(&ui, SF2000_UI_BACK));
 	sf2000_ui_text(&ui, 10, (int)height - 22, footer,
 		ui.config.muted, (int)width - 20);
-	if (pwrite(framebuffer_fd, framebuffer,
-			(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
-		log_message("framebuffer write failed");
+	(void)write_frame();
+}
+
+static void draw_home(void)
+{
+	const enum sf2000_ui_label items[] = {
+		SF2000_UI_LIBRARY, SF2000_UI_SETTINGS, SF2000_UI_RESET,
+		SF2000_UI_SAFE_SHUTDOWN,
+	};
+	unsigned i;
+
+	sf2000_ui_clear(&ui, ui.config.background);
+	sf2000_ui_fill(&ui, 0, 0, (int)width, 42, ui.config.panel);
+	sf2000_ui_text(&ui, 13, 11, "SF2000 LINUX", ui.config.header,
+		(int)width - 26);
+	for (i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+		int y = 60 + (int)i * 38;
+		uint16_t color = i == selected ? ui.config.selected_text :
+			ui.config.text;
+
+		if (i == selected)
+			sf2000_ui_round(&ui, 16, y - 8, (int)width - 32, 31, 7,
+				ui.config.accent);
+		sf2000_ui_text(&ui, 27, y,
+			sf2000_ui_label(&ui, items[i]), color, (int)width - 54);
+	}
+	sf2000_ui_text(&ui, 14, (int)height - 22, "A  OK",
+		ui.config.muted, (int)width - 28);
+	(void)write_frame();
+}
+
+static void draw_settings(void)
+{
+	char language[48];
+
+	sf2000_ui_clear(&ui, ui.config.background);
+	sf2000_ui_fill(&ui, 0, 0, (int)width, 42, ui.config.panel);
+	sf2000_ui_text(&ui, 13, 11,
+		sf2000_ui_label(&ui, SF2000_UI_SETTINGS), ui.config.header,
+		(int)width - 26);
+	snprintf(language, sizeof(language), "LANGUAGE: %s", ui.config.language);
+	sf2000_ui_round(&ui, 16, 66, (int)width - 32, 38, 7,
+		ui.config.panel);
+	sf2000_ui_text(&ui, 27, 78, language, ui.config.text,
+		(int)width - 54);
+	sf2000_ui_text(&ui, 27, 119, "CONFIG: /sf2000.conf",
+		ui.config.muted, (int)width - 54);
+	sf2000_ui_text(&ui, 14, (int)height - 22, "B  BACK",
+		ui.config.muted, (int)width - 28);
+	(void)write_frame();
+}
+
+static void draw(void)
+{
+	if (view == VIEW_HOME)
+		draw_home();
+	else if (view == VIEW_SETTINGS)
+		draw_settings();
+	else
+		draw_library();
 }
 
 static void draw_message(enum sf2000_ui_label title,
@@ -243,8 +330,7 @@ static void draw_message(enum sf2000_ui_label title,
 			(int)width - 56);
 	sf2000_ui_text(&ui, 28, 141, sf2000_ui_label(&ui, detail),
 		ui.config.muted, (int)width - 56);
-	if (pwrite(framebuffer_fd, framebuffer,
-			(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
+	if (write_frame() < 0)
 		log_message("message framebuffer write failed");
 }
 
@@ -352,6 +438,71 @@ static const struct core_route *core_for_path(const char *path)
 	return NULL;
 }
 
+static const struct core_route *route_named(const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < sizeof(core_routes) / sizeof(core_routes[0]); i++)
+		if (!strcmp(core_routes[i].name, name))
+			return &core_routes[i];
+	return NULL;
+}
+
+static const struct core_route *choose_nes_core(int input,
+	const struct core_route *fallback)
+{
+	const struct core_route *choices[] = {
+		route_named("FCEUmm"), route_named("QuickNES"),
+	};
+	unsigned choice = fallback && !strcmp(fallback->name, "QuickNES") ? 1u : 0u;
+	struct input_event event;
+
+	for (;;) {
+		unsigned i;
+		struct pollfd wait = { .fd = input, .events = POLLIN };
+
+		sf2000_ui_clear(&ui, ui.config.background);
+		sf2000_ui_fill(&ui, 0, 0, (int)width, 42, ui.config.panel);
+		sf2000_ui_text(&ui, 13, 11,
+			sf2000_ui_label(&ui, SF2000_UI_SELECT_CORE),
+			ui.config.header, (int)width - 26);
+		for (i = 0; i < 2; i++) {
+			int y = 80 + (int)i * 45;
+			uint16_t color = i == choice ? ui.config.selected_text :
+				ui.config.text;
+
+			if (i == choice)
+				sf2000_ui_round(&ui, 22, y - 10, (int)width - 44,
+					34, 7, ui.config.accent);
+			sf2000_ui_text(&ui, 35, y, choices[i]->name, color,
+				(int)width - 70);
+		}
+		sf2000_ui_text(&ui, 14, (int)height - 22, "A  OK    B  BACK",
+			ui.config.muted, (int)width - 28);
+		(void)write_frame();
+		if (poll(&wait, 1, -1) <= 0)
+			return NULL;
+		while (read(input, &event, sizeof(event)) == sizeof(event)) {
+			if (event.type != EV_KEY || event.value != 1)
+				continue;
+			if (event.code == BTN_DPAD_UP ||
+					event.code == BTN_DPAD_DOWN)
+				choice ^= 1u;
+			else if (event.code == BTN_EAST)
+			{
+				char message[96];
+
+				snprintf(message, sizeof(message),
+					"NES core selected %s", choices[choice]->name);
+				log_message(message);
+				return choices[choice];
+			}
+			else if (event.code == BTN_SOUTH)
+				return NULL;
+		}
+	}
+}
+
 static int media_path(const char *p)
 {
 	const char *dot = strrchr(p, '.');
@@ -371,7 +522,7 @@ static int media_path(const char *p)
 	return 0;
 }
 
-static void launch_selected(void)
+static void launch_selected(int input)
 {
 	char path[MAX_PATH], message[640];
 	const struct core_route *route;
@@ -391,16 +542,27 @@ static void launch_selected(void)
 			char *const envp[] = { NULL };
 
 			snprintf(message, sizeof(message), "launch Player %s", path);
-			log_message(message);
 			draw_message(SF2000_UI_LOADING, SF2000_UI_ACTIVE,
 				"MEDIA", ui.config.header);
+			begin_performance_session();
+			log_message(message);
 			execve(PLAYER_PATH, argv, envp);
+			(void)unlink(PERFORMANCE_MARKER);
 			snprintf(message, sizeof(message), "player exec failed errno=%d", errno);
 			log_message(message);
 			return;
 		}
 		log_message("unsupported file or directory route");
 		return;
+	}
+	{
+		const char *extension = strrchr(path, '.');
+
+		if (extension && !strcasecmp(extension, ".nes")) {
+			route = choose_nes_core(input, route);
+			if (!route)
+				return;
+		}
 	}
 	{
 		if (access(route->executable, X_OK) < 0) {
@@ -432,12 +594,13 @@ static void launch_selected(void)
 		}
 
 		snprintf(message, sizeof(message), "launch %s %s", route->name, path);
-		log_message(message);
 		/* Replace the browser before the static-PIE loader allocates and
 		 * relocates the core, so the handoff never looks like a frozen
 		 * selection screen. */
 		draw_message(SF2000_UI_LOADING, SF2000_UI_ACTIVE, route->name,
 			ui.config.header);
+		begin_performance_session();
+		log_message(message);
 		{
 			char *const argv[] = {
 				(char *)route->executable, path, NULL
@@ -450,6 +613,7 @@ static void launch_selected(void)
 			 */
 			execve(route->executable, argv, envp);
 		}
+		(void)unlink(PERFORMANCE_MARKER);
 		snprintf(message, sizeof(message), "%s exec failed errno=%d",
 			route->name, errno);
 	}
@@ -459,11 +623,33 @@ static void launch_selected(void)
 static void parent_directory(void)
 {
 	char *slash;
-	if (!strcmp(current, SD_ROOT)) return;
+	if (!strcmp(current, SD_ROOT)) {
+		view = VIEW_HOME;
+		selected = first = 0;
+		return;
+	}
 	slash = strrchr(current, '/');
 	if (slash && slash > current + strlen(SD_ROOT) - 1u) *slash = 0;
 	else strcpy(current, SD_ROOT);
 	scan_directory();
+}
+
+static void request_system_action(const char *marker, const char *name)
+{
+	int fd;
+	char message[96];
+
+	snprintf(message, sizeof(message), "system action %s", name);
+	log_message(message);
+	draw_message(SF2000_UI_SAFE_SHUTDOWN, SF2000_UI_ACTIVE, name,
+		ui.config.header);
+	fd = open(marker, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd >= 0) {
+		(void)write(fd, name, strlen(name));
+		close(fd);
+	}
+	for (;;)
+		(void)poll(NULL, 0, 1000);
 }
 
 int main(void)
@@ -473,7 +659,7 @@ int main(void)
 	struct fb_var_screeninfo var;
 	struct input_event event;
 	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
-	int input, start = 0, l = 0, exit_latched = 0;
+	int input;
 	if (fb < 0 || ioctl(fb, FBIOGET_FSCREENINFO, &fix) < 0 ||
 			ioctl(fb, FBIOGET_VSCREENINFO, &var) < 0 || var.bits_per_pixel != 16)
 		return 1;
@@ -490,13 +676,16 @@ int main(void)
 		sf2000_ui_close(&ui);
 		return 1;
 	}
-	scan_directory(); draw();
+	scan_directory();
+	selected = first = 0;
+	view = VIEW_HOME;
+	draw();
 	{ int ready = open(READY_MARKER, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (ready >= 0) close(ready); }
 	{
 		char message[160];
 		snprintf(message, sizeof(message),
-			"ready: DPAD select A open B back START+L exit fb=%ux%u stride=%u",
+			"ready: home menu A select B back fb=%ux%u stride=%u",
 			width, height, stride * 2u);
 		log_message(message);
 	}
@@ -512,40 +701,54 @@ int main(void)
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			unsigned visible = height > 78 ? (height - 78) / 22u : 1u;
 			if (event.type != EV_KEY) continue;
-			if (event.code == BTN_START || event.code == BTN_TL) {
-				if (event.code == BTN_START) start = event.value != 0;
-				else l = event.value != 0;
-				if (!start && !l) exit_latched = 0;
-				if (!exit_latched && start && l) {
-					exit_latched = 1;
-					goto done;
-				}
-				continue;
-			}
 			if (event.value != 1) continue;
-			if (event.code == BTN_DPAD_UP && selected) selected--;
-			else if (event.code == BTN_DPAD_DOWN && selected + 1 < entry_count) selected++;
-			else if (event.code == BTN_EAST && entry_count) {
-				launch_selected();
+			if (view == VIEW_HOME) {
+				if (event.code == BTN_DPAD_UP && selected)
+					selected--;
+				else if (event.code == BTN_DPAD_DOWN && selected < 3u)
+					selected++;
+				else if (event.code == BTN_EAST) {
+					if (selected == 0u) {
+						view = VIEW_LIBRARY;
+						selected = first = 0;
+						strcpy(current, SD_ROOT);
+						scan_directory();
+					} else if (selected == 1u) {
+						view = VIEW_SETTINGS;
+						selected = 0;
+					} else if (selected == 2u) {
+						request_system_action(RESET_MARKER, "reset\n");
+					} else {
+						request_system_action(SHUTDOWN_MARKER,
+							"shutdown\n");
+					}
+				}
+			} else if (view == VIEW_SETTINGS) {
+				if (event.code == BTN_SOUTH) {
+					view = VIEW_HOME;
+					selected = first = 0;
+				}
+			} else if (event.code == BTN_DPAD_UP && selected) {
+				selected--;
+			} else if (event.code == BTN_DPAD_DOWN &&
+					selected + 1 < entry_count) {
+				selected++;
+			} else if (event.code == BTN_EAST && entry_count) {
+				launch_selected(input);
 				/* Drop the chord which quit a core while waitpid() ran. */
 				while (read(input, &event, sizeof(event)) == sizeof(event)) { }
-				start = l = exit_latched = 0;
+			} else if (event.code == BTN_SOUTH) {
+				parent_directory();
 			}
-			else if (event.code == BTN_SOUTH) parent_directory();
-			if (selected < first) first = selected;
-			if (selected >= first + visible) first = selected - visible + 1u;
+			if (view == VIEW_LIBRARY) {
+				if (selected < first) first = selected;
+				if (selected >= first + visible)
+					first = selected - visible + 1u;
+			}
 			draw();
 		}
 	}
-done:
 	log_message("returned cleanly");
-	{
-		int marker = open(EXIT_MARKER,
-			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-
-		if (marker >= 0)
-			close(marker);
-	}
 	sf2000_ui_close(&ui);
 	close(input); close(fb);
 	_exit(0);

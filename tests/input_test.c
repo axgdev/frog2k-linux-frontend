@@ -29,28 +29,27 @@ int main(void)
 		return 1;
 	input.fd = pipe_fd[0];
 	if (send_key(pipe_fd[1], BTN_SELECT, 1) ||
-			send_key(pipe_fd[1], BTN_TR, 1))
+			send_key(pipe_fd[1], BTN_START, 1))
 		return 1;
 	actions = sf2000_input_poll(&input);
-	if (!(actions & SF2000_INPUT_TOGGLE_UNCAPPED) ||
+	if (!(actions & SF2000_INPUT_PAUSE) ||
 			input.polls != 1 || input.events != 2 ||
 			sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
 				RETRO_DEVICE_ID_JOYPAD_SELECT) ||
 			sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
-				RETRO_DEVICE_ID_JOYPAD_R))
+				RETRO_DEVICE_ID_JOYPAD_START))
 		return 1;
 	if (sf2000_input_poll(&input) != SF2000_INPUT_NONE)
 		return 1;
-	if (send_key(pipe_fd[1], BTN_TR, 0) ||
+	if (send_key(pipe_fd[1], BTN_START, 0) ||
 			send_key(pipe_fd[1], BTN_SELECT, 0) ||
-			send_key(pipe_fd[1], BTN_START, 1) ||
 			send_key(pipe_fd[1], BTN_TL, 1))
 		return 1;
 	actions = sf2000_input_poll(&input);
-	if (!(actions & SF2000_INPUT_EXIT) ||
-			input.polls != 3 || input.events != 6 ||
+	if (actions != SF2000_INPUT_NONE ||
+			input.polls != 3 || input.events != 5 ||
 			!sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
-				RETRO_DEVICE_ID_JOYPAD_START))
+				RETRO_DEVICE_ID_JOYPAD_L))
 		return 1;
 	input.interval_max_latency_us = 123;
 	sf2000_input_reset_interval(&input);

@@ -25,9 +25,11 @@ AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
 AUDIO_SOURCES := $(AUDIO_DIR)/hc15xx_resampler.c
 PLATFORM_DIR := $(SF2000_LINUX_DIR)/platform
 PLATFORM_SOURCES := $(PLATFORM_DIR)/hc15xx_retained.c
-FRONTEND_SOURCES := src/main.c src/sf2000_input.c src/sf2000_pacer.c
+FRONTEND_SOURCES := src/main.c src/sf2000_input.c src/sf2000_pacer.c \
+	src/sf2000_browser_ui.c
 SF2000_HOST_OBJECTS := build/host-main.o build/host-input.o \
 	build/host-pacer.o \
+	build/host-ui.o \
 	build/host-ge-linux.o build/host-ge-node.o build/host-audio.o \
 	build/host-retained.o build/host-nommu-new.o build/host-content.o
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
@@ -86,9 +88,9 @@ SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 
 all: check
 
-build/frontend-check: $(FRONTEND_SOURCES) src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
+build/frontend-check: $(FRONTEND_SOURCES) src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(STB_DIR)/.git
 	mkdir -p build
-	$(CC) $(CFLAGS) -I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include -o $@ \
+	$(CC) $(CFLAGS) -I$(STB_DIR) -I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include -o $@ \
 		$(FRONTEND_SOURCES) src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
 
 build/nommu-allocator-check: src/nommu_new.cpp tests/nommu_allocator_test.cpp
@@ -220,6 +222,11 @@ build/host-input.o: src/sf2000_input.c include/sf2000_input.h include/libretro_m
 build/host-pacer.o: src/sf2000_pacer.c include/sf2000_pacer.h
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/host-ui.o: src/sf2000_browser_ui.c include/sf2000_browser_ui.h \
+		$(STB_DIR)/.git
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) -c -o $@ $<
 
 build/host-ge-linux.o: $(GE_DIR)/hcge_linux.c
 	mkdir -p build

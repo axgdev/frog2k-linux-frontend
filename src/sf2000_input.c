@@ -52,7 +52,7 @@ unsigned sf2000_input_poll(struct sf2000_input *input)
 {
 	const unsigned chord =
 		(1u << RETRO_DEVICE_ID_JOYPAD_SELECT) |
-		(1u << RETRO_DEVICE_ID_JOYPAD_R);
+		(1u << RETRO_DEVICE_ID_JOYPAD_START);
 	struct input_event event;
 	unsigned actions = SF2000_INPUT_NONE;
 
@@ -86,20 +86,17 @@ unsigned sf2000_input_poll(struct sf2000_input *input)
 		else
 			input->keys &= ~bit;
 		if (event.value && (input->keys & chord) == chord &&
-				!input->uncapped_chord_latched) {
-			input->uncapped_chord_latched = 1;
-			actions |= SF2000_INPUT_TOGGLE_UNCAPPED;
+				!input->pause_chord_latched) {
+			input->pause_chord_latched = 1;
+			actions |= SF2000_INPUT_PAUSE;
 		} else if (!event.value && (bit & chord)) {
-			input->uncapped_chord_latched = 0;
+			input->pause_chord_latched = 0;
 		}
 	}
-	if ((input->keys & (1u << RETRO_DEVICE_ID_JOYPAD_START)) &&
-			(input->keys & (1u << RETRO_DEVICE_ID_JOYPAD_L)))
-		actions |= SF2000_INPUT_EXIT;
 	if ((input->keys & chord) != chord &&
 			!(input->keys & (1u << RETRO_DEVICE_ID_JOYPAD_SELECT)) &&
-			!(input->keys & (1u << RETRO_DEVICE_ID_JOYPAD_R)))
-		input->uncapped_chord_latched = 0;
+			!(input->keys & (1u << RETRO_DEVICE_ID_JOYPAD_START)))
+		input->pause_chord_latched = 0;
 	return actions;
 }
 
@@ -114,9 +111,9 @@ int16_t sf2000_input_state(const struct sf2000_input *input, unsigned port,
 	(void)index;
 	if (port || device != RETRO_DEVICE_JOYPAD || id >= 32)
 		return 0;
-	if (input->uncapped_chord_latched &&
+	if (input->pause_chord_latched &&
 			(id == RETRO_DEVICE_ID_JOYPAD_SELECT ||
-			 id == RETRO_DEVICE_ID_JOYPAD_R))
+			 id == RETRO_DEVICE_ID_JOYPAD_START))
 		return 0;
 	return (input->keys & (1u << id)) != 0;
 }

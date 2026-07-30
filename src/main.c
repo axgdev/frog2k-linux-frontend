@@ -7,11 +7,13 @@
 #include "hc15xx_retained.h"
 #include "sf2000_input.h"
 #include "sf2000_pacer.h"
+#include "sf2000_browser_ui.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <sound/asound.h>
 #include <stdarg.h>
@@ -43,6 +45,9 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DELAY_HIGH 7168
 #define AUDIO_FEEDBACK_INTERVAL 8u
 #define GE_SOURCE_BUFFERS 2u
+#define CORE_OPTIONS_MAX 48u
+#define CORE_OPTION_VALUES_MAX 16u
+#define CORE_OPTION_TEXT_MAX 64u
 
 struct host {
 	int fb_fd;
@@ -86,6 +91,23 @@ static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
 static unsigned audio_suppressed;
+static unsigned loading_game;
+static unsigned pause_requested;
+static unsigned fast_forward_rate = 1u;
+static unsigned frameskip;
+static unsigned frameskip_counter;
+static unsigned core_options_updated;
+static uint16_t pause_pixels[320u * 240u];
+
+struct core_option {
+	char key[CORE_OPTION_TEXT_MAX];
+	char label[CORE_OPTION_TEXT_MAX];
+	char values[CORE_OPTION_VALUES_MAX][CORE_OPTION_TEXT_MAX];
+	unsigned value_count;
+	unsigned selected;
+};
+static struct core_option core_options[CORE_OPTIONS_MAX];
+static unsigned core_option_count;
 extern uint32_t reg[] __attribute__((weak));
 extern uint16_t *gba_screen_pixels __attribute__((weak));
 static struct {
@@ -269,11 +291,91 @@ static bool software_framebuffer(struct retro_framebuffer *fb)
 	return true;
 }
 
+static struct core_option *find_core_option(const char *key)
+{
+	unsigned i;
+
+	for (i = 0; i < core_option_count; i++)
+		if (!strcmp(core_options[i].key, key))
+			return &core_options[i];
+	return NULL;
+}
+
+static void register_core_options(const struct retro_variable *variables)
+{
+	core_option_count = 0;
+	while (variables && variables->key && variables->value &&
+			core_option_count < CORE_OPTIONS_MAX) {
+		struct core_option *option = &core_options[core_option_count];
+		const char *separator = strchr(variables->value, ';');
+		const char *cursor;
+
+		memset(option, 0, sizeof(*option));
+		snprintf(option->key, sizeof(option->key), "%s", variables->key);
+		if (separator) {
+			size_t length = (size_t)(separator - variables->value);
+
+			if (length >= sizeof(option->label))
+				length = sizeof(option->label) - 1u;
+			memcpy(option->label, variables->value, length);
+			option->label[length] = 0;
+			cursor = separator + 1;
+			while (*cursor == ' ')
+				cursor++;
+		} else {
+			snprintf(option->label, sizeof(option->label), "%s",
+				variables->key);
+			cursor = variables->value;
+		}
+		while (*cursor && option->value_count < CORE_OPTION_VALUES_MAX) {
+			const char *end = strchr(cursor, '|');
+			size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+			char *value = option->values[option->value_count++];
+
+			if (length >= CORE_OPTION_TEXT_MAX)
+				length = CORE_OPTION_TEXT_MAX - 1u;
+			memcpy(value, cursor, length);
+			value[length] = 0;
+			if (!end)
+				break;
+			cursor = end + 1;
+		}
+		if (option->value_count) {
+			const char *preferred = NULL;
+			unsigned i;
+
+			if (!strcmp(option->key, "gpsp_drc"))
+				preferred = "enabled";
+			else if (!strcmp(option->key, "gpsp_sound_rate"))
+				preferred = "32768";
+			else if (!strcmp(option->key, "gpsp_frameskip"))
+				preferred = "disabled";
+			else if (!strcmp(option->key, "fceumm_sndvolume"))
+				preferred = "100";
+			else if (!strcmp(option->key, "fceumm_sndrate_hint"))
+				preferred = "32KHz";
+			for (i = 0; preferred && i < option->value_count; i++)
+				if (!strcmp(option->values[i], preferred))
+					option->selected = i;
+		}
+		if (option->value_count)
+			core_option_count++;
+		variables++;
+	}
+}
+
 static bool environment(unsigned command, void *data)
 {
 	switch (command) {
 	case RETRO_ENVIRONMENT_GET_VARIABLE: {
 		struct retro_variable *variable = data;
+		struct core_option *option;
+
+		if (variable && variable->key &&
+				(option = find_core_option(variable->key))) {
+			variable->value = option->values[option->selected];
+			return true;
+		}
 		if (variable && variable->key &&
 				strcmp(variable->key, "gpsp_drc") == 0) {
 			variable->value = "enabled";
@@ -307,22 +409,24 @@ static bool environment(unsigned command, void *data)
 		}
 		return false;
 	}
+	case RETRO_ENVIRONMENT_SET_VARIABLES:
+		register_core_options(data);
+		return true;
+	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
+		*(bool *)data = core_options_updated != 0;
+		core_options_updated = 0;
+		return true;
 	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
 		*(bool *)data = true;
 		return true;
 	case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
-		/*
-		 * Accept the structured v1 option table.  Returning false here
-		 * makes cores synthesize the deprecated string table at startup,
-		 * allocating and concatenating every option even though this
-		 * appliance frontend selects its few platform settings directly
-		 * through GET_VARIABLE.
-		 */
-		*(unsigned *)data = 1;
+		/* Request the universal legacy table so the pause menu can expose
+		 * every core's options without embedding core-specific schemas. */
+		*(unsigned *)data = 0;
 		return true;
 	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
 	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL:
-		return true;
+		return false;
 	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
 		host.format = *(enum retro_pixel_format *)data;
 		return host.format == RETRO_PIXEL_FORMAT_RGB565 ||
@@ -582,7 +686,16 @@ static void video(const void *data, unsigned width, unsigned height,
 	struct timespec present_start;
 	int profile_present;
 
+	/*
+	 * Some cores publish transient blank frames from retro_load_game().
+	 * Preserve the browser's loading card until the ROM and core are fully
+	 * ready; the first post-load retro_run() remains the ownership handoff.
+	 */
+	if (loading_game)
+		return;
 	video_callbacks++;
+	if (frameskip && (frameskip_counter++ % (frameskip + 1u)) != 0u)
+		return;
 	if (!data || !host.fb || !width || !height) {
 		if (video_callbacks == 1) {
 			char details[128];
@@ -944,7 +1057,7 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 	int16_t converted[AUDIO_CONVERT_SAMPLES];
 	size_t offset = 0;
 
-	if (uncapped_mode) {
+	if (uncapped_mode || fast_forward_rate > 1u) {
 		audio_suppressed += frames > UINT_MAX - audio_suppressed ?
 			UINT_MAX - audio_suppressed : (unsigned)frames;
 		return frames;
@@ -1011,14 +1124,181 @@ static void set_uncapped_mode(unsigned enable)
 #endif
 }
 
+static void pause_audio(unsigned resume)
+{
+	host.audio_head = 0;
+	host.audio_count = 0;
+	if (host.pcm_fd < 0)
+		return;
+	(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
+	(void)hc15xx_resampler_init(&host.resampler, host.audio_rate,
+		AUDIO_OUTPUT_RATE);
+	host.audio_resample_rate = AUDIO_OUTPUT_RATE;
+	host.audio_delay = 0;
+	host.audio_feedback_counter = 0;
+	if (resume)
+		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
+}
+
+static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
+{
+	unsigned total = 4u + core_option_count;
+	unsigned first_item = selected > 5u ? selected - 5u : 0u;
+	unsigned row;
+	char text[160];
+
+	sf2000_ui_clear(menu, menu->config.background);
+	sf2000_ui_fill(menu, 0, 0, (int)host.fb_width, 39,
+		menu->config.panel);
+	sf2000_ui_text(menu, 12, 10, "PAUSED", menu->config.header,
+		(int)host.fb_width - 24);
+	for (row = 0; row < 7u && first_item + row < total; row++) {
+		unsigned item = first_item + row;
+		int y = 50 + (int)row * 25;
+		uint16_t color = item == selected ?
+			menu->config.selected_text : menu->config.text;
+
+		if (item == 0u)
+			snprintf(text, sizeof(text), "%s",
+				sf2000_ui_label(menu, SF2000_UI_RESUME));
+		else if (item == 1u)
+			snprintf(text, sizeof(text), "%s: %s",
+				sf2000_ui_label(menu, SF2000_UI_FAST_FORWARD),
+				fast_forward_rate ? (fast_forward_rate == 1u ? "1X" :
+					fast_forward_rate == 2u ? "2X" :
+					fast_forward_rate == 3u ? "3X" : "4X") :
+					"UNLIMITED");
+		else if (item == 2u)
+			snprintf(text, sizeof(text), "%s: %u",
+				sf2000_ui_label(menu, SF2000_UI_FRAMESKIP), frameskip);
+		else if (item < 3u + core_option_count) {
+			struct core_option *option = &core_options[item - 3u];
+
+			snprintf(text, sizeof(text), "%s: %s", option->label,
+				option->values[option->selected]);
+		} else
+			snprintf(text, sizeof(text), "%s",
+				sf2000_ui_label(menu, SF2000_UI_EXIT));
+		if (item == selected)
+			sf2000_ui_round(menu, 8, y - 5, (int)host.fb_width - 16,
+				22, 5, menu->config.accent);
+		sf2000_ui_text(menu, 15, y, text, color,
+			(int)host.fb_width - 30);
+	}
+	sf2000_ui_text(menu, 12, (int)host.fb_height - 20,
+		"A SELECT   B RESUME", menu->config.muted,
+		(int)host.fb_width - 24);
+	(void)pwrite(host.fb_fd, pause_pixels, host.fb_bytes, 0);
+}
+
+static void change_pause_value(unsigned item, int direction)
+{
+	if (item == 1u) {
+		static const unsigned rates[] = { 1u, 2u, 3u, 4u, 0u };
+		unsigned index;
+
+		for (index = 0; index < sizeof(rates) / sizeof(rates[0]); index++)
+			if (rates[index] == fast_forward_rate)
+				break;
+		if (index >= sizeof(rates) / sizeof(rates[0]))
+			index = 0;
+		index = direction > 0 ?
+			(index + 1u) % (sizeof(rates) / sizeof(rates[0])) :
+			(index + sizeof(rates) / sizeof(rates[0]) - 1u) %
+				(sizeof(rates) / sizeof(rates[0]));
+		fast_forward_rate = rates[index];
+		set_uncapped_mode(fast_forward_rate == 0u);
+	} else if (item == 2u) {
+		frameskip = direction > 0 ? (frameskip + 1u) % 6u :
+			(frameskip + 5u) % 6u;
+	} else if (item >= 3u && item < 3u + core_option_count) {
+		struct core_option *option = &core_options[item - 3u];
+
+		option->selected = direction > 0 ?
+			(option->selected + 1u) % option->value_count :
+			(option->selected + option->value_count - 1u) %
+				option->value_count;
+		core_options_updated = 1;
+	}
+}
+
+static void run_pause_menu(long frame_ns)
+{
+	struct sf2000_ui_config config;
+	struct sf2000_ui menu;
+	unsigned selected_item = 0;
+	unsigned previous;
+	unsigned total = 4u + core_option_count;
+	int resume = 0;
+
+	pause_requested = 0;
+	log_kmsg("pause menu opened\n");
+	pause_audio(0);
+	sf2000_ui_config_defaults(&config);
+	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
+	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
+	(void)sf2000_ui_init(&menu, pause_pixels, host.fb_width, host.fb_height,
+		host.fb_stride, &config);
+	while ((host.input.keys & ((1u << RETRO_DEVICE_ID_JOYPAD_START) |
+			(1u << RETRO_DEVICE_ID_JOYPAD_SELECT))) != 0u) {
+		(void)sf2000_input_poll(&host.input);
+		(void)poll(NULL, 0, 5);
+	}
+	previous = host.input.keys;
+	draw_pause_menu(&menu, selected_item);
+	while (!resume && !stopping) {
+		unsigned pressed;
+
+		(void)sf2000_input_poll(&host.input);
+		pressed = host.input.keys & ~previous;
+		previous = host.input.keys;
+		if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_UP)) {
+			selected_item = selected_item ?
+				selected_item - 1u : total - 1u;
+			draw_pause_menu(&menu, selected_item);
+		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_DOWN)) {
+			selected_item = (selected_item + 1u) % total;
+			draw_pause_menu(&menu, selected_item);
+		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_LEFT)) {
+			change_pause_value(selected_item, -1);
+			draw_pause_menu(&menu, selected_item);
+		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_RIGHT)) {
+			change_pause_value(selected_item, 1);
+			draw_pause_menu(&menu, selected_item);
+		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_A)) {
+			if (selected_item == 0u)
+				resume = 1;
+			else if (selected_item == total - 1u)
+				stopping = 1;
+			else {
+				change_pause_value(selected_item, 1);
+				draw_pause_menu(&menu, selected_item);
+			}
+		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_B)) {
+			resume = 1;
+		}
+		(void)poll(NULL, 0, 5);
+	}
+	sf2000_ui_close(&menu);
+	log_kmsg(stopping ? "pause menu exit selected\n" :
+		"pause menu resumed\n");
+	if (!stopping) {
+		struct timespec now;
+		long effective = fast_forward_rate > 1u ?
+			frame_ns / (long)fast_forward_rate : frame_ns;
+
+		pause_audio(1);
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		sf2000_pacer_init(&pacer, effective, &now);
+	}
+}
+
 static void input_poll(void)
 {
 	unsigned actions = sf2000_input_poll(&host.input);
 
-	if (actions & SF2000_INPUT_TOGGLE_UNCAPPED)
-		set_uncapped_mode(!uncapped_mode);
-	if (actions & SF2000_INPUT_EXIT)
-		stopping = 1;
+	if (actions & SF2000_INPUT_PAUSE)
+		pause_requested = 1;
 }
 
 static int16_t input_state(unsigned port, unsigned device, unsigned index,
@@ -1199,7 +1479,9 @@ int main(int argc, char **argv)
 	}
 	log_kmsg("ROM load begin\n");
 	retained_stage("frontend-rom-begin", 5);
+	loading_game = 1;
 	if (!retro_load_game(&game)) {
+		loading_game = 0;
 		log_kmsg("core rejected game\n");
 		fprintf(stderr, "sf2000-frontend: core rejected %s\n", argv[1]);
 		retro_deinit();
@@ -1207,6 +1489,7 @@ int main(int argc, char **argv)
 		free((void *)game.data);
 		return 1;
 	}
+	loading_game = 0;
 	log_kmsg("ROM load complete\n");
 	retained_stage("frontend-rom-done", 6);
 	retro_get_system_av_info(&av);
@@ -1226,7 +1509,7 @@ int main(int argc, char **argv)
 			frame_ns, host.audio_rate, AUDIO_OUTPUT_RATE);
 		log_kmsg(details);
 	}
-	log_kmsg("frontend running START+L exits SELECT+R toggles uncapped full-frame mode\n");
+	log_kmsg("frontend running START+SELECT opens pause and core options\n");
 	retained_stage("frontend-run", 7);
 	start_metrics_logging();
 	signal(SIGINT, stop_signal);
@@ -1246,6 +1529,10 @@ int main(int argc, char **argv)
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
 		retro_run();
+		if (pause_requested) {
+			run_pause_menu(frame_ns);
+			continue;
+		}
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);
 			continue;

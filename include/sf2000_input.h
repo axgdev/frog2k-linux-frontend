@@ -6,14 +6,13 @@
 
 enum sf2000_input_action {
 	SF2000_INPUT_NONE = 0,
-	SF2000_INPUT_TOGGLE_UNCAPPED = 1u << 0,
-	SF2000_INPUT_EXIT = 1u << 1,
+	SF2000_INPUT_PAUSE = 1u << 0,
 };
 
 struct sf2000_input {
 	int fd;
 	uint32_t keys;
-	unsigned uncapped_chord_latched;
+	unsigned pause_chord_latched;
 	unsigned polls;
 	unsigned events;
 	unsigned interval_max_latency_us;

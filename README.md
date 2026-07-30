@@ -13,12 +13,12 @@ Linux/NOMMU cannot rely on `dlopen`, so each deployable static PIE ELF is
 linked to one core archive at build time. The browser selects the appropriate
 executable while sharing ROM/menu metadata.
 
-The integrated application provides a native framebuffer file browser and
-statically linked runners. Normal SF2000 Linux boot enters it directly; use
-START+R to reopen it after deliberately returning to the console. Browse with
-the DPAD, use A to open and B to go back. A `.gb` or `.gbc` file beneath a
-case-insensitive `GB` or `GBC` directory launches Gambatte. START+L returns
-from a game to the browser, then from the browser to the console.
+The integrated application provides a native framebuffer home menu, file
+browser, and statically linked runners. Normal SF2000 Linux boot enters it
+directly. Library opens the SD browser; browse with the DPAD, use A to open,
+and B to go back. Settings identifies the active language/configuration.
+Reset and Safe Shutdown are explicit system actions. A `.gb` or `.gbc` file
+beneath a case-insensitive `GB` or `GBC` directory launches Gambatte.
 Files below a case-insensitive `GBA` directory launch the statically linked
 gpSP runner with its MIPS dynarec enabled. Files below a case-insensitive
 `NES` directory launch FCEUmm.
@@ -39,16 +39,17 @@ instead of a frozen selection. This keeps new cores independently deployable
 and prevents the full core catalog from increasing every boot image.
 QuickNES is the first such package. `make core-packages` produces
 `build/core-packages/sf2000-quicknes` and its license. Put the executable at
-`/sf2000/cores/sf2000-quicknes`; ROMs in `/QUICKNES` use it, while `/NES`
-continues to use the embedded FCEUmm runner. This deliberately gives both NES
-cores an independent, directly comparable path.
+`/sf2000/cores/sf2000-quicknes`. Opening a `.nes` file presents a FCEUmm /
+QuickNES chooser; `/NES` initially selects FCEUmm and `/QUICKNES` initially
+selects QuickNES.
 
-While a core is running, SELECT+R toggles an uncapped full-frame benchmark.
-Every libretro video callback is still presented through GE, but audio
-conversion/output and frame pacing are suspended so the measured FPS exposes
-the core, host, cache, and graphics-presentation ceiling. Press SELECT+R again
-to resume normal pacing and freshly prime ALSA. Mode transitions and
-300-frame windows are retained in `loglinux.txt`; `mode=uncapped`,
+While a core is running, START+SELECT opens the pause menu. It exposes Resume,
+Exit, a 1x/2x/3x/4x/unlimited fast-forward rate, frontend frameskip, and the
+options registered by the active libretro core. Unlimited mode still presents
+every video callback through GE, but suppresses audio and pacing so the
+measured FPS exposes the core, host, cache, and graphics-presentation ceiling.
+Mode transitions and 300-frame windows are retained in `loglinux.txt`;
+`mode=uncapped`,
 `fps_milli`, `suppressed`, `sampled_max_run_us`, and
 `sampled_present_us` identify a valid benchmark interval and separate core
 cost from display-presentation cost.
@@ -78,12 +79,13 @@ rebases only after a complete frame interval is lost; this prevents expensive
 first-frame setup from overflowing the audio path while avoiding repeated
 clock resets for harmless 2--5 ms scheduling jitter.
 
-The SF2000 platform supervisor establishes a synchronized, RAM-journaled
-performance session before launching this application. That keeps logging
-diagnostics intact without allowing logger FAT traffic to contend with ROM
-reads or real-time audio on the single SD/MMC channel. Owning the session in
-the supervisor also covers browser/core exec handoff and failure exits without
-putting platform policy in this application. The integrated image covers
+The browser establishes a synchronized, RAM-journaled performance session
+immediately before `exec` of a core or media player. The platform supervisor
+ends and drains it after every clean exit or crash before relaunching the home
+menu. This keeps diagnostics intact without allowing logger FAT traffic to
+contend with ROM reads or real-time audio on the single SD/MMC channel, while
+avoiding an indefinitely deferred journal while the idle browser is open.
+The integrated image covers
 browsing, ROM loading, emulation, video, audio, input, saves, and clean process
 handoff.
 
@@ -111,8 +113,8 @@ for example, `/GB/game.gb` or `/GBC/game.gbc` on its FAT partition.
 `mufrog-commandc` tree through a small Linux adapter. It provides the actual
 themeable ROM browser rather than the synthetic pattern. The SF2000 Linux
 image. It is not the integrated menu because the imported core does not expose
-a complete Linux game-launch contract. START+X remains reserved for the
-SF2000 Linux graphics performance benchmark.
+a complete Linux game-launch contract. The old diagnostic input shortcuts are
+not part of the normal UI.
 
 ## Boundaries and next checkpoints
 
