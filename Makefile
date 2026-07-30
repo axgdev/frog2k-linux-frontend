@@ -8,11 +8,14 @@ FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
 GPSP_REV := 5b6e751f4abf368509146cd143c949c1946ac1ae
 FCEUMM_REV := b5e3566515c27dc66c9c20572171673126532e06
+QUICKNES_REV := 7848e1ac22b1c69d056ae4cb57710651ff1dd169
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 STB_REV := 31c1ad37456438565541f4919958214b6e762fb4
 GAMBATTE_DIR := .deps/gambatte
 GPSP_DIR := .deps/gpsp
 FCEUMM_DIR := .deps/fceumm
+QUICKNES_DIR := .deps/quicknes
+QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
 SF2000_LINUX_DIR ?= ../sf2000_linux
@@ -30,13 +33,17 @@ SF2000_HOST_OBJECTS := build/host-main.o build/host-input.o \
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 FCEUMM_CORE := build/fceumm_libretro_linux.a
+QUICKNES_CORE := build/quicknes_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
 FCEUMM_PATCHES := $(wildcard patches/fceumm/*.patch)
+QUICKNES_PATCHES := $(wildcard patches/quicknes/*.patch)
 GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) | sha256sum | cut -c1-16)
 GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
 FCEUMM_PATCH_ID := $(shell sha256sum $(FCEUMM_PATCHES) | sha256sum | cut -c1-16)
 FCEUMM_PATCH_STAMP := $(FCEUMM_DIR)/.sf2000-patched-$(FCEUMM_PATCH_ID)
+QUICKNES_PATCH_ID := $(shell sha256sum $(QUICKNES_PATCHES) | sha256sum | cut -c1-16)
+QUICKNES_PATCH_STAMP := $(QUICKNES_DIR)/.sf2000-patched-$(QUICKNES_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -74,7 +81,8 @@ SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 	-Wl,--no-dynamic-linker -Wl,-z,text \
 	-Wl,--gc-sections
 
-.PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser gambatte gpsp fceumm integrated
+.PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
+	gambatte gpsp fceumm quicknes core-packages integrated
 
 all: check
 
@@ -189,6 +197,18 @@ fceumm: $(FCEUMM_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
 		-Wl,--wrap=free $(SF2000_ENDFILES)
 
+quicknes: $(QUICKNES_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-quicknes \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(QUICKNES_CORE) \
+		$(LIBRETRO_COMMON) -lm \
+		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
+		-Wl,--wrap=free $(SF2000_ENDFILES)
+
+core-packages: quicknes
+	mkdir -p build/core-packages/licenses
+	cp build/sf2000-quicknes build/core-packages/
+	cp $(QUICKNES_DIR)/LICENSE build/core-packages/licenses/quicknes-LICENSE
+
 build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
@@ -249,6 +269,13 @@ $(FCEUMM_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/libretro/libretro-fceumm.git $(FCEUMM_DIR)
 	git -C $(FCEUMM_DIR) checkout --detach $(FCEUMM_REV)
+
+$(QUICKNES_SOURCE_STAMP):
+	mkdir -p .deps
+	test -d $(QUICKNES_DIR)/.git || \
+		git clone --filter=blob:none https://github.com/libretro/QuickNES_Core.git $(QUICKNES_DIR)
+	git -C $(QUICKNES_DIR) checkout --detach $(QUICKNES_REV)
+	touch '$@'
 
 $(GPSP_PATCH_STAMP): $(GPSP_DIR)/.git $(GPSP_PATCHES)
 	git -C '$(GPSP_DIR)' reset --hard '$(GPSP_REV)'
@@ -311,6 +338,22 @@ $(FCEUMM_CORE): $(FCEUMM_PATCH_STAMP) Makefile
 	CXXFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -fno-strict-aliasing -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti' \
 	$(MAKE) -C $(FCEUMM_DIR) -f Makefile.libretro STATIC_LINKING=1 platform=unix \
 		WANT_32BPP=0 HAVE_NTSC=0 HAVE_HDPACK=0 \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
+
+$(QUICKNES_PATCH_STAMP): $(QUICKNES_SOURCE_STAMP) $(QUICKNES_PATCHES)
+	git -C '$(QUICKNES_DIR)' reset --hard '$(QUICKNES_REV)'
+	for patch_file in $(QUICKNES_PATCHES); do \
+		patch -d '$(QUICKNES_DIR)' -p1 < "$$patch_file"; \
+	done
+	touch '$@'
+
+$(QUICKNES_CORE): $(QUICKNES_PATCH_STAMP) Makefile
+	mkdir -p build
+	$(MAKE) -C $(QUICKNES_DIR) clean platform=unix STATIC_LINKING=1
+	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -fno-strict-aliasing -ffunction-sections -fdata-sections -DSF2000 -DNO_UNALIGNED_ACCESS -DFRONTEND_SUPPORTS_RGB565' \
+	CXXFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -fno-strict-aliasing -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -DSF2000 -DNO_UNALIGNED_ACCESS -DFRONTEND_SUPPORTS_RGB565' \
+	$(MAKE) -C $(QUICKNES_DIR) platform=unix STATIC_LINKING=1 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
 

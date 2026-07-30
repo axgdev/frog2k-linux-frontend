@@ -37,6 +37,11 @@ are routed by directory and extension to independent static-PIE packages below
 `/sf2000/cores` on the card. A missing package produces a localized error
 instead of a frozen selection. This keeps new cores independently deployable
 and prevents the full core catalog from increasing every boot image.
+QuickNES is the first such package. `make core-packages` produces
+`build/core-packages/sf2000-quicknes` and its license. Put the executable at
+`/sf2000/cores/sf2000-quicknes`; ROMs in `/QUICKNES` use it, while `/NES`
+continues to use the embedded FCEUmm runner. This deliberately gives both NES
+cores an independent, directly comparable path.
 
 While a core is running, SELECT+R toggles an uncapped full-frame benchmark.
 Every libretro video callback is still presented through GE, but audio

@@ -262,6 +262,8 @@ struct core_route {
  * disambiguate generic extensions such as .bin, .rom, and .zip.
  */
 static const struct core_route core_routes[] = {
+	{ "QUICKNES", "nes",
+		"/mnt/sd/sf2000/cores/sf2000-quicknes", "QuickNES", 0 },
 	{ "GB|GBC", "gb|gbc", GAMBATTE_PATH, "Gambatte", 0 },
 	{ "GBA", "gba", GPSP_PATH, "gpSP", 40 },
 	{ "NES|FDS", "nes|fds", FCEUMM_PATH, "FCEUmm", 0 },
