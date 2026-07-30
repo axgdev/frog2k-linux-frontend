@@ -146,24 +146,27 @@ gpsp-pic-audit: build/sf2000-gpsp
 	grep -Eq 'lw[[:space:]]+t9,.*[(]s0[)]' "$$body"; \
 	grep -Eq 'lw[[:space:]]+gp,.*[(]s0[)]' "$$body"
 
-sf2000:
+sf2000: $(STB_DIR)/.git
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
 	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend \
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
+		-o build/sf2000-frontend \
 		$(SF2000_STARTFILES) $(FRONTEND_SOURCES) $(GE_SOURCES) \
-		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(CORE) $(SF2000_ENDFILES)
+		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) src/content.c \
+		$(CORE) -lm $(SF2000_ENDFILES)
 
-demo:
+demo: $(STB_DIR)/.git
 	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) -o build/sf2000-frontend-demo \
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
+		-o build/sf2000-frontend-demo \
 		$(SF2000_STARTFILES) $(FRONTEND_SOURCES) $(GE_SOURCES) \
 		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) tests/dummy_core.c \
 		$(SF2000_ENDFILES)
 
-frogui:
+frogui: $(STB_DIR)/.git
 	test -f "$(FROGUI_CORE)"
 	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
 		-o build/sf2000-frontend-frogui $(SF2000_STARTFILES) \
 		$(FRONTEND_SOURCES) $(GE_SOURCES) \
 		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) src/frogui_adapter.c \
