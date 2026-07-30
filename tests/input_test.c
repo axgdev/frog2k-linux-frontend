@@ -33,6 +33,7 @@ int main(void)
 		return 1;
 	actions = sf2000_input_poll(&input);
 	if (!(actions & SF2000_INPUT_TOGGLE_UNCAPPED) ||
+			input.polls != 1 || input.events != 2 ||
 			sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
 				RETRO_DEVICE_ID_JOYPAD_SELECT) ||
 			sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
@@ -47,8 +48,13 @@ int main(void)
 		return 1;
 	actions = sf2000_input_poll(&input);
 	if (!(actions & SF2000_INPUT_EXIT) ||
+			input.polls != 3 || input.events != 6 ||
 			!sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
 				RETRO_DEVICE_ID_JOYPAD_START))
+		return 1;
+	input.interval_max_latency_us = 123;
+	sf2000_input_reset_interval(&input);
+	if (input.interval_max_latency_us)
 		return 1;
 	sf2000_input_close(&input);
 	close(pipe_fd[1]);

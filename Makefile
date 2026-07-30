@@ -7,7 +7,7 @@ CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
 GPSP_REV := 5b6e751f4abf368509146cd143c949c1946ac1ae
-FCEUMM_REV := b5e3566
+FCEUMM_REV := b5e3566515c27dc66c9c20572171673126532e06
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 GAMBATTE_DIR := .deps/gambatte
 GPSP_DIR := .deps/gpsp
@@ -282,15 +282,14 @@ $(GAMBATTE_CORE): $(GAMBATTE_DIR)/.sf2000-patched Makefile
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
 
-$(FCEUMM_DIR)/.sf2000-patched: $(FCEUMM_DIR)/.git $(FCEUMM_PATCHES)
+$(FCEUMM_PATCH_STAMP): $(FCEUMM_DIR)/.git $(FCEUMM_PATCHES)
+	git -C '$(FCEUMM_DIR)' reset --hard '$(FCEUMM_REV)'
 	for patch_file in $(FCEUMM_PATCHES); do \
-		if patch -d '$(FCEUMM_DIR)' -p1 --dry-run < "$$patch_file" >/dev/null; then \
-			patch -d '$(FCEUMM_DIR)' -p1 < "$$patch_file"; \
-		fi; \
+		patch -d '$(FCEUMM_DIR)' -p1 < "$$patch_file"; \
 	done
 	touch '$@'
 
-$(FCEUMM_CORE): $(FCEUMM_DIR)/.sf2000-patched Makefile
+$(FCEUMM_CORE): $(FCEUMM_PATCH_STAMP) Makefile
 	mkdir -p build
 	$(MAKE) -C $(FCEUMM_DIR) clean -f Makefile.libretro STATIC_LINKING=1 platform=unix
 	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -fno-strict-aliasing -ffunction-sections -fdata-sections -DFRONTEND_SUPPORTS_RGB565' \

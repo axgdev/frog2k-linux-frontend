@@ -38,6 +38,12 @@ asynchronous and overlaps the next core frame. CPU staging exists only for
 non-addressable or converted input. Metrics distinguish these paths with
 `ge_stage_frames` and `buffered_frames`.
 
+A core requesting `GET_CURRENT_SOFTWARE_FRAMEBUFFER` writes directly into a
+managed source. The request handler must fence before returning a source still
+owned by queued GE work; fencing later in the video callback is already too
+late because the core has overwritten it. Validate requested dimensions,
+RGB565 format, write access, and allocation bounds before exposing a surface.
+
 ## Real-time rules
 
 The emulation thread may append one telemetry record to tmpfs every 300 frames.

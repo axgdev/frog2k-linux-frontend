@@ -4,7 +4,10 @@
 
 #include <fcntl.h>
 #include <linux/input.h>
+#include <limits.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 static unsigned key_bit(unsigned code)
@@ -30,6 +33,11 @@ int sf2000_input_open(struct sf2000_input *input, const char *path)
 {
 	memset(input, 0, sizeof(*input));
 	input->fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (input->fd >= 0) {
+		int clock_id = CLOCK_MONOTONIC;
+
+		(void)ioctl(input->fd, EVIOCSCLOCKID, &clock_id);
+	}
 	return input->fd < 0 ? -1 : 0;
 }
 
@@ -48,13 +56,31 @@ unsigned sf2000_input_poll(struct sf2000_input *input)
 	struct input_event event;
 	unsigned actions = SF2000_INPUT_NONE;
 
+	input->polls++;
 	while (input->fd >= 0 &&
 			read(input->fd, &event, sizeof(event)) ==
 				(ssize_t)sizeof(event)) {
 		unsigned bit;
+		struct timespec now;
+		uint64_t event_us;
+		uint64_t now_us;
+		uint64_t latency;
 
 		if (event.type != EV_KEY || !(bit = key_bit(event.code)))
 			continue;
+		input->events++;
+		if ((event.input_event_sec || event.input_event_usec) &&
+				clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+			event_us = (uint64_t)event.input_event_sec * 1000000u +
+				(uint64_t)event.input_event_usec;
+			now_us = (uint64_t)now.tv_sec * 1000000u +
+				(uint64_t)now.tv_nsec / 1000u;
+			latency = now_us >= event_us ? now_us - event_us : 0;
+			if (latency > input->interval_max_latency_us)
+				input->interval_max_latency_us =
+					latency > UINT_MAX ? UINT_MAX :
+					(unsigned)latency;
+		}
 		if (event.value)
 			input->keys |= bit;
 		else
@@ -75,6 +101,11 @@ unsigned sf2000_input_poll(struct sf2000_input *input)
 			!(input->keys & (1u << RETRO_DEVICE_ID_JOYPAD_R)))
 		input->uncapped_chord_latched = 0;
 	return actions;
+}
+
+void sf2000_input_reset_interval(struct sf2000_input *input)
+{
+	input->interval_max_latency_us = 0;
 }
 
 int16_t sf2000_input_state(const struct sf2000_input *input, unsigned port,

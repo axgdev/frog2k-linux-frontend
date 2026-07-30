@@ -14,7 +14,7 @@
 #define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 31
 #define RETRO_ENVIRONMENT_SET_GEOMETRY 37
 #define RETRO_ENVIRONMENT_GET_LOG_INTERFACE 27
-#define RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE 39
+#define RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE (81 | 0x10000)
 #define RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER (40 | 0x10000)
 #define RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION 52
 #define RETRO_ENVIRONMENT_SET_CORE_OPTIONS 53
@@ -77,6 +77,9 @@ struct retro_framebuffer {
 	unsigned access_flags;
 	unsigned memory_flags;
 };
+#define RETRO_MEMORY_ACCESS_WRITE (1u << 0)
+#define RETRO_MEMORY_ACCESS_READ (1u << 1)
+#define RETRO_MEMORY_TYPE_CACHED (1u << 0)
 
 typedef bool (*retro_environment_t)(unsigned, void *);
 typedef void (*retro_video_refresh_t)(const void *, unsigned, unsigned, size_t);

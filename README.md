@@ -9,9 +9,9 @@ only application policy, libretro hosting, and the future game menu.
 
 The design borrows the clean host/core separation from the MIT-licensed
 `mufrog-commandc` Linux frontend, but does not import its HCRTOS platform code.
-Linux bFLT cannot rely on `dlopen`, so each deployable frontend is linked to a
-core archive at build time. A later core launcher can package one bFLT per core
-while sharing ROM/menu metadata.
+Linux/NOMMU cannot rely on `dlopen`, so each deployable static PIE ELF is
+linked to one core archive at build time. The browser selects the appropriate
+executable while sharing ROM/menu metadata.
 
 The integrated application provides a native framebuffer file browser and a
 statically linked Gambatte runner. Press START+R from the console, browse with
@@ -19,7 +19,8 @@ the DPAD, use A to open and B to go back. A `.gb` or `.gbc` file beneath a
 case-insensitive `GB` or `GBC` directory launches Gambatte. START+L returns
 from a game to the browser, then from the browser to the console.
 Files below a case-insensitive `GBA` directory launch the statically linked
-gpSP runner with its MIPS dynarec enabled.
+gpSP runner with its MIPS dynarec enabled. Files below a case-insensitive
+`NES` directory launch FCEUmm.
 
 While a core is running, SELECT+R toggles an uncapped full-frame benchmark.
 Every libretro video callback is still presented through GE, but audio
@@ -33,7 +34,7 @@ cost from display-presentation cost.
 
 The core host implements the libretro lifecycle, ROM full-path loading,
 absolute frame pacing, SF2000 evdev joypad mapping, GE-accelerated RGB565
-conversion/scaling, and 32 kHz mono ALSA DMA playback. Presentation uses three
+conversion/scaling, and 32 kHz mono ALSA DMA playback. Presentation uses two
 ownership-tracked GE source surfaces, allowing emulation to overlap the
 previous frame's scale operation without ever modifying an in-flight surface.
 Audio uses a 4096-sample circular staging queue and the platform's portable
@@ -42,9 +43,9 @@ current audio instead of replaying stale blocks. The resampler uses ALSA delay
 feedback to rebuild drained lead with a bounded 0.8% correction, then returns
 to the exact nominal rate. Whole-period batching halves PCM write calls, while
 ALSA is primed with 224 ms of audio lead. Low-rate
-metrics include interval underruns, late frames, maximum lateness, and sampled
-core-frame and GE-presentation runtime, plus PCM delay and active resampling
-rate; one write appends each record to
+metrics include interval underruns, late frames, maximum lateness, sampled
+core-frame and GE-presentation runtime, evdev event-to-host latency, PCM delay,
+and active resampling rate; one write appends each record to
 tmpfs, and the platform logger imports it only after gameplay. The real-time
 thread therefore never sends periodic telemetry through printk, UART, or FAT.
 One compact cumulative health word is also written to the platform's retained
@@ -77,8 +78,8 @@ Cross-build a statically linked core:
 make sf2000 CORE=/path/to/core_libretro.a
 ```
 
-The resulting `build/sf2000-frontend` is a MIPS32r1 soft-float bFLT. Invoke it
-as `sf2000-frontend /mnt/sd/roms/game.ext`.
+The resulting `build/sf2000-frontend` is a MIPS32r1 soft-float static PIE ELF.
+Invoke it as `sf2000-frontend /mnt/sd/roms/game.ext`.
 
 `make integrated` fetches pinned Gambatte and libretro-common revisions and
 builds both `build/sf2000-browser` and `build/sf2000-gambatte`. The Linux image
@@ -121,7 +122,7 @@ used in normal and uncapped modes; physical log140 shows that this is faster
 than CPU-buffered delivery even without a pacing interval. Metrics report
 `ge_stage_frames` and `buffered_frames`, making both contracts testable.
 
-The bFLT C++ runtime maps each allocation independently and returns it to the
+The NOMMU C++ runtime maps each allocation independently and returns it to the
 kernel on `free`. A fixed bump arena is unsafe for switching cores in one
 NOMMU process because it cannot reclaim a departed core's allocations.
 `make check` includes repeated allocation/free/reallocation cycles to prevent
@@ -132,8 +133,8 @@ that lifecycle leak from returning.
 SF2000 cache sizing and compiler policy live in this Makefile, not in gpSP.
 The host selects a 512 KiB ROM JIT cache, a 128 KiB RAM JIT cache, and a
 mapped 9 KiB translator workspace. Only `cpu_threaded.c` is compiled with the
-conservative switch lowering required by the bFLT relocation model; the rest
-of the core retains the normal optimized build.
+conservative switch lowering required by its generated-code control flow; the
+rest of the core retains the normal optimized build.
 
 The pinned gpSP patch contains only behavior that cannot be supplied by a
 libretro frontend or Linux driver: MIPS32r1 assembly selection, a Thumb

@@ -14,6 +14,9 @@ struct sf2000_input {
 	int fd;
 	uint32_t keys;
 	unsigned uncapped_chord_latched;
+	unsigned polls;
+	unsigned events;
+	unsigned interval_max_latency_us;
 };
 
 int sf2000_input_open(struct sf2000_input *input, const char *path);
@@ -21,5 +24,6 @@ void sf2000_input_close(struct sf2000_input *input);
 unsigned sf2000_input_poll(struct sf2000_input *input);
 int16_t sf2000_input_state(const struct sf2000_input *input, unsigned port,
 	unsigned device, unsigned index, unsigned id);
+void sf2000_input_reset_interval(struct sf2000_input *input);
 
 #endif

@@ -34,13 +34,13 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define METRICS_PATH "/run/sf2000-frontend-metrics"
 #define AUDIO_BUFFER_SAMPLES 4096u
 #define AUDIO_DROP_SAMPLES 1024u
-#define AUDIO_CONVERT_SAMPLES 2048u
+#define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
 #define AUDIO_RECOVERY_RATE 32256u
 #define AUDIO_DRAIN_RATE 31744u
-#define AUDIO_DELAY_LOW 2048
-#define AUDIO_DELAY_TARGET 3072
-#define AUDIO_DELAY_HIGH 4096
+#define AUDIO_DELAY_LOW 4096
+#define AUDIO_DELAY_TARGET 5632
+#define AUDIO_DELAY_HIGH 7168
 #define AUDIO_FEEDBACK_INTERVAL 8u
 #define GE_SOURCE_BUFFERS 2u
 
@@ -129,6 +129,7 @@ static void reset_metric_window(void)
 	interval_ge_stage_frames = 0;
 	interval_buffered_frames = 0;
 	previous_xruns = audio_metrics.xruns;
+	sf2000_input_reset_interval(&host.input);
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 }
 
@@ -236,6 +237,38 @@ static void core_log(enum retro_log_level level, const char *format, ...)
 	log_kmsg(message);
 }
 
+static bool software_framebuffer(struct retro_framebuffer *fb)
+{
+	size_t bytes;
+
+	if (!fb || !host.ge || !host.ge_buffers ||
+			host.format != RETRO_PIXEL_FORMAT_RGB565 ||
+			!(fb->access_flags & RETRO_MEMORY_ACCESS_WRITE) ||
+			!fb->width || !fb->height ||
+			fb->width > host.fb_width || fb->height > host.fb_height)
+		return false;
+	bytes = (size_t)fb->width * fb->height * sizeof(uint16_t);
+	if (bytes > host.ge_source_bytes)
+		return false;
+	/*
+	 * GET_CURRENT_SOFTWARE_FRAMEBUFFER precedes the frame's video callback.
+	 * If every managed source is still referenced by queued GE work, fence
+	 * before returning one to the core. This is the ownership boundary that
+	 * the earlier FCEUmm integration missed: synchronizing later in video()
+	 * is too late because the core has already overwritten the source.
+	 */
+	if (host.ge_pending >= host.ge_buffers) {
+		if (hcge_engine_sync(host.ge) < 0)
+			return false;
+		host.ge_pending = 0;
+	}
+	fb->data = host.ge_source[host.ge_next];
+	fb->pitch = (size_t)fb->width * sizeof(uint16_t);
+	fb->format = RETRO_PIXEL_FORMAT_RGB565;
+	fb->memory_flags = RETRO_MEMORY_TYPE_CACHED;
+	return true;
+}
+
 static bool environment(unsigned command, void *data)
 {
 	switch (command) {
@@ -308,16 +341,8 @@ static bool environment(unsigned command, void *data)
 	case RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE:
 		*(unsigned *)data = AUDIO_OUTPUT_RATE;
 		return true;
-	case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: {
-		struct retro_framebuffer *fb = data;
-		if (!host.ge_buffers || host.format != RETRO_PIXEL_FORMAT_RGB565)
-			return false;
-		fb->data = host.ge_source[host.ge_next];
-		fb->pitch = (size_t)fb->width * sizeof(uint16_t);
-		fb->format = RETRO_PIXEL_FORMAT_RGB565;
-		fb->memory_flags = 0;
-		return true;
-	}
+	case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER:
+		return software_framebuffer(data);
 	default:
 		return false;
 	}
@@ -664,7 +689,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u mode=%s presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u mode=%s presenter=%s gba_pc=%08x\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -676,6 +701,8 @@ static void video(const void *data, unsigned width, unsigned height,
 			pacer.interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
 			interval_ge_stage_frames, interval_buffered_frames,
+			host.input.polls, host.input.events,
+			host.input.interval_max_latency_us,
 			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0);
@@ -696,6 +723,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_sampled_present_us = 0;
 		interval_ge_stage_frames = 0;
 		interval_buffered_frames = 0;
+		sf2000_input_reset_interval(&host.input);
 	}
 }
 
