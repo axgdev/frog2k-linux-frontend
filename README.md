@@ -37,11 +37,14 @@ are routed by directory and extension to independent static-PIE packages below
 `/sf2000/cores` on the card. A missing package produces a localized error
 instead of a frozen selection. This keeps new cores independently deployable
 and prevents the full core catalog from increasing every boot image.
-QuickNES is the first such package. `make core-packages` produces
-`build/core-packages/sf2000-quicknes` and its license. Put the executable at
-`/sf2000/cores/sf2000-quicknes`. Opening a `.nes` file presents a FCEUmm /
+`make core-packages` currently produces independently licensed QuickNES,
+Snes9x 2005, and ProSystem executables. Put them below `/sf2000/cores` using
+their existing `sf2000-*` names. Opening a `.nes` file presents a FCEUmm /
 QuickNES chooser; `/NES` initially selects FCEUmm and `/QUICKNES` initially
-selects QuickNES.
+selects QuickNES. SNES/SFC and Atari 7800 directories route to Snes9x 2005 and
+ProSystem respectively. Each archive is rebuilt from its pinned upstream
+revision using MIPS o32 PIC objects; HCRTOS archives are never relinked into
+Linux static PIE executables.
 
 While a core is running, START+SELECT opens the pause menu. It exposes Resume,
 Exit, a 1x/2x/3x/4x/unlimited fast-forward rate, frontend frameskip, and the

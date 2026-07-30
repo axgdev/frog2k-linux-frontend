@@ -9,12 +9,16 @@ GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
 GPSP_REV := 5b6e751f4abf368509146cd143c949c1946ac1ae
 FCEUMM_REV := b5e3566515c27dc66c9c20572171673126532e06
 QUICKNES_REV := 7848e1ac22b1c69d056ae4cb57710651ff1dd169
+PROSYSTEM_REV := 4202ac5bdb2ce1a21f84efc0e26d75bb5aa7e248
+SNES9X2005_REV := b60356971fc9caae02cd0853676dced886a08be7
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 STB_REV := 31c1ad37456438565541f4919958214b6e762fb4
 GAMBATTE_DIR := .deps/gambatte
 GPSP_DIR := .deps/gpsp
 FCEUMM_DIR := .deps/fceumm
 QUICKNES_DIR := .deps/quicknes
+PROSYSTEM_DIR := .deps/prosystem
+SNES9X2005_DIR := .deps/snes9x2005
 QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
@@ -36,16 +40,21 @@ GAMBATTE_CORE := build/gambatte_libretro_linux.a
 GPSP_CORE := build/gpsp_libretro_linux.a
 FCEUMM_CORE := build/fceumm_libretro_linux.a
 QUICKNES_CORE := build/quicknes_libretro_linux.a
+PROSYSTEM_CORE := build/prosystem_libretro_linux.a
+SNES9X2005_CORE := build/snes9x2005_libretro_linux.a
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
 FCEUMM_PATCHES := $(wildcard patches/fceumm/*.patch)
 QUICKNES_PATCHES := $(wildcard patches/quicknes/*.patch)
+PROSYSTEM_PATCHES := $(wildcard patches/prosystem/*.patch)
 GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) | sha256sum | cut -c1-16)
 GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
 FCEUMM_PATCH_ID := $(shell sha256sum $(FCEUMM_PATCHES) | sha256sum | cut -c1-16)
 FCEUMM_PATCH_STAMP := $(FCEUMM_DIR)/.sf2000-patched-$(FCEUMM_PATCH_ID)
 QUICKNES_PATCH_ID := $(shell sha256sum $(QUICKNES_PATCHES) | sha256sum | cut -c1-16)
 QUICKNES_PATCH_STAMP := $(QUICKNES_DIR)/.sf2000-patched-$(QUICKNES_PATCH_ID)
+PROSYSTEM_PATCH_ID := $(shell sha256sum $(PROSYSTEM_PATCHES) | sha256sum | cut -c1-16)
+PROSYSTEM_PATCH_STAMP := $(PROSYSTEM_DIR)/.sf2000-patched-$(PROSYSTEM_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -84,7 +93,7 @@ SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 	-Wl,--gc-sections
 
 .PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
-	gambatte gpsp fceumm quicknes core-packages integrated
+	gambatte gpsp fceumm quicknes prosystem snes9x2005 core-packages integrated
 
 all: check
 
@@ -209,10 +218,27 @@ quicknes: $(QUICKNES_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
 		-Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: quicknes
+prosystem: $(PROSYSTEM_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-prosystem \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(PROSYSTEM_CORE) \
+		$(LIBRETRO_COMMON) -lm \
+		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
+		-Wl,--wrap=free $(SF2000_ENDFILES)
+
+snes9x2005: $(SNES9X2005_CORE) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-snes9x2005 \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(SNES9X2005_CORE) \
+		-lm -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
+		-Wl,--wrap=free $(SF2000_ENDFILES)
+
+core-packages: quicknes prosystem snes9x2005
 	mkdir -p build/core-packages/licenses
 	cp build/sf2000-quicknes build/core-packages/
+	cp build/sf2000-prosystem build/core-packages/
+	cp build/sf2000-snes9x2005 build/core-packages/
 	cp $(QUICKNES_DIR)/LICENSE build/core-packages/licenses/quicknes-LICENSE
+	cp $(PROSYSTEM_DIR)/License.txt build/core-packages/licenses/prosystem-LICENSE
+	cp $(SNES9X2005_DIR)/copyright build/core-packages/licenses/snes9x2005-copyright
 
 build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
 	mkdir -p build
@@ -286,6 +312,16 @@ $(QUICKNES_SOURCE_STAMP):
 		git clone --filter=blob:none https://github.com/libretro/QuickNES_Core.git $(QUICKNES_DIR)
 	git -C $(QUICKNES_DIR) checkout --detach $(QUICKNES_REV)
 	touch '$@'
+
+$(PROSYSTEM_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/libretro/prosystem-libretro.git $(PROSYSTEM_DIR)
+	git -C $(PROSYSTEM_DIR) checkout --detach $(PROSYSTEM_REV)
+
+$(SNES9X2005_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/libretro/snes9x2005.git $(SNES9X2005_DIR)
+	git -C $(SNES9X2005_DIR) checkout --detach $(SNES9X2005_REV)
 
 $(GPSP_PATCH_STAMP): $(GPSP_DIR)/.git $(GPSP_PATCHES)
 	git -C '$(GPSP_DIR)' reset --hard '$(GPSP_REV)'
@@ -366,6 +402,41 @@ $(QUICKNES_CORE): $(QUICKNES_PATCH_STAMP) Makefile
 	$(MAKE) -C $(QUICKNES_DIR) platform=unix STATIC_LINKING=1 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
+
+$(PROSYSTEM_PATCH_STAMP): $(PROSYSTEM_DIR)/.git $(PROSYSTEM_PATCHES)
+	git -C '$(PROSYSTEM_DIR)' reset --hard '$(PROSYSTEM_REV)'
+	for patch_file in $(PROSYSTEM_PATCHES); do \
+		patch -d '$(PROSYSTEM_DIR)' -p1 < "$$patch_file"; \
+	done
+	touch '$@'
+
+$(PROSYSTEM_CORE): $(PROSYSTEM_PATCH_STAMP) $(COMMON_DIR)/.git Makefile
+	mkdir -p build
+	$(MAKE) -C $(PROSYSTEM_DIR) clean platform=unix STATIC_LINKING=1
+	CFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
+		-ffunction-sections -fdata-sections -fsigned-char \
+		-I$(abspath $(PROSYSTEM_DIR)/core) \
+		-I$(abspath $(COMMON_DIR)/include)' \
+	$(MAKE) -C $(PROSYSTEM_DIR) platform=unix STATIC_LINKING=1 \
+		CC='$(SF2000_CC)' AR='$(CROSS_COMPILE)ar' \
+		LIBRETRO_COMM_DIR='$(abspath $(COMMON_DIR))' \
+		BUPBOOP_DIR='$(abspath $(PROSYSTEM_DIR)/bupboop)' \
+		TARGET='$(abspath $@)'
+
+$(SNES9X2005_CORE): $(SNES9X2005_DIR)/.git Makefile
+	mkdir -p build
+	$(MAKE) -C $(SNES9X2005_DIR) clean platform=unix STATIC_LINKING=1
+	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
+		-fno-strict-aliasing -ffunction-sections -fdata-sections' \
+	CXXFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
+		-fno-strict-aliasing -ffunction-sections -fdata-sections \
+		-fno-exceptions -fno-rtti' \
+	$(MAKE) -C $(SNES9X2005_DIR) platform=unix STATIC_LINKING=1 \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
 
 build/common/%.o: $(COMMON_DIR)/.git
 	mkdir -p '$(dir $@)'

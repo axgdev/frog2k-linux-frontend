@@ -1,0 +1,15 @@
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -34,6 +34,7 @@ SOURCES_C += \
+ 	$(BUPBOOP_DIR)/coretone/music.c \
+ 	$(BUPBOOP_DIR)/coretone/sample.c
+ 
++ifneq ($(STATIC_LINKING), 1)
+ SOURCES_C += \
+ 	$(LIBRETRO_COMM_DIR)/compat/compat_posix_string.c \
+ 	$(LIBRETRO_COMM_DIR)/compat/compat_strcasestr.c \
+@@ -49,3 +50,4 @@ SOURCES_C += \
+ 	$(LIBRETRO_COMM_DIR)/string/stdstring.c \
+ 	$(LIBRETRO_COMM_DIR)/time/rtime.c \
+ 	$(LIBRETRO_COMM_DIR)/vfs/vfs_implementation.c
++endif
