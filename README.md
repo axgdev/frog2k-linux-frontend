@@ -13,14 +13,30 @@ Linux/NOMMU cannot rely on `dlopen`, so each deployable static PIE ELF is
 linked to one core archive at build time. The browser selects the appropriate
 executable while sharing ROM/menu metadata.
 
-The integrated application provides a native framebuffer file browser and a
-statically linked Gambatte runner. Press START+R from the console, browse with
+The integrated application provides a native framebuffer file browser and
+statically linked runners. Normal SF2000 Linux boot enters it directly; use
+START+R to reopen it after deliberately returning to the console. Browse with
 the DPAD, use A to open and B to go back. A `.gb` or `.gbc` file beneath a
 case-insensitive `GB` or `GBC` directory launches Gambatte. START+L returns
 from a game to the browser, then from the browser to the console.
 Files below a case-insensitive `GBA` directory launch the statically linked
 gpSP runner with its MIPS dynarec enabled. Files below a case-insensitive
 `NES` directory launch FCEUmm.
+
+The browser uses a small UTF-8/TrueType renderer rather than a GUI framework.
+It caches rasterized glyphs, sleeps in `poll()` while idle, and renders only on
+input. English, Spanish, Portuguese, Polish, Vietnamese, and Japanese UI
+labels are built in. Theme colors, font path, and font size come from the
+platform's single `/sf2000.conf`; RGB565 and RGB888 colors are accepted. The
+Linux SD artifact stages a Unicode font separately so it does not increase ASD
+size or boot time. ROM paths are passed in an `execve` argument vector, so
+spaces and non-ASCII bytes never pass through shell parsing.
+
+Validated GB/GBC, GBA, and NES runners remain in the boot image. Other systems
+are routed by directory and extension to independent static-PIE packages below
+`/sf2000/cores` on the card. A missing package produces a localized error
+instead of a frozen selection. This keeps new cores independently deployable
+and prevents the full core catalog from increasing every boot image.
 
 While a core is running, SELECT+R toggles an uncapped full-frame benchmark.
 Every libretro video callback is still presented through GE, but audio

@@ -9,10 +9,12 @@ GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
 GPSP_REV := 5b6e751f4abf368509146cd143c949c1946ac1ae
 FCEUMM_REV := b5e3566515c27dc66c9c20572171673126532e06
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
+STB_REV := 31c1ad37456438565541f4919958214b6e762fb4
 GAMBATTE_DIR := .deps/gambatte
 GPSP_DIR := .deps/gpsp
 FCEUMM_DIR := .deps/fceumm
 COMMON_DIR := .deps/libretro-common
+STB_DIR := .deps/stb
 SF2000_LINUX_DIR ?= ../sf2000_linux
 GE_DIR := $(SF2000_LINUX_DIR)/ge
 GE_SOURCES := $(GE_DIR)/hcge_linux.c $(GE_DIR)/hcge_node.c
@@ -93,11 +95,18 @@ build/pacer-check: src/sf2000_pacer.c tests/pacer_test.c include/sf2000_pacer.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ src/sf2000_pacer.c tests/pacer_test.c
 
+build/browser-ui-check: src/sf2000_browser_ui.c tests/browser_ui_test.c \
+		include/sf2000_browser_ui.h $(STB_DIR)/.git
+	mkdir -p build
+	$(CC) $(CFLAGS) -I$(STB_DIR) -o $@ \
+		src/sf2000_browser_ui.c tests/browser_ui_test.c -lm
+
 check: build/frontend-check build/nommu-allocator-check build/input-check \
-		build/pacer-check
+		build/pacer-check build/browser-ui-check
 	./build/nommu-allocator-check
 	./build/input-check
 	./build/pacer-check
+	./build/browser-ui-check
 
 elf-audit:
 	@set -e; \
@@ -151,10 +160,11 @@ frogui:
 		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free \
 		$(SF2000_ENDFILES)
 
-browser:
+browser: $(STB_DIR)/.git
 	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) $(SF2000_LDFLAGS) \
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
 		-o build/sf2000-browser $(SF2000_STARTFILES) src/browser.c \
+		src/sf2000_browser_ui.c -lm \
 		$(SF2000_ENDFILES)
 
 gambatte: $(SF2000_HOST_OBJECTS)
@@ -224,6 +234,11 @@ $(COMMON_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/libretro/libretro-common.git $(COMMON_DIR)
 	git -C $(COMMON_DIR) checkout --detach $(COMMON_REV)
+
+$(STB_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/nothings/stb.git $(STB_DIR)
+	git -C $(STB_DIR) checkout --detach $(STB_REV)
 
 $(GPSP_DIR)/.git:
 	mkdir -p .deps

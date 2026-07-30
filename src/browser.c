@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <linux/input.h>
+#include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,9 +18,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "sf2000_browser_ui.h"
+
 extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
+#define EXIT_MARKER "/run/sf2000-browser-exit"
 #define GAMBATTE_PATH "/usr/bin/sf2000-gambatte"
 #define GPSP_PATH "/usr/bin/sf2000-gpsp"
 #define FCEUMM_PATH "/usr/bin/sf2000-fceumm"
@@ -70,6 +74,7 @@ static uint16_t framebuffer[MAX_FRAME_PIXELS];
 static int framebuffer_fd = -1;
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
+static struct sf2000_ui ui;
 
 static void log_message(const char *message)
 {
@@ -83,48 +88,6 @@ static void log_message(const char *message)
 	if (length > 0)
 		(void)write(fd, line, (size_t)length);
 	close(fd);
-}
-
-static uint32_t glyph(char c)
-{
-	if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
-	switch (c) {
-	case 'A': return 0x7e11117e; case 'B': return 0x7f494936;
-	case 'C': return 0x3e414122; case 'D': return 0x7f41413e;
-	case 'E': return 0x7f494941; case 'F': return 0x7f090901;
-	case 'G': return 0x3e41497a; case 'H': return 0x7f08087f;
-	case 'I': return 0x41417f41; case 'J': return 0x2040403f;
-	case 'K': return 0x7f081463; case 'L': return 0x7f404040;
-	case 'M': return 0x7f06187f; case 'N': return 0x7f0e707f;
-	case 'O': return 0x3e41413e; case 'P': return 0x7f090906;
-	case 'Q': return 0x3e41613e; case 'R': return 0x7f091966;
-	case 'S': return 0x26494932; case 'T': return 0x01017f01;
-	case 'U': return 0x3f40403f; case 'V': return 0x1f60401f;
-	case 'W': return 0x7f30187f; case 'X': return 0x631c1c63;
-	case 'Y': return 0x07087807; case 'Z': return 0x61514947;
-	case '0': return 0x3e45493e; case '1': return 0x00427f40;
-	case '2': return 0x62514946; case '3': return 0x22494936;
-	case '4': return 0x0f087f08; case '5': return 0x2f494931;
-	case '6': return 0x3e494932; case '7': return 0x01611907;
-	case '8': return 0x36494936; case '9': return 0x2649493e;
-	case '.': return 0x00006060; case '-': return 0x00080808;
-	case '_': return 0x40404040; case '/': return 0x60180c03;
-	case '<': return 0x08142241; case '>': return 0x41221408;
-	case ':': return 0x00363600; case '?': return 0x02015906;
-	default: return 0;
-	}
-}
-
-static void text(int x, int y, const char *value, uint16_t color)
-{
-	for (; *value && x + 5 < (int)width; value++, x += 6) {
-		uint32_t bits = glyph(*value);
-		unsigned column, row;
-		for (column = 0; column < 4; column++)
-			for (row = 0; row < 7; row++)
-				if ((bits >> ((3u - column) * 8u + row)) & 1u)
-					framebuffer[(y + row) * stride + x + column] = color;
-	}
 }
 
 static int compare_entries(const void *left, const void *right)
@@ -211,75 +174,180 @@ static void scan_directory(void)
 
 static void draw(void)
 {
-	unsigned row, visible = height > 42 ? (height - 42) / 10u : 1u;
-	char line[MAX_NAME + 4];
+	unsigned row, visible = height > 78 ? (height - 78) / 22u : 1u;
+	char line[MAX_NAME + 8];
+	char footer[128];
 
-	memset(framebuffer, 0, (size_t)height * stride * sizeof(*framebuffer));
-	text(6, 5, "SF2000 LIBRETRO", 0xffff);
-	text(6, 16, current, 0x07ff);
+	sf2000_ui_clear(&ui, ui.config.background);
+	sf2000_ui_fill(&ui, 0, 0, (int)width, 38, ui.config.panel);
+	sf2000_ui_text(&ui, 10, 4, sf2000_ui_label(&ui, SF2000_UI_LIBRARY),
+		ui.config.header, 110);
+	sf2000_ui_text(&ui, 10, 21, current, ui.config.muted,
+		(int)width - 20);
 	if (!entry_count)
-		text(12, 42, "NO FILES", 0xf800);
+		sf2000_ui_text(&ui, 18, 82,
+			sf2000_ui_label(&ui, SF2000_UI_EMPTY),
+			ui.config.muted, (int)width - 36);
 	for (row = 0; row < visible && first + row < entry_count; row++) {
 		unsigned index = first + row;
-		uint16_t color = index == selected ? 0xffe0 : 0xffff;
-		snprintf(line, sizeof(line), "%c %s", entries[index].directory ? '>' : ' ',
+		int y = 45 + (int)row * 22;
+		uint16_t color = index == selected ?
+			ui.config.selected_text : ui.config.text;
+
+		if (index == selected)
+			sf2000_ui_round(&ui, 7, y - 3, (int)width - 14, 20, 5,
+				ui.config.accent);
+		snprintf(line, sizeof(line), "%s  %s",
+			entries[index].directory ? "\xe2\x96\xb8" : "\xc2\xb7",
 			entries[index].name);
-		text(8, 32 + (int)row * 10, line, color);
+		sf2000_ui_text(&ui, 14, y, line, color, (int)width - 28);
 	}
-	text(6, height - 9, "A OPEN  B BACK  START+L EXIT", 0x07e0);
+	if (entry_count > visible) {
+		int track = (int)height - 83;
+		int thumb = track * (int)visible / (int)entry_count;
+		int position = track * (int)first / (int)entry_count;
+
+		if (thumb < 8)
+			thumb = 8;
+		sf2000_ui_round(&ui, (int)width - 5, 44, 2, track, 1,
+			ui.config.panel);
+		sf2000_ui_round(&ui, (int)width - 5, 44 + position, 2, thumb, 1,
+			ui.config.accent);
+	}
+	sf2000_ui_fill(&ui, 0, (int)height - 29, (int)width, 29,
+		ui.config.panel);
+	snprintf(footer, sizeof(footer), "A %s   B %s   START+L %s",
+		sf2000_ui_label(&ui, SF2000_UI_OPEN),
+		sf2000_ui_label(&ui, SF2000_UI_BACK),
+		sf2000_ui_label(&ui, SF2000_UI_EXIT));
+	sf2000_ui_text(&ui, 10, (int)height - 22, footer,
+		ui.config.muted, (int)width - 20);
 	if (pwrite(framebuffer_fd, framebuffer,
 			(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
 		log_message("framebuffer write failed");
 }
 
-static int gameboy_path(const char *path)
+static void draw_message(enum sf2000_ui_label title,
+	enum sf2000_ui_label detail, const char *name, uint16_t color)
 {
-	const char *component = path, *extension = strrchr(path, '.');
-	int in_gameboy_directory = 0;
+	int title_width;
 
-	while ((component = strchr(component, '/'))) {
-		const char *end = strchr(++component, '/');
-		size_t length = end ? (size_t)(end - component) : strlen(component);
-		if ((length == 2 && !strncasecmp(component, "GB", 2)) ||
-				(length == 3 && !strncasecmp(component, "GBC", 3)))
-			in_gameboy_directory = 1;
-		if (!end) break;
-		component = end;
-	}
-	return in_gameboy_directory && extension &&
-		(!strcasecmp(extension, ".gb") || !strcasecmp(extension, ".gbc"));
+	sf2000_ui_clear(&ui, ui.config.background);
+	sf2000_ui_round(&ui, 18, 62, (int)width - 36, 112, 8,
+		ui.config.panel);
+	title_width = sf2000_ui_measure(&ui, sf2000_ui_label(&ui, title));
+	sf2000_ui_text(&ui, ((int)width - title_width) / 2, 82,
+		sf2000_ui_label(&ui, title), color, (int)width - 40);
+	if (name)
+		sf2000_ui_text(&ui, 28, 112, name, ui.config.accent,
+			(int)width - 56);
+	sf2000_ui_text(&ui, 28, 141, sf2000_ui_label(&ui, detail),
+		ui.config.muted, (int)width - 56);
+	if (pwrite(framebuffer_fd, framebuffer,
+			(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
+		log_message("message framebuffer write failed");
 }
 
-static int gba_path(const char *path)
+struct core_route {
+	const char *directories;
+	const char *extensions;
+	const char *executable;
+	const char *name;
+	unsigned minimum_mib;
+};
+
+/*
+ * Validated runners stay in the boot image. Additional static-PIE runners live
+ * on the SD card, so adding systems does not slow every boot. Directory names
+ * disambiguate generic extensions such as .bin, .rom, and .zip.
+ */
+static const struct core_route core_routes[] = {
+	{ "GB|GBC", "gb|gbc", GAMBATTE_PATH, "Gambatte", 0 },
+	{ "GBA", "gba", GPSP_PATH, "gpSP", 40 },
+	{ "NES|FDS", "nes|fds", FCEUMM_PATH, "FCEUmm", 0 },
+	{ "MD|GENESIS|MEGADRIVE|SMS|GG|32X",
+		"md|gen|smd|sms|gg|sg|32x|cue|chd|iso",
+		"/mnt/sd/sf2000/cores/sf2000-picodrive", "PicoDrive", 0 },
+	{ "SNES|SFC", "sfc|smc",
+		"/mnt/sd/sf2000/cores/sf2000-snes9x2005", "Snes9x 2005", 0 },
+	{ "PCE|PCENGINE|SGX", "pce|sgx|cue|chd",
+		"/mnt/sd/sf2000/cores/sf2000-pce-fast", "PCE Fast", 0 },
+	{ "PS|PSX|PLAYSTATION", "bin|iso|img|cue|pbp",
+		"/mnt/sd/sf2000/cores/sf2000-qpsx", "QPSX", 48 },
+	{ "ARCADE|MAME", "zip",
+		"/mnt/sd/sf2000/cores/sf2000-mame2000", "MAME 2000", 0 },
+	{ "FBNEO|FBA", "zip",
+		"/mnt/sd/sf2000/cores/sf2000-fbalpha2012", "FB Alpha 2012", 0 },
+	{ "ATARI2600|A2600", "a26|bin",
+		"/mnt/sd/sf2000/cores/sf2000-stella2014", "Stella 2014", 0 },
+	{ "ATARI5200|A5200", "a52|bin",
+		"/mnt/sd/sf2000/cores/sf2000-a5200", "A5200", 0 },
+	{ "ATARI7800|A7800", "a78|bin",
+		"/mnt/sd/sf2000/cores/sf2000-prosystem", "ProSystem", 0 },
+	{ "LYNX", "lnx",
+		"/mnt/sd/sf2000/cores/sf2000-handy", "Handy", 0 },
+	{ "NGP|NGPC", "ngp|ngc",
+		"/mnt/sd/sf2000/cores/sf2000-race", "RACE", 0 },
+	{ "WS|WSC|WONDERSWAN", "ws|wsc",
+		"/mnt/sd/sf2000/cores/sf2000-beetle-cygne", "Beetle Cygne", 0 },
+	{ "COLECO|COLECOVISION", "col|rom",
+		"/mnt/sd/sf2000/cores/sf2000-gearcoleco", "Gearcoleco", 0 },
+	{ "C64|COMMODORE64", "d64|t64|x64|p00|prg",
+		"/mnt/sd/sf2000/cores/sf2000-frodo", "Frodo", 0 },
+	{ "PICO8", "p8",
+		"/mnt/sd/sf2000/cores/sf2000-fake08", "Fake-08", 0 },
+	{ "MSX", "rom|mx1|mx2|dsk|cas",
+		"/mnt/sd/sf2000/cores/sf2000-bluemsx", "blueMSX", 0 },
+	{ "JAVASCRIPT|JS2300|CHIP8", "js|mjs|ch8|chip8",
+		"/mnt/sd/sf2000/cores/sf2000-js2300", "JS2300", 0 },
+};
+
+static int list_contains(const char *list, const char *value, size_t length)
 {
-	const char *extension = strrchr(path, '.');
+	while (*list) {
+		const char *end = strchr(list, '|');
+		size_t item_length = end ? (size_t)(end - list) : strlen(list);
+
+		if (item_length == length && !strncasecmp(list, value, length))
+			return 1;
+		if (!end)
+			break;
+		list = end + 1;
+	}
+	return 0;
+}
+
+static int path_has_directory(const char *path, const char *directories)
+{
 	const char *component = path;
 
 	while ((component = strchr(component, '/'))) {
 		const char *end = strchr(++component, '/');
 		size_t length = end ? (size_t)(end - component) : strlen(component);
-		if (length == 3 && !strncasecmp(component, "GBA", 3))
-			return extension && !strcasecmp(extension, ".gba");
-		if (!end) break;
+
+		if (list_contains(directories, component, length))
+			return 1;
+		if (!end)
+			break;
 		component = end;
 	}
 	return 0;
 }
 
-static int nes_path(const char *path)
+static const struct core_route *core_for_path(const char *path)
 {
 	const char *extension = strrchr(path, '.');
-	const char *component = path;
+	unsigned i;
 
-	while ((component = strchr(component, '/'))) {
-		const char *end = strchr(++component, '/');
-		size_t length = end ? (size_t)(end - component) : strlen(component);
-		if (length == 3 && !strncasecmp(component, "NES", 3))
-			return extension && !strcasecmp(extension, ".nes");
-		if (!end) break;
-		component = end;
-	}
-	return 0;
+	if (!extension || !extension[1])
+		return NULL;
+	extension++;
+	for (i = 0; i < sizeof(core_routes) / sizeof(core_routes[0]); i++)
+		if (path_has_directory(path, core_routes[i].directories) &&
+				list_contains(core_routes[i].extensions, extension,
+					strlen(extension)))
+			return &core_routes[i];
+	return NULL;
 }
 
 static int media_path(const char *p)
@@ -304,6 +372,7 @@ static int media_path(const char *p)
 static void launch_selected(void)
 {
 	char path[MAX_PATH], message[640];
+	const struct core_route *route;
 
 	if (snprintf(path, sizeof(path), "%s/%s", current, entries[selected].name) >=
 			(int)sizeof(path))
@@ -313,85 +382,74 @@ static void launch_selected(void)
 		scan_directory();
 		return;
 	}
-	if (!gameboy_path(path) && !gba_path(path) && !nes_path(path)) {
+	route = core_for_path(path);
+	if (!route) {
 		if (media_path(path)) {
 			char *const argv[] = { (char *)PLAYER_PATH, path, NULL };
 			char *const envp[] = { NULL };
 
 			snprintf(message, sizeof(message), "launch Player %s", path);
 			log_message(message);
-			memset(framebuffer, 0, (size_t)height * stride * sizeof(*framebuffer));
-			text(72, 92, "OPENING MEDIA", 0xffff);
-			text(48, 132, "PLEASE WAIT - SYSTEM IS ACTIVE", 0x07e0);
-			if (pwrite(framebuffer_fd, framebuffer,
-					(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
-				log_message("loading framebuffer write failed");
+			draw_message(SF2000_UI_LOADING, SF2000_UI_ACTIVE,
+				"MEDIA", ui.config.header);
 			execve(PLAYER_PATH, argv, envp);
 			snprintf(message, sizeof(message), "player exec failed errno=%d", errno);
 			log_message(message);
 			return;
 		}
-		log_message("unsupported file; use GB, GBC, GBA, NES, or media files");
+		log_message("unsupported file or directory route");
 		return;
 	}
 	{
-		const int gba = gba_path(path);
-		const int nes = nes_path(path);
-		const char *core;
-		const char *name;
-
-		if (gba) {
-			core = GPSP_PATH;
-			name = "gpSP";
-		} else if (nes) {
-			core = FCEUMM_PATH;
-			name = "FCEUMM";
-		} else {
-			core = GAMBATTE_PATH;
-			name = "Gambatte";
+		if (access(route->executable, X_OK) < 0) {
+			snprintf(message, sizeof(message),
+				 "missing core %s at %s errno=%d", route->name,
+				 route->executable, errno);
+			log_message(message);
+			draw_message(SF2000_UI_MISSING_CORE, SF2000_UI_INSTALL_CORE,
+				route->name, 0xf800);
+			return;
 		}
-
-		if (gba) {
+		if (route->minimum_mib) {
 			struct sysinfo info;
-			const unsigned long minimum = 40ul * 1024ul * 1024ul;
+			const unsigned long minimum =
+				(unsigned long)route->minimum_mib * 1024ul * 1024ul;
 
 			if (sysinfo(&info) == 0 &&
 			    (info.freeram + info.bufferram) * info.mem_unit < minimum) {
 				snprintf(message, sizeof(message),
-					 "gpSP needs 40 MiB free; available=%lu KiB",
+					 "%s needs %u MiB free; available=%lu KiB",
+					 route->name, route->minimum_mib,
 					 ((info.freeram + info.bufferram) * info.mem_unit) /
 					 1024ul);
 				log_message(message);
-				memset(framebuffer, 0,
-				       (size_t)height * stride * sizeof(*framebuffer));
-				text(50, 92, "NOT ENOUGH MEMORY FOR GPSP", 0xf800);
-				text(50, 116, "CLOSE OTHER APPLICATIONS", 0xffff);
-				(void)pwrite(framebuffer_fd, framebuffer,
-					     (size_t)height * stride *
-					     sizeof(*framebuffer), 0);
+				draw_message(SF2000_UI_NO_MEMORY,
+					SF2000_UI_CLOSE_APPS, route->name, 0xf800);
 				return;
 			}
 		}
 
-		snprintf(message, sizeof(message), "launch %s %s", name, path);
+		snprintf(message, sizeof(message), "launch %s %s", route->name, path);
 		log_message(message);
 		/* Replace the browser before the static-PIE loader allocates and
 		 * relocates the core, so the handoff never looks like a frozen
 		 * selection screen. */
-		memset(framebuffer, 0, (size_t)height * stride * sizeof(*framebuffer));
-		text(72, 92, "LOADING EMULATOR", 0xffff);
-		text(102, 108, name, 0x07ff);
-		text(48, 132, "PLEASE WAIT - SYSTEM IS ACTIVE", 0x07e0);
-		if (pwrite(framebuffer_fd, framebuffer,
-				(size_t)height * stride * sizeof(*framebuffer), 0) < 0)
-			log_message("loading framebuffer write failed");
+		draw_message(SF2000_UI_LOADING, SF2000_UI_ACTIVE, route->name,
+			ui.config.header);
 		{
-			char *const argv[] = { (char *)core, path, NULL };
+			char *const argv[] = {
+				(char *)route->executable, path, NULL
+			};
 			char *const envp[] = { NULL };
 
-			execve(core, argv, envp);
+			/*
+			 * This is an argv vector, not a shell command.  A ROM name
+			 * containing spaces therefore remains exactly one argument.
+			 */
+			execve(route->executable, argv, envp);
 		}
-		snprintf(message, sizeof(message), "%s exec failed errno=%d", name, errno);
+		snprintf(message, sizeof(message), "%s exec failed errno=%d",
+			route->name, errno);
 	}
 	log_message(message);
 }
@@ -408,6 +466,7 @@ static void parent_directory(void)
 
 int main(void)
 {
+	struct sf2000_ui_config config;
 	struct fb_fix_screeninfo fix;
 	struct fb_var_screeninfo var;
 	struct input_event event;
@@ -420,8 +479,15 @@ int main(void)
 	if ((size_t)height * stride > MAX_FRAME_PIXELS)
 		return 1;
 	framebuffer_fd = fb;
+	sf2000_ui_config_defaults(&config);
+	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
+	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
+	(void)sf2000_ui_init(&ui, framebuffer, width, height, stride, &config);
 	input = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-	if (input < 0) return 1;
+	if (input < 0) {
+		sf2000_ui_close(&ui);
+		return 1;
+	}
 	scan_directory(); draw();
 	{ int ready = open(READY_MARKER, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (ready >= 0) close(ready); }
@@ -433,8 +499,16 @@ int main(void)
 		log_message(message);
 	}
 	for (;;) {
+		struct pollfd wait = { .fd = input, .events = POLLIN };
+		int ready;
+
+		do {
+			ready = poll(&wait, 1, -1);
+		} while (ready < 0 && errno == EINTR);
+		if (ready <= 0)
+			break;
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
-			unsigned visible = height > 42 ? (height - 42) / 10u : 1u;
+			unsigned visible = height > 78 ? (height - 78) / 22u : 1u;
 			if (event.type != EV_KEY) continue;
 			if (event.code == BTN_START || event.code == BTN_TL) {
 				if (event.code == BTN_START) start = event.value != 0;
@@ -460,10 +534,17 @@ int main(void)
 			if (selected >= first + visible) first = selected - visible + 1u;
 			draw();
 		}
-		{ struct timespec delay = { 0, 10000000L }; nanosleep(&delay, NULL); }
 	}
 done:
 	log_message("returned cleanly");
+	{
+		int marker = open(EXIT_MARKER,
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
+		if (marker >= 0)
+			close(marker);
+	}
+	sf2000_ui_close(&ui);
 	close(input); close(fb);
 	_exit(0);
 }
