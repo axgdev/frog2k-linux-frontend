@@ -38,11 +38,12 @@ are routed by directory and extension to independent static-PIE packages below
 instead of a frozen selection. This keeps new cores independently deployable
 and prevents the full core catalog from increasing every boot image.
 `make core-packages` currently produces independently licensed QuickNES,
-Snes9x 2005, and ProSystem executables. Put them below `/sf2000/cores` using
+Snes9x 2005, Snes9x 2002, and ProSystem executables. Put them below
+`/sf2000/cores` using
 their existing `sf2000-*` names. Opening a `.nes` file presents a FCEUmm /
 QuickNES chooser; `/NES` initially selects FCEUmm and `/QUICKNES` initially
-selects QuickNES. SNES/SFC and Atari 7800 directories route to Snes9x 2005 and
-ProSystem respectively. Each archive is rebuilt from its pinned upstream
+selects QuickNES. SNES/SFC content presents a Snes9x 2005 / Snes9x 2002
+chooser; Atari 7800 directories route to ProSystem. Each archive is rebuilt from its pinned upstream
 revision using MIPS o32 PIC objects; HCRTOS archives are never relinked into
 Linux static PIE executables.
 

@@ -358,6 +358,8 @@ static const struct core_route core_routes[] = {
 		"/mnt/sd/sf2000/cores/sf2000-picodrive", "PicoDrive", 0 },
 	{ "SNES|SFC", "sfc|smc",
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2005", "Snes9x 2005", 0 },
+	{ "SNES9X2002", "sfc|smc",
+		"/mnt/sd/sf2000/cores/sf2000-snes9x2002", "Snes9x 2002", 0 },
 	{ "PCE|PCENGINE|SGX", "pce|sgx|cue|chd",
 		"/mnt/sd/sf2000/cores/sf2000-pce-fast", "PCE Fast", 0 },
 	{ "PS|PSX|PLAYSTATION", "bin|iso|img|cue|pbp",
@@ -448,15 +450,16 @@ static const struct core_route *route_named(const char *name)
 	return NULL;
 }
 
-static const struct core_route *choose_nes_core(int input,
-	const struct core_route *fallback)
+static const struct core_route *choose_core(int input,
+	const struct core_route *fallback, const struct core_route *const *choices,
+	unsigned choice_count, const char *family)
 {
-	const struct core_route *choices[] = {
-		route_named("FCEUmm"), route_named("QuickNES"),
-	};
-	unsigned choice = fallback && !strcmp(fallback->name, "QuickNES") ? 1u : 0u;
+	unsigned choice = 0;
 	struct input_event event;
 
+	for (unsigned i = 0; i < choice_count; i++)
+		if (choices[i] == fallback)
+			choice = i;
 	for (;;) {
 		unsigned i;
 		struct pollfd wait = { .fd = input, .events = POLLIN };
@@ -466,7 +469,7 @@ static const struct core_route *choose_nes_core(int input,
 		sf2000_ui_text(&ui, 13, 11,
 			sf2000_ui_label(&ui, SF2000_UI_SELECT_CORE),
 			ui.config.header, (int)width - 26);
-		for (i = 0; i < 2; i++) {
+		for (i = 0; i < choice_count; i++) {
 			int y = 80 + (int)i * 45;
 			uint16_t color = i == choice ? ui.config.selected_text :
 				ui.config.text;
@@ -485,15 +488,17 @@ static const struct core_route *choose_nes_core(int input,
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			if (event.type != EV_KEY || event.value != 1)
 				continue;
-			if (event.code == BTN_DPAD_UP ||
-					event.code == BTN_DPAD_DOWN)
-				choice ^= 1u;
+			if (event.code == BTN_DPAD_UP)
+				choice = (choice + choice_count - 1u) % choice_count;
+			else if (event.code == BTN_DPAD_DOWN)
+				choice = (choice + 1u) % choice_count;
 			else if (event.code == BTN_EAST)
 			{
 				char message[96];
 
 				snprintf(message, sizeof(message),
-					"NES core selected %s", choices[choice]->name);
+					"%s core selected %s", family,
+					choices[choice]->name);
 				log_message(message);
 				return choices[choice];
 			}
@@ -501,6 +506,26 @@ static const struct core_route *choose_nes_core(int input,
 				return NULL;
 		}
 	}
+}
+
+static const struct core_route *choose_nes_core(int input,
+	const struct core_route *fallback)
+{
+	const struct core_route *choices[] = {
+		route_named("FCEUmm"), route_named("QuickNES"),
+	};
+
+	return choose_core(input, fallback, choices, 2u, "NES");
+}
+
+static const struct core_route *choose_snes_core(int input,
+	const struct core_route *fallback)
+{
+	const struct core_route *choices[] = {
+		route_named("Snes9x 2005"), route_named("Snes9x 2002"),
+	};
+
+	return choose_core(input, fallback, choices, 2u, "SNES");
 }
 
 static int media_path(const char *p)
@@ -560,6 +585,12 @@ static void launch_selected(int input)
 
 		if (extension && !strcasecmp(extension, ".nes")) {
 			route = choose_nes_core(input, route);
+			if (!route)
+				return;
+		} else if (extension &&
+				(!strcasecmp(extension, ".sfc") ||
+				 !strcasecmp(extension, ".smc"))) {
+			route = choose_snes_core(input, route);
 			if (!route)
 				return;
 		}

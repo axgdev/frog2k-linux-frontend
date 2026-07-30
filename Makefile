@@ -11,6 +11,7 @@ FCEUMM_REV := b5e3566515c27dc66c9c20572171673126532e06
 QUICKNES_REV := 7848e1ac22b1c69d056ae4cb57710651ff1dd169
 PROSYSTEM_REV := 4202ac5bdb2ce1a21f84efc0e26d75bb5aa7e248
 SNES9X2005_REV := b60356971fc9caae02cd0853676dced886a08be7
+SNES9X2002_REV := 39e0d8c6daf4b1b1302eeecfee8309570aeb6a82
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 STB_REV := 31c1ad37456438565541f4919958214b6e762fb4
 GAMBATTE_DIR := .deps/gambatte
@@ -19,6 +20,7 @@ FCEUMM_DIR := .deps/fceumm
 QUICKNES_DIR := .deps/quicknes
 PROSYSTEM_DIR := .deps/prosystem
 SNES9X2005_DIR := .deps/snes9x2005
+SNES9X2002_DIR := .deps/snes9x2002
 QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
@@ -42,6 +44,8 @@ FCEUMM_CORE := build/fceumm_libretro_linux.a
 QUICKNES_CORE := build/quicknes_libretro_linux.a
 PROSYSTEM_CORE := build/prosystem_libretro_linux.a
 SNES9X2005_CORE := build/snes9x2005_libretro_linux.a
+SNES9X2002_CORE := build/snes9x2002_libretro_linux.a
+SNES9X2002_MEMORY := build/snes9x2002-memory-stream.o
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
 FCEUMM_PATCHES := $(wildcard patches/fceumm/*.patch)
@@ -93,7 +97,8 @@ SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 	-Wl,--gc-sections
 
 .PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
-	gambatte gpsp fceumm quicknes prosystem snes9x2005 core-packages integrated
+	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
+	core-packages integrated
 
 all: check
 
@@ -231,14 +236,24 @@ snes9x2005: $(SNES9X2005_CORE) $(SF2000_HOST_OBJECTS)
 		-lm -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
 		-Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: quicknes prosystem snes9x2005
+snes9x2002: $(SNES9X2002_CORE) $(SNES9X2002_MEMORY) $(LIBRETRO_COMMON) \
+		$(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-snes9x2002 \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(SNES9X2002_CORE) \
+		$(SNES9X2002_MEMORY) $(LIBRETRO_COMMON) -lm \
+		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
+		-Wl,--wrap=free $(SF2000_ENDFILES)
+
+core-packages: quicknes prosystem snes9x2005 snes9x2002
 	mkdir -p build/core-packages/licenses
 	cp build/sf2000-quicknes build/core-packages/
 	cp build/sf2000-prosystem build/core-packages/
 	cp build/sf2000-snes9x2005 build/core-packages/
+	cp build/sf2000-snes9x2002 build/core-packages/
 	cp $(QUICKNES_DIR)/LICENSE build/core-packages/licenses/quicknes-LICENSE
 	cp $(PROSYSTEM_DIR)/License.txt build/core-packages/licenses/prosystem-LICENSE
 	cp $(SNES9X2005_DIR)/copyright build/core-packages/licenses/snes9x2005-copyright
+	cp $(SNES9X2002_DIR)/src/copyright.h build/core-packages/licenses/snes9x2002-copyright.h
 
 build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
 	mkdir -p build
@@ -322,6 +337,11 @@ $(SNES9X2005_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/libretro/snes9x2005.git $(SNES9X2005_DIR)
 	git -C $(SNES9X2005_DIR) checkout --detach $(SNES9X2005_REV)
+
+$(SNES9X2002_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/libretro/snes9x2002.git $(SNES9X2002_DIR)
+	git -C $(SNES9X2002_DIR) checkout --detach $(SNES9X2002_REV)
 
 $(GPSP_PATCH_STAMP): $(GPSP_DIR)/.git $(GPSP_PATCHES)
 	git -C '$(GPSP_DIR)' reset --hard '$(GPSP_REV)'
@@ -437,6 +457,27 @@ $(SNES9X2005_CORE): $(SNES9X2005_DIR)/.git Makefile
 	$(MAKE) -C $(SNES9X2005_DIR) platform=unix STATIC_LINKING=1 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
+
+$(SNES9X2002_CORE): $(SNES9X2002_DIR)/.git Makefile
+	mkdir -p build
+	$(MAKE) -C $(SNES9X2002_DIR) clean platform=unix STATIC_LINKING=1
+	CFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
+		-fno-strict-aliasing -ffunction-sections -fdata-sections' \
+	CXXFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
+		-fno-strict-aliasing -ffunction-sections -fdata-sections \
+		-fno-exceptions -fno-rtti' \
+	$(MAKE) -C $(SNES9X2002_DIR) platform=unix STATIC_LINKING=1 \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
+
+$(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git
+	mkdir -p build
+	$(SF2000_CC) $(filter-out -Werror,$(SF2000_CFLAGS)) \
+		-I$(SNES9X2002_DIR)/libretro/libretro-common/include \
+		-c -o '$@' \
+		'$(SNES9X2002_DIR)/libretro/libretro-common/streams/memory_stream.c'
 
 build/common/%.o: $(COMMON_DIR)/.git
 	mkdir -p '$(dir $@)'
