@@ -102,7 +102,9 @@ static unsigned core_options_updated;
 static uint16_t pause_pixels[PAUSE_WIDTH * PAUSE_HEIGHT];
 static struct sf2000_ui pause_ui;
 static unsigned pause_ui_ready;
+static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
+static void render_pause_menu(struct sf2000_ui *menu, unsigned selected);
 
 struct core_option {
 	char key[CORE_OPTION_TEXT_MAX];
@@ -1170,6 +1172,11 @@ static int prepare_pause_ui(void)
 			host.fb_height, PAUSE_WIDTH, &config) < 0)
 		return -1;
 	pause_ui_ready = 1;
+	/* Rasterize the initial menu while the first game frame is already
+	 * visible. The font file is now cached, but stb_truetype still pays the
+	 * first-use glyph cost unless the menu is rendered once here. */
+	render_pause_menu(&pause_ui, 0);
+	pause_frame_ready = 1;
 	{
 		char message[128];
 
@@ -1229,7 +1236,7 @@ static int write_pause_frame(void)
 	return 0;
 }
 
-static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
+static void render_pause_menu(struct sf2000_ui *menu, unsigned selected)
 {
 	unsigned total = 4u + core_option_count;
 	unsigned first_item = selected > 5u ? selected - 5u : 0u;
@@ -1277,6 +1284,11 @@ static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
 	sf2000_ui_text(menu, 12, (int)host.fb_height - 20,
 		"A SELECT   B RESUME", menu->config.muted,
 		(int)host.fb_width - 24);
+}
+
+static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
+{
+	render_pause_menu(menu, selected);
 	if (write_pause_frame() < 0) {
 		log_kmsg("pause framebuffer write failed\n");
 	} else if (!pause_frame_writes++) {
@@ -1345,7 +1357,24 @@ static void run_pause_menu(long frame_ns)
 		(void)poll(NULL, 0, 5);
 	}
 	previous = host.input.keys;
-	draw_pause_menu(&pause_ui, selected_item);
+	if (pause_frame_ready && selected_item == 0u) {
+		/* The prepared frame is not published until the GE fence above has
+		 * completed, so the game remains visible until this exact boundary. */
+		pause_frame_ready = 0;
+		if (write_pause_frame() < 0)
+			log_kmsg("pause framebuffer write failed\n");
+		else if (!pause_frame_writes++) {
+			char details[128];
+
+			snprintf(details, sizeof(details),
+				"pause framebuffer wrote bytes=%lu stride=%u\n",
+				(unsigned long)((size_t)host.fb_height *
+					(size_t)host.fb_stride * sizeof(*pause_pixels)),
+				(unsigned)(host.fb_stride * sizeof(*pause_pixels)));
+			log_kmsg(details);
+		}
+	} else
+		draw_pause_menu(&pause_ui, selected_item);
 	while (!resume && !stopping) {
 		unsigned pressed;
 
