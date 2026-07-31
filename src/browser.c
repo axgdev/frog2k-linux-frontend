@@ -32,7 +32,9 @@ extern long syscall(long number, ...);
 #define FCEUMM_PATH "/usr/bin/sf2000-fceumm"
 #define PLAYER_PATH "/usr/bin/sf2000-player"
 #define SD_ROOT "/mnt/sd"
+#define STORAGE_ROOTS_PATH "/run/sf2000-storage-roots"
 #define MAX_ENTRIES 128
+#define MAX_EXTRA_ROOTS 8u
 #define MAX_NAME 128
 #define MAX_PATH 512
 #define MAX_FRAME_PIXELS (320u * 240u)
@@ -70,17 +72,91 @@ static ssize_t kernel_getdents64(int fd, void *buffer, size_t bytes)
 #endif
 }
 
-struct entry { char name[MAX_NAME]; unsigned directory; };
+struct entry {
+	char name[MAX_NAME];
+	unsigned directory;
+	/* If non-empty, opening this directory entry jumps here. */
+	char target[MAX_PATH];
+};
 static struct entry entries[MAX_ENTRIES];
 static unsigned entry_count, selected, first;
 static uint16_t framebuffer[MAX_FRAME_PIXELS];
 static int framebuffer_fd = -1;
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
+static char primary_root[MAX_PATH] = SD_ROOT;
+static char extra_roots[MAX_EXTRA_ROOTS][MAX_PATH];
+static char extra_labels[MAX_EXTRA_ROOTS][MAX_NAME];
+static unsigned extra_root_count;
 static struct sf2000_ui ui;
 enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS };
 static enum browser_view view = VIEW_HOME;
 static void log_message(const char *message);
+
+static void load_storage_roots(void)
+{
+	char buf[512];
+	ssize_t got;
+	unsigned i = 0;
+	unsigned start = 0;
+	int fd;
+
+	extra_root_count = 0;
+	snprintf(primary_root, sizeof(primary_root), "%s", SD_ROOT);
+	fd = open(STORAGE_ROOTS_PATH, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	got = read(fd, buf, sizeof(buf) - 1u);
+	close(fd);
+	if (got <= 0)
+		return;
+	buf[got] = 0;
+	while (i <= (unsigned)got && extra_root_count < MAX_EXTRA_ROOTS) {
+		if (buf[i] != '\n' && buf[i] != 0) {
+			i++;
+			continue;
+		}
+		buf[i] = 0;
+		if (i > start) {
+			const char *path = buf + start;
+			const char *slash;
+
+			if (!extra_root_count) {
+				snprintf(primary_root, sizeof(primary_root),
+					"%.500s", path);
+				if (strcmp(current, SD_ROOT) == 0)
+					snprintf(current, sizeof(current),
+						"%.500s", primary_root);
+			} else {
+				unsigned idx = extra_root_count - 1u;
+
+				snprintf(extra_roots[idx],
+					sizeof(extra_roots[0]), "%.500s", path);
+				slash = strrchr(path, '/');
+				snprintf(extra_labels[idx],
+					sizeof(extra_labels[0]), "%.120s",
+					slash && slash[1] ? slash + 1 : path);
+			}
+			extra_root_count++;
+		}
+		i++;
+		start = i;
+	}
+	/* extra_root_count includes primary; convert to extras only. */
+	if (extra_root_count > 0)
+		extra_root_count--;
+}
+
+static int path_is_extra_root(const char *path)
+{
+	unsigned i;
+
+	for (i = 0; i < extra_root_count; i++) {
+		if (strcmp(path, extra_roots[i]) == 0)
+			return 1;
+	}
+	return 0;
+}
 
 static void begin_performance_session(void)
 {
@@ -134,6 +210,7 @@ static void scan_directory(void)
 	char buffer[4096];
 	int directory = open(current, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	int saved_errno = errno;
+	unsigned i;
 
 	entry_count = selected = first = 0;
 	if (directory < 0) {
@@ -190,10 +267,43 @@ static void scan_directory(void)
 			strncpy(entries[entry_count].name, item->name, MAX_NAME - 1u);
 			entries[entry_count].name[MAX_NAME - 1u] = 0;
 			entries[entry_count].directory = (unsigned)is_directory;
+			entries[entry_count].target[0] = 0;
 			entry_count++;
 		}
 	}
 	close(directory);
+
+	/* Refresh after hotplug so newly mounted extra volumes appear. */
+	load_storage_roots();
+
+	/*
+	 * At the primary volume root, expose other mounted partitions as virtual
+	 * directories (e.g. sd2 for /mnt/sd2).
+	 */
+	if (strcmp(current, primary_root) == 0) {
+		for (i = 0; i < extra_root_count && entry_count < MAX_ENTRIES; i++) {
+			unsigned j;
+			int duplicate = 0;
+
+			for (j = 0; j < entry_count; j++) {
+				if (!strcasecmp(entries[j].name, extra_labels[i])) {
+					duplicate = 1;
+					break;
+				}
+			}
+			if (duplicate)
+				continue;
+			snprintf(entries[entry_count].name,
+				sizeof(entries[entry_count].name), "%.120s",
+				extra_labels[i]);
+			entries[entry_count].directory = 1;
+			snprintf(entries[entry_count].target,
+				sizeof(entries[entry_count].target), "%.500s",
+				extra_roots[i]);
+			entry_count++;
+		}
+	}
+
 	qsort(entries, entry_count, sizeof(entries[0]), compare_entries);
 	{
 		char message[640];
@@ -556,7 +666,11 @@ static void launch_selected(int input)
 			(int)sizeof(path))
 		return;
 	if (entries[selected].directory) {
-		strcpy(current, path);
+		if (entries[selected].target[0])
+			snprintf(current, sizeof(current), "%.500s",
+				entries[selected].target);
+		else
+			strcpy(current, path);
 		scan_directory();
 		return;
 	}
@@ -654,14 +768,34 @@ static void launch_selected(int input)
 static void parent_directory(void)
 {
 	char *slash;
-	if (!strcmp(current, SD_ROOT)) {
+
+	if (!strcmp(current, primary_root) || !strcmp(current, SD_ROOT)) {
 		view = VIEW_HOME;
 		selected = first = 0;
 		return;
 	}
+	/* Leaving an extra volume root returns to the primary card root. */
+	if (path_is_extra_root(current)) {
+		snprintf(current, sizeof(current), "%s", primary_root);
+		scan_directory();
+		return;
+	}
 	slash = strrchr(current, '/');
-	if (slash && slash > current + strlen(SD_ROOT) - 1u) *slash = 0;
-	else strcpy(current, SD_ROOT);
+	if (slash && slash > current + strlen(primary_root) - 1u &&
+			strncmp(current, primary_root, strlen(primary_root)) == 0 &&
+			(current[strlen(primary_root)] == '/' ||
+			 current[strlen(primary_root)] == 0)) {
+		*slash = 0;
+		if (strlen(current) < strlen(primary_root))
+			snprintf(current, sizeof(current), "%s", primary_root);
+	} else if (slash && slash != current) {
+		/* Path under /mnt/sd2/... etc. */
+		*slash = 0;
+		if (!strchr(current + 1, '/'))
+			snprintf(current, sizeof(current), "%s", primary_root);
+	} else {
+		snprintf(current, sizeof(current), "%s", primary_root);
+	}
 	scan_directory();
 }
 
@@ -707,6 +841,7 @@ int main(void)
 		sf2000_ui_close(&ui);
 		return 1;
 	}
+	load_storage_roots();
 	scan_directory();
 	selected = first = 0;
 	view = VIEW_HOME;
