@@ -1,0 +1,190 @@
+From 6e7f7c8d9a0b1c2d3e4f5061728394a5b6c7d8e9 Mon Sep 17 00:00:00 2001
+From: UniFrog contributors <sf2000@example.invalid>
+Date: Sat, 1 Aug 2026 12:00:00 +0000
+Subject: [PATCH] gpsp: size ROM cache to content and report allocation failures
+
+The SF2000 build uses 32 KiB anonymous mappings as the ROM cache because
+NOMMU physical allocation cannot reliably satisfy repeated 1 MiB requests.
+The old startup path nevertheless allocated all 32 MiB for every game. Size
+the cache to the rounded ROM size, retain the 32 MiB cap for large cartridges,
+and make the LRU ring match the number of allocated pages. A zero-page cache
+now rejects the game instead of later indexing an invalid LRU entry. Expose
+the allocation result through the existing libretro log callback.
+---
+ gba_memory.c        | 76 ++++++++++++++++++++++++++++++++++++++---------------
+ gba_memory.h        |  5 ++++-
+ libretro/libretro.c | 19 ++++++++++++---
+ 3 files changed, 74 insertions(+), 26 deletions(-)
+
+diff --git a/gba_memory.c b/gba_memory.c
+--- a/gba_memory.c
++++ b/gba_memory.c
+@@ -19,5 +19,6 @@
+ #include "common.h"
+ #include "streams/file_stream.h"
++#include <errno.h>
+ #ifdef GPSP_ROM_BUFFER_MMAP
+ #include <sys/mman.h>
+ #endif
+@@ -379,4 +380,6 @@
+ u8 *gamepak_buffers[GAMEPAK_MAX_BUFFERS];
+ u32 gamepak_buffer_count;
++u32 gamepak_buffer_requested_pages;
++u32 gamepak_buffer_alloc_errno;
+ u32 gamepak_size;           /* Size of the ROM in bytes */
+ u32 gamepak_page_load_count;
+@@ -2309,34 +2309,67 @@
+-void init_gamepak_buffer(void)
+-{
+-  unsigned i;
+-  const u32 target_pages = ROM_BUFFER_SIZE *
+-    (1024 * 1024 / GAMEPAK_BUFFER_PAGE_SIZE);
+-
+-  // Allocate up to ROM_BUFFER_SIZE MiB without high-order NOMMU mappings.
+-  gamepak_buffer_count = 0;
+-  while (gamepak_buffer_count < target_pages)
+-  {
+-#ifdef GPSP_ROM_BUFFER_MMAP
+-    void *ptr = mmap(NULL, gamepak_buffer_blocksize,
+-                     PROT_READ | PROT_WRITE,
+-                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+-    if (ptr == MAP_FAILED)
+-      ptr = NULL;
+-#else
+-    void *ptr = malloc(gamepak_buffer_blocksize);
+-#endif
+-    if (!ptr)
+-      break;
+-    gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
+-  }
+-
+-  // Initialize the memory map structure
+-  for (i = 0; i < 1024; i++)
+-  {
+-    gamepak_blk_queue[i].next_lru = (u16)(i + 1);
+-    gamepak_blk_queue[i].phy_rom = -1;
+-  }
+-
+-  gamepak_lru_head = 0;
+-  gamepak_lru_tail = gamepak_buffer_count - 1;
+-}
++static void release_gamepak_buffer(void)
++{
++  while (gamepak_buffer_count)
++  {
++#ifdef GPSP_ROM_BUFFER_MMAP
++    munmap(gamepak_buffers[--gamepak_buffer_count],
++           gamepak_buffer_blocksize);
++#else
++    free(gamepak_buffers[--gamepak_buffer_count]);
++#endif
++  }
++  gamepak_lru_head = 0;
++  gamepak_lru_tail = 0;
++}
++
++void init_gamepak_buffer(u32 requested_size)
++{
++  unsigned i;
++  const u32 max_pages = ROM_BUFFER_SIZE *
++    (1024 * 1024 / GAMEPAK_BUFFER_PAGE_SIZE);
++  u32 target_pages = (requested_size + GAMEPAK_BUFFER_PAGE_SIZE - 1) /
++    GAMEPAK_BUFFER_PAGE_SIZE;
++
++  if (target_pages > max_pages)
++    target_pages = max_pages;
++
++  // Releasing first makes repeated libretro load/unload cycles leak-free.
++  release_gamepak_buffer();
++
++  // Allocate only the cache needed by this ROM, up to ROM_BUFFER_SIZE MiB.
++  gamepak_buffer_requested_pages = target_pages;
++  gamepak_buffer_alloc_errno = 0;
++  while (gamepak_buffer_count < target_pages)
++  {
++#ifdef GPSP_ROM_BUFFER_MMAP
++    void *ptr;
++    errno = 0;
++    ptr = mmap(NULL, gamepak_buffer_blocksize,
++               PROT_READ | PROT_WRITE,
++               MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++    if (ptr == MAP_FAILED) {
++      gamepak_buffer_alloc_errno = (u32)(errno ? errno : ENOMEM);
++      ptr = NULL;
++    }
++#else
++    void *ptr;
++    errno = 0;
++    ptr = malloc(gamepak_buffer_blocksize);
++    if (!ptr)
++      gamepak_buffer_alloc_errno = (u32)(errno ? errno : ENOMEM);
++#endif
++    if (!ptr)
++      break;
++    gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
++  }
++
++  // Initialize an LRU ring containing only allocated pages.
++  for (i = 0; i < 1024; i++)
++  {
++    gamepak_blk_queue[i].next_lru =
++      (i + 1 < gamepak_buffer_count) ? (u16)(i + 1) : 0;
++    gamepak_blk_queue[i].phy_rom = -1;
++  }
++
++  gamepak_lru_head = 0;
++  gamepak_lru_tail = gamepak_buffer_count ? gamepak_buffer_count - 1 : 0;
++}
+@@ -2431,9 +2464,1 @@
+-  while (gamepak_buffer_count)
+-  {
+-#ifdef GPSP_ROM_BUFFER_MMAP
+-    munmap(gamepak_buffers[--gamepak_buffer_count],
+-           gamepak_buffer_blocksize);
+-#else
+-    free(gamepak_buffers[--gamepak_buffer_count]);
+-#endif
+-  }
++  release_gamepak_buffer();
+@@ -2679,0 +2679,8 @@
++    init_gamepak_buffer(gamepak_size);
++    if (!gamepak_buffer_count)
++    {
++      filestream_close(gamepak_file_large);
++      gamepak_file_large = NULL;
++      return -1;
++    }
+diff --git a/gba_memory.h b/gba_memory.h
+--- a/gba_memory.h
++++ b/gba_memory.h
+@@ -251,5 +251,5 @@
+ void init_memory(void);
+-void init_gamepak_buffer(void);
++void init_gamepak_buffer(u32 requested_size);
+ bool gamepak_must_swap(void);
+ u8 *gamepak_direct_map_base(void);
+ void memory_term(void);
+@@ -261,4 +261,6 @@
+ extern u8 open_gba_bios_rom[1024*16];
++extern u32 gamepak_buffer_requested_pages;
++extern u32 gamepak_buffer_alloc_errno;
+ extern u32 gamepak_buffer_count;
+ extern const unsigned gamepak_buffer_blocksize;
+ extern u32 gamepak_page_load_count;
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -687,1 +687,0 @@
+-   init_gamepak_buffer();
+@@ -1251,4 +1251,9 @@
+    if (load_gamepak(info, info->path, rtc_mode, rumble_mode, serial_setting) != 0)
+    {
++      if (log_cb)
++         log_cb(RETRO_LOG_ERROR,
++                "[gpSP ROM] load failed cache_pages=%u/%u alloc_errno=%u\n",
++                gamepak_buffer_count, gamepak_buffer_requested_pages,
++                gamepak_buffer_alloc_errno);
+       error_msg("Could not load the game file.");
+       return false;
+-- 
+2.39.5
