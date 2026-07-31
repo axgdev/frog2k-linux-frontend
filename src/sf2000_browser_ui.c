@@ -391,14 +391,23 @@ void sf2000_ui_round(struct sf2000_ui *ui, int x, int y, int w, int h,
 static uint16_t blend565(uint16_t background, uint16_t foreground,
 	unsigned alpha)
 {
-	unsigned rb = background & 0xf81fu;
-	unsigned g = background & 0x07e0u;
-	int drb = (int)(foreground & 0xf81fu) - (int)rb;
-	int dg = (int)(foreground & 0x07e0u) - (int)g;
+	unsigned inverse;
+	unsigned red;
+	unsigned green;
+	unsigned blue;
 
-	rb = (unsigned)((int)rb + ((drb * (int)alpha) >> 8)) & 0xf81fu;
-	g = (unsigned)((int)g + ((dg * (int)alpha) >> 8)) & 0x07e0u;
-	return (uint16_t)(rb | g);
+	if (alpha >= 255u)
+		return foreground;
+	if (!alpha)
+		return background;
+	inverse = 255u - alpha;
+	red = ((((background >> 11) & 0x1fu) * inverse) +
+		(((foreground >> 11) & 0x1fu) * alpha) + 127u) / 255u;
+	green = ((((background >> 5) & 0x3fu) * inverse) +
+		(((foreground >> 5) & 0x3fu) * alpha) + 127u) / 255u;
+	blue = (((background & 0x1fu) * inverse) +
+		((foreground & 0x1fu) * alpha) + 127u) / 255u;
+	return (uint16_t)((red << 11) | (green << 5) | blue);
 }
 
 static int fallback_advance(uint32_t codepoint)
