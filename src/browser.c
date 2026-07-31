@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "ge_api.h"
 #include "sf2000_browser_ui.h"
 
 extern long syscall(long number, ...);
@@ -82,6 +83,12 @@ static struct entry entries[MAX_ENTRIES];
 static unsigned entry_count, selected, first;
 static uint16_t framebuffer[MAX_FRAME_PIXELS];
 static int framebuffer_fd = -1;
+static uint32_t framebuffer_phys;
+static hcge_context ge_storage;
+static hcge_context *ge;
+static uint16_t *ge_source;
+static uint32_t ge_source_phys;
+static uint32_t ge_source_handle;
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
 static char primary_root[MAX_PATH] = SD_ROOT;
@@ -93,6 +100,18 @@ enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS };
 static enum browser_view view = VIEW_HOME;
 static unsigned framebuffer_writes;
 static void log_message(const char *message);
+
+static void close_ge_presenter(void)
+{
+	if (ge && ge_source_handle)
+		(void)hcge_linux_free_buffer(ge, ge_source_handle);
+	ge_source = NULL;
+	ge_source_handle = 0;
+	if (ge) {
+		hcge_close_context(ge);
+		ge = NULL;
+	}
+}
 
 static void load_storage_roots(void)
 {
@@ -177,8 +196,56 @@ static void begin_performance_session(void)
 static int write_frame(void)
 {
 	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
-	ssize_t written = pwrite(framebuffer_fd, framebuffer, bytes, 0);
+	ssize_t written;
+	const char *presenter = "CPU";
+	int ge_presented = 0;
 	char message[160];
+
+	if (ge) {
+		unsigned y;
+		size_t row_bytes = (size_t)width * sizeof(*framebuffer);
+		hcge_state *state = &ge->state;
+		HCGERectangle source = { 0, 0, (int)width, (int)height };
+
+		if (stride == width)
+			memcpy(ge_source, framebuffer, bytes);
+		else
+			for (y = 0; y < height; y++)
+				memcpy(ge_source + y * width,
+					framebuffer + y * stride, row_bytes);
+		if (hcge_linux_cache_clean(ge, ge_source,
+				(unsigned int)(row_bytes * height)) == 0) {
+			memset(state, 0, sizeof(*state));
+			state->render_options = HCGE_DSRO_NONE;
+			state->drawingflags = HCGE_DSDRAW_NOFX;
+			state->blittingflags = HCGE_DSBLIT_NOFX;
+			state->destination.config.format = HCGE_DSPF_RGB16;
+			state->destination.config.size.w = (int)width;
+			state->destination.config.size.h = (int)height;
+			state->source.config.format = HCGE_DSPF_RGB16;
+			state->source.config.size.w = (int)width;
+			state->source.config.size.h = (int)height;
+			state->dst.phys = framebuffer_phys;
+			state->dst.pitch = stride * sizeof(*framebuffer);
+			state->src.phys = ge_source_phys;
+			state->src.pitch = width * sizeof(*framebuffer);
+			state->accel = HCGE_DFXL_BLIT;
+			hcge_set_state(ge, state, state->accel);
+			if (hcge_blit(ge, &source, 0, 0) &&
+					hcge_engine_sync(ge) == 0)
+				ge_presented = 1;
+		}
+		if (!ge_presented) {
+			log_message("GE framebuffer present failed; using CPU write");
+			close_ge_presenter();
+		}
+	}
+	if (ge_presented) {
+		written = (ssize_t)bytes;
+		presenter = "GE";
+	} else {
+		written = pwrite(framebuffer_fd, framebuffer, bytes, 0);
+	}
 
 	if (written != (ssize_t)bytes) {
 		snprintf(message, sizeof(message),
@@ -191,8 +258,9 @@ static int write_frame(void)
 	 * distinguishes a short fbdev write from a later panel scanout issue. */
 	if (!framebuffer_writes++) {
 		snprintf(message, sizeof(message),
-			"framebuffer write complete bytes=%lu stride=%u",
-			(unsigned long)bytes, stride * (unsigned)sizeof(*framebuffer));
+			"framebuffer write complete bytes=%lu stride=%u presenter=%s",
+			(unsigned long)bytes, stride * (unsigned)sizeof(*framebuffer),
+			presenter);
 		log_message(message);
 	}
 	return 0;
@@ -707,6 +775,7 @@ static void launch_selected(int input)
 				"MEDIA", ui.config.header);
 			begin_performance_session();
 			log_message(message);
+			close_ge_presenter();
 			execve(PLAYER_PATH, argv, envp);
 			(void)unlink(PERFORMANCE_MARKER);
 			snprintf(message, sizeof(message), "player exec failed errno=%d", errno);
@@ -768,6 +837,7 @@ static void launch_selected(int input)
 			ui.config.header);
 		begin_performance_session();
 		log_message(message);
+		close_ge_presenter();
 		{
 			char *const argv[] = {
 				(char *)route->executable, path, NULL
@@ -854,6 +924,23 @@ int main(void)
 	if ((size_t)height * stride > MAX_FRAME_PIXELS)
 		return 1;
 	framebuffer_fd = fb;
+	framebuffer_phys = fix.smem_start;
+	if (framebuffer_phys && hcge_open_context(&ge_storage) == 0) {
+		ge = &ge_storage;
+		ge_source = hcge_linux_alloc_buffer(ge,
+			(unsigned int)(width * height * sizeof(*framebuffer)),
+			&ge_source_phys, &ge_source_handle);
+		if (!ge_source) {
+			char message[128];
+
+			snprintf(message, sizeof(message),
+				"GE framebuffer source allocation failed bytes=%lu errno=%d",
+				(unsigned long)((size_t)width * height *
+					sizeof(*framebuffer)), errno);
+			log_message(message);
+			close_ge_presenter();
+		}
+	}
 	sf2000_ui_config_defaults(&config);
 	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
 	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
@@ -873,6 +960,7 @@ int main(void)
 	input = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (input < 0) {
 		sf2000_ui_close(&ui);
+		close_ge_presenter();
 		return 1;
 	}
 	load_storage_roots();
@@ -952,6 +1040,7 @@ int main(void)
 	}
 	log_message("returned cleanly");
 	sf2000_ui_close(&ui);
+	close_ge_presenter();
 	close(input); close(fb);
 	_exit(0);
 }

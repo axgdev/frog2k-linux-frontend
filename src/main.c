@@ -104,6 +104,8 @@ static struct sf2000_ui pause_ui;
 static unsigned pause_ui_ready;
 static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
+static unsigned pause_ge_disabled;
+static unsigned pause_ge_presented;
 static void render_pause_menu(struct sf2000_ui *menu, unsigned selected);
 
 struct core_option {
@@ -543,16 +545,18 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		return -1;
 	/*
 	 * NOMMU maps physically contiguous allocations in KSEG0. In paced mode,
-	 * let GE stage the core-owned RGB565 callback surface into a managed
-	 * source and fence that short copy before the callback returns. The later
-	 * stretch remains asynchronous. This observes libretro's callback
-	 * lifetime while removing the full-frame CPU copy. Physical log139 showed
-	 * this path is also faster than CPU buffering in uncapped mode, because
-	 * the core can still overlap the asynchronous stretch after the staging
-	 * fence releases its callback surface.
+	 * let GE stage the core-owned RGB565 or XRGB8888 callback surface into a
+	 * managed RGB565 source and fence that short copy before the callback
+	 * returns. The later stretch remains asynchronous. This observes
+	 * libretro's callback lifetime while removing the full-frame CPU copy.
+	 * Physical log139 showed this path is also faster than CPU buffering in
+	 * uncapped mode, because the core can still overlap the asynchronous
+	 * stretch after the staging fence releases its callback surface.
 	 */
-	if (host.format == RETRO_PIXEL_FORMAT_RGB565 &&
-			pitch >= (size_t)width * sizeof(uint16_t) &&
+	if (((host.format == RETRO_PIXEL_FORMAT_RGB565 &&
+			pitch >= (size_t)width * sizeof(uint16_t)) ||
+			(host.format == RETRO_PIXEL_FORMAT_XRGB8888 &&
+			pitch >= (size_t)width * sizeof(uint32_t))) &&
 			source_bytes <= UINT_MAX &&
 			(uintptr_t)data + source_bytes >= (uintptr_t)data &&
 			(uintptr_t)data + source_bytes <= 0xa0000000u)
@@ -597,7 +601,9 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		state->destination.config.format = HCGE_DSPF_RGB16;
 		state->destination.config.size.w = (int)width;
 		state->destination.config.size.h = (int)height;
-		state->source.config.format = HCGE_DSPF_RGB16;
+		state->source.config.format =
+			host.format == RETRO_PIXEL_FORMAT_XRGB8888 ?
+			HCGE_DSPF_RGB32 : HCGE_DSPF_RGB16;
 		state->source.config.size.w = (int)width;
 		state->source.config.size.h = (int)height;
 		state->dst.phys = host.ge_source_phys[source_index];
@@ -1207,11 +1213,68 @@ static int finish_game_present(void)
 	return 0;
 }
 
+static int ge_present_pause_frame(void)
+{
+	hcge_state *state;
+	HCGERectangle source = { 0, 0, (int)host.fb_width,
+		(int)host.fb_height };
+	uint16_t *source_buffer;
+	size_t bytes = (size_t)host.fb_width * host.fb_height *
+		sizeof(*pause_pixels);
+
+	if (!host.ge || pause_ge_disabled || !host.ge_buffers ||
+		host.fb_width > PAUSE_WIDTH || host.fb_height > PAUSE_HEIGHT ||
+		bytes > host.ge_source_bytes)
+		return -1;
+	if (host.ge_pending) {
+		if (hcge_engine_sync(host.ge) < 0)
+			return -1;
+		host.ge_pending = 0;
+	}
+	source_buffer = host.ge_source[host.ge_next];
+	memcpy(source_buffer, pause_pixels, bytes);
+	if (hcge_linux_cache_clean(host.ge, source_buffer, (unsigned)bytes) < 0)
+		return -1;
+	state = &host.ge->state;
+	memset(state, 0, sizeof(*state));
+	state->render_options = HCGE_DSRO_NONE;
+	state->drawingflags = HCGE_DSDRAW_NOFX;
+	state->blittingflags = HCGE_DSBLIT_NOFX;
+	state->destination.config.format = HCGE_DSPF_RGB16;
+	state->destination.config.size.w = (int)host.fb_width;
+	state->destination.config.size.h = (int)host.fb_height;
+	state->source.config.format = HCGE_DSPF_RGB16;
+	state->source.config.size.w = (int)host.fb_width;
+	state->source.config.size.h = (int)host.fb_height;
+	state->dst.phys = host.fb_phys;
+	state->dst.pitch = host.fb_stride * sizeof(*pause_pixels);
+	state->src.phys = host.ge_source_phys[host.ge_next];
+	state->src.pitch = host.fb_width * sizeof(*pause_pixels);
+	state->accel = HCGE_DFXL_BLIT;
+	hcge_set_state(host.ge, state, state->accel);
+	if (!hcge_blit(host.ge, &source, 0, 0) ||
+			hcge_engine_sync(host.ge) < 0)
+		return -1;
+	host.ge_next = (host.ge_next + 1u) % host.ge_buffers;
+	host.ge_pending = 0;
+	return 0;
+}
+
 static int write_pause_frame(void)
 {
 	size_t row_bytes = (size_t)host.fb_width * sizeof(*pause_pixels);
 	size_t fb_row_bytes = (size_t)host.fb_stride * sizeof(*pause_pixels);
 	unsigned y;
+
+	pause_ge_presented = 0;
+	if (ge_present_pause_frame() == 0) {
+		pause_ge_presented = 1;
+		return 0;
+	}
+	if (host.ge && !pause_ge_disabled) {
+		pause_ge_disabled = 1;
+		log_kmsg("pause GE present failed; using CPU framebuffer write\n");
+	}
 
 	if (host.fb_width > PAUSE_WIDTH || host.fb_height > PAUSE_HEIGHT ||
 			host.fb_stride < host.fb_width)
@@ -1295,10 +1358,11 @@ static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
 		char details[128];
 
 		snprintf(details, sizeof(details),
-			"pause framebuffer wrote bytes=%lu stride=%u\n",
+			"pause framebuffer wrote bytes=%lu stride=%u presenter=%s\n",
 			(unsigned long)((size_t)host.fb_height *
 				(size_t)host.fb_stride * sizeof(*pause_pixels)),
-			(unsigned)(host.fb_stride * sizeof(*pause_pixels)));
+			(unsigned)(host.fb_stride * sizeof(*pause_pixels)),
+			pause_ge_presented ? "GE" : "CPU");
 		log_kmsg(details);
 	}
 }
@@ -1367,10 +1431,11 @@ static void run_pause_menu(long frame_ns)
 			char details[128];
 
 			snprintf(details, sizeof(details),
-				"pause framebuffer wrote bytes=%lu stride=%u\n",
+				"pause framebuffer wrote bytes=%lu stride=%u presenter=%s\n",
 				(unsigned long)((size_t)host.fb_height *
 					(size_t)host.fb_stride * sizeof(*pause_pixels)),
-				(unsigned)(host.fb_stride * sizeof(*pause_pixels)));
+				(unsigned)(host.fb_stride * sizeof(*pause_pixels)),
+				pause_ge_presented ? "GE" : "CPU");
 			log_kmsg(details);
 		}
 	} else
@@ -1471,8 +1536,15 @@ static int open_platform(void)
 			host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
 				(unsigned int)host.ge_source_bytes,
 				&host.ge_source_phys[i], &host.ge_source_handle[i]);
-			if (!host.ge_source[i])
+			if (!host.ge_source[i]) {
+				char details[160];
+
+				snprintf(details, sizeof(details),
+					"GE source buffer allocation failed index=%u bytes=%lu errno=%d\n",
+					i, (unsigned long)host.ge_source_bytes, errno);
+				log_kmsg(details);
 				break;
+			}
 			host.ge_buffers++;
 		}
 		if (!host.ge_buffers) {

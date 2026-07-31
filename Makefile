@@ -190,11 +190,12 @@ frogui: $(STB_DIR)/.git
 		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free \
 		$(SF2000_ENDFILES)
 
-browser: $(STB_DIR)/.git
+browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h \
+		src/browser.c src/sf2000_browser_ui.c
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
 		-o build/sf2000-browser $(SF2000_STARTFILES) src/browser.c \
-		src/sf2000_browser_ui.c -lm \
+		src/sf2000_browser_ui.c $(GE_SOURCES) -lm \
 		$(SF2000_ENDFILES)
 
 gambatte: $(SF2000_HOST_OBJECTS)
