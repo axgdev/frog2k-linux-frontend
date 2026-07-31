@@ -146,7 +146,7 @@ diff --git a/gba_memory.c b/gba_memory.c
 -#endif
 -  }
 +  release_gamepak_buffer();
-@@ -2679,0 +2679,8 @@
+@@ -2679,0 +2679,7 @@
 +    init_gamepak_buffer(gamepak_size);
 +    if (!gamepak_buffer_count)
 +    {
