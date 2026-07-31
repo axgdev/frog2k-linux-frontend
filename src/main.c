@@ -48,6 +48,8 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
+#define PAUSE_WIDTH 320u
+#define PAUSE_HEIGHT 240u
 
 struct host {
 	int fb_fd;
@@ -97,7 +99,10 @@ static unsigned fast_forward_rate = 1u;
 static unsigned frameskip;
 static unsigned frameskip_counter;
 static unsigned core_options_updated;
-static uint16_t pause_pixels[320u * 240u];
+static uint16_t pause_pixels[PAUSE_WIDTH * PAUSE_HEIGHT];
+static struct sf2000_ui pause_ui;
+static unsigned pause_ui_ready;
+static unsigned pause_frame_writes;
 
 struct core_option {
 	char key[CORE_OPTION_TEXT_MAX];
@@ -1149,6 +1154,81 @@ static void pause_audio(unsigned resume)
 		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
 }
 
+static int prepare_pause_ui(void)
+{
+	struct sf2000_ui_config config;
+
+	if (pause_ui_ready)
+		return 0;
+	if (!host.fb_width || !host.fb_height || host.fb_width > PAUSE_WIDTH ||
+			host.fb_height > PAUSE_HEIGHT || host.fb_stride < host.fb_width)
+		return -1;
+	sf2000_ui_config_defaults(&config);
+	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
+	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
+	if (sf2000_ui_init(&pause_ui, pause_pixels, host.fb_width,
+			host.fb_height, PAUSE_WIDTH, &config) < 0)
+		return -1;
+	pause_ui_ready = 1;
+	{
+		char message[128];
+
+		snprintf(message, sizeof(message),
+			"pause UI prepared font=%u fb=%ux%u stride=%u\n",
+			pause_ui.font != NULL, host.fb_width, host.fb_height,
+			(unsigned)(PAUSE_WIDTH * sizeof(*pause_pixels)));
+		log_kmsg(message);
+	}
+	return 0;
+}
+
+static int finish_game_present(void)
+{
+	unsigned pending = host.ge_pending;
+	char details[96];
+
+	if (!host.ge || !host.ge_pending)
+		return 0;
+	if (hcge_engine_sync(host.ge) < 0) {
+		log_kmsg("pause GE fence failed\n");
+		return -1;
+	}
+	host.ge_pending = 0;
+	snprintf(details, sizeof(details),
+		"pause GE fence complete pending=%u\n", pending);
+	log_kmsg(details);
+	return 0;
+}
+
+static int write_pause_frame(void)
+{
+	size_t row_bytes = (size_t)host.fb_width * sizeof(*pause_pixels);
+	size_t fb_row_bytes = (size_t)host.fb_stride * sizeof(*pause_pixels);
+	unsigned y;
+
+	if (host.fb_width > PAUSE_WIDTH || host.fb_height > PAUSE_HEIGHT ||
+			host.fb_stride < host.fb_width)
+		return -1;
+	/* The framebuffer's smem_len includes the whole reserved DMA arena, not
+	 * just the visible image. Never use it as the pause image length. */
+	if (host.fb_stride == PAUSE_WIDTH) {
+		ssize_t written = pwrite(host.fb_fd, pause_pixels,
+			(size_t)host.fb_height * fb_row_bytes, 0);
+
+		return written == (ssize_t)((size_t)host.fb_height * fb_row_bytes) ?
+			0 : -1;
+	}
+	for (y = 0; y < host.fb_height; y++) {
+		ssize_t written = pwrite(host.fb_fd,
+			pause_pixels + y * PAUSE_WIDTH, row_bytes,
+			(off_t)y * (off_t)fb_row_bytes);
+
+		if (written != (ssize_t)row_bytes)
+			return -1;
+	}
+	return 0;
+}
+
 static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
 {
 	unsigned total = 4u + core_option_count;
@@ -1197,8 +1277,17 @@ static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
 	sf2000_ui_text(menu, 12, (int)host.fb_height - 20,
 		"A SELECT   B RESUME", menu->config.muted,
 		(int)host.fb_width - 24);
-	if (pwrite(host.fb_fd, pause_pixels, host.fb_bytes, 0) < 0) {
-		/* pause menu is best-effort */
+	if (write_pause_frame() < 0) {
+		log_kmsg("pause framebuffer write failed\n");
+	} else if (!pause_frame_writes++) {
+		char details[128];
+
+		snprintf(details, sizeof(details),
+			"pause framebuffer wrote bytes=%lu stride=%u\n",
+			(unsigned long)((size_t)host.fb_height *
+				(size_t)host.fb_stride * sizeof(*pause_pixels)),
+			(unsigned)(host.fb_stride * sizeof(*pause_pixels)));
+		log_kmsg(details);
 	}
 }
 
@@ -1235,8 +1324,6 @@ static void change_pause_value(unsigned item, int direction)
 
 static void run_pause_menu(long frame_ns)
 {
-	struct sf2000_ui_config config;
-	struct sf2000_ui menu;
 	unsigned selected_item = 0;
 	unsigned previous;
 	unsigned total = 4u + core_option_count;
@@ -1245,18 +1332,20 @@ static void run_pause_menu(long frame_ns)
 	pause_requested = 0;
 	log_kmsg("pause menu opened\n");
 	pause_audio(0);
-	sf2000_ui_config_defaults(&config);
-	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
-	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
-	(void)sf2000_ui_init(&menu, pause_pixels, host.fb_width, host.fb_height,
-		host.fb_stride, &config);
+	(void)finish_game_present();
+	if (prepare_pause_ui() < 0) {
+		log_kmsg("pause UI preparation failed\n");
+		pause_audio(1);
+		return;
+	}
+	pause_frame_writes = 0;
 	while ((host.input.keys & ((1u << RETRO_DEVICE_ID_JOYPAD_START) |
 			(1u << RETRO_DEVICE_ID_JOYPAD_SELECT))) != 0u) {
 		(void)sf2000_input_poll(&host.input);
 		(void)poll(NULL, 0, 5);
 	}
 	previous = host.input.keys;
-	draw_pause_menu(&menu, selected_item);
+	draw_pause_menu(&pause_ui, selected_item);
 	while (!resume && !stopping) {
 		unsigned pressed;
 
@@ -1266,16 +1355,16 @@ static void run_pause_menu(long frame_ns)
 		if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_UP)) {
 			selected_item = selected_item ?
 				selected_item - 1u : total - 1u;
-			draw_pause_menu(&menu, selected_item);
+			draw_pause_menu(&pause_ui, selected_item);
 		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_DOWN)) {
 			selected_item = (selected_item + 1u) % total;
-			draw_pause_menu(&menu, selected_item);
+			draw_pause_menu(&pause_ui, selected_item);
 		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_LEFT)) {
 			change_pause_value(selected_item, -1);
-			draw_pause_menu(&menu, selected_item);
+			draw_pause_menu(&pause_ui, selected_item);
 		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_RIGHT)) {
 			change_pause_value(selected_item, 1);
-			draw_pause_menu(&menu, selected_item);
+			draw_pause_menu(&pause_ui, selected_item);
 		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_A)) {
 			if (selected_item == 0u)
 				resume = 1;
@@ -1283,14 +1372,13 @@ static void run_pause_menu(long frame_ns)
 				stopping = 1;
 			else {
 				change_pause_value(selected_item, 1);
-				draw_pause_menu(&menu, selected_item);
+				draw_pause_menu(&pause_ui, selected_item);
 			}
 		} else if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_B)) {
 			resume = 1;
 		}
 		(void)poll(NULL, 0, 5);
 	}
-	sf2000_ui_close(&menu);
 	log_kmsg(stopping ? "pause menu exit selected\n" :
 		"pause menu resumed\n");
 	if (!stopping) {
@@ -1540,6 +1628,10 @@ int main(int argc, char **argv)
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
 		retro_run();
+		/* Load the pause font after the first game frame is visible. This
+		 * hides the one-time SD/font cost from the first pause invocation. */
+		if (first_frame && !pause_ui_ready)
+			(void)prepare_pause_ui();
 		if (pause_requested) {
 			run_pause_menu(frame_ns);
 			continue;
@@ -1571,6 +1663,8 @@ int main(int argc, char **argv)
 		close(metrics_fd);
 		metrics_fd = -1;
 	}
+	if (pause_ui_ready)
+		sf2000_ui_close(&pause_ui);
 	retro_unload_game();
 	retro_deinit();
 	close_platform();
