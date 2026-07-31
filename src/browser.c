@@ -877,7 +877,9 @@ int main(void)
 					if (selected == 0u) {
 						view = VIEW_LIBRARY;
 						selected = first = 0;
-						strcpy(current, SD_ROOT);
+						load_storage_roots();
+						snprintf(current, sizeof(current),
+							"%.500s", primary_root);
 						scan_directory();
 					} else if (selected == 1u) {
 						view = VIEW_SETTINGS;
