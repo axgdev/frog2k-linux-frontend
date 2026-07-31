@@ -27,7 +27,9 @@ static void allocation_trace(const char *result, std::size_t bytes, void *memory
 		"<6>sf2000-frontend: allocation %s bytes=%lu memory=%p errno=%d\n",
 		result, (unsigned long)bytes, memory, saved_errno);
 	if (length > 0)
-		(void)write(fd, line, (std::size_t)length);
+		if (write(fd, line, (std::size_t)length) < 0) {
+			/* best-effort allocation trace */
+		}
 	close(fd);
 }
 

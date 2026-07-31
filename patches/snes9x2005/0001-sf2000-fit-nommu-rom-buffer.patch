@@ -1,0 +1,17 @@
+diff --git a/source/memmap.h b/source/memmap.h
+index 2f6c0f5..4c6e4a3 100644
+--- a/source/memmap.h
++++ b/source/memmap.h
+@@ -85,7 +85,12 @@ enum
+ 
+ enum
+ {
++#ifdef SF2000_NOMMU
++   /* Keep the ROM mapping below the SF2000 NOMMU order-11 boundary. */
++   MAX_ROM_SIZE = 0x7f0000
++#else
+    MAX_ROM_SIZE = 0x800000
++#endif
+ };
+ 
+ enum

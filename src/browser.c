@@ -566,6 +566,15 @@ static const struct core_route *choose_core(int input,
 {
 	unsigned choice = 0;
 	struct input_event event;
+	char message[96];
+
+	for (unsigned i = 0; i < choice_count; i++)
+		if (!choices[i]) {
+			snprintf(message, sizeof(message), "%s chooser route missing index=%u",
+				family, i);
+			log_message(message);
+			return NULL;
+		}
 
 	for (unsigned i = 0; i < choice_count; i++)
 		if (choices[i] == fallback)
@@ -604,8 +613,6 @@ static const struct core_route *choose_core(int input,
 				choice = (choice + 1u) % choice_count;
 			else if (event.code == BTN_EAST)
 			{
-				char message[96];
-
 				snprintf(message, sizeof(message),
 					"%s core selected %s", family,
 					choices[choice]->name);

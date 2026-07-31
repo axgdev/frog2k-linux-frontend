@@ -124,8 +124,11 @@ static void log_kmsg(const char *message)
 	if (fd < 0)
 		return;
 	length = snprintf(line, sizeof(line), "<6>sf2000-frontend: %s", message);
-	if (length > 0)
-		(void)write(fd, line, (size_t)length);
+	if (length > 0) {
+		if (write(fd, line, (size_t)length) < 0) {
+			/* best-effort kmsg telemetry */
+		}
+	}
 	close(fd);
 }
 
@@ -241,7 +244,9 @@ static void fault_signal(int signal_number, siginfo_t *info, void *context)
 	*cursor++ = '\n';
 	fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	if (fd >= 0) {
-		(void)write(fd, message, (size_t)(cursor - message));
+		if (write(fd, message, (size_t)(cursor - message)) < 0) {
+			/* best-effort fault report */
+		}
 		close(fd);
 	}
 	_exit(128 + signal_number);
@@ -819,8 +824,10 @@ static void video(const void *data, unsigned width, unsigned height,
 			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0);
-		if (metrics_fd >= 0)
-			(void)write(metrics_fd, details, strlen(details));
+		if (metrics_fd >= 0 &&
+		    write(metrics_fd, details, strlen(details)) < 0) {
+			/* best-effort metrics spool */
+		}
 #ifdef __mips__
 		(void)hc15xx_retained_mark(
 			(volatile struct hc15xx_retained_log *)(uintptr_t)
@@ -1114,8 +1121,10 @@ static void set_uncapped_mode(unsigned enable)
 		enable ? "uncapped" : "normal",
 		enable ? "suppressed" : "enabled",
 		enable ? "disabled" : "core");
-	if (metrics_fd >= 0)
-		(void)write(metrics_fd, details, strlen(details));
+	if (metrics_fd >= 0 &&
+	    write(metrics_fd, details, strlen(details)) < 0) {
+		/* best-effort metrics spool */
+	}
 #ifdef __mips__
 	(void)hc15xx_retained_mark(
 		(volatile struct hc15xx_retained_log *)(uintptr_t)
@@ -1188,7 +1197,9 @@ static void draw_pause_menu(struct sf2000_ui *menu, unsigned selected)
 	sf2000_ui_text(menu, 12, (int)host.fb_height - 20,
 		"A SELECT   B RESUME", menu->config.muted,
 		(int)host.fb_width - 24);
-	(void)pwrite(host.fb_fd, pause_pixels, host.fb_bytes, 0);
+	if (pwrite(host.fb_fd, pause_pixels, host.fb_bytes, 0) < 0) {
+		/* pause menu is best-effort */
+	}
 }
 
 static void change_pause_value(unsigned item, int direction)

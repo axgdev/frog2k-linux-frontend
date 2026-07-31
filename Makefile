@@ -51,6 +51,7 @@ GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
 FCEUMM_PATCHES := $(wildcard patches/fceumm/*.patch)
 QUICKNES_PATCHES := $(wildcard patches/quicknes/*.patch)
 PROSYSTEM_PATCHES := $(wildcard patches/prosystem/*.patch)
+SNES9X2005_PATCHES := $(wildcard patches/snes9x2005/*.patch)
 GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) | sha256sum | cut -c1-16)
 GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
 FCEUMM_PATCH_ID := $(shell sha256sum $(FCEUMM_PATCHES) | sha256sum | cut -c1-16)
@@ -59,6 +60,8 @@ QUICKNES_PATCH_ID := $(shell sha256sum $(QUICKNES_PATCHES) | sha256sum | cut -c1
 QUICKNES_PATCH_STAMP := $(QUICKNES_DIR)/.sf2000-patched-$(QUICKNES_PATCH_ID)
 PROSYSTEM_PATCH_ID := $(shell sha256sum $(PROSYSTEM_PATCHES) | sha256sum | cut -c1-16)
 PROSYSTEM_PATCH_STAMP := $(PROSYSTEM_DIR)/.sf2000-patched-$(PROSYSTEM_PATCH_ID)
+SNES9X2005_PATCH_ID := $(shell sha256sum $(SNES9X2005_PATCHES) | sha256sum | cut -c1-16)
+SNES9X2005_PATCH_STAMP := $(SNES9X2005_DIR)/.sf2000-patched-$(SNES9X2005_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -105,7 +108,7 @@ all: check
 build/frontend-check: $(FRONTEND_SOURCES) src/content.c tests/dummy_core.c include/libretro_min.h $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) $(STB_DIR)/.git
 	mkdir -p build
 	$(CC) $(CFLAGS) -I$(STB_DIR) -I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include -o $@ \
-		$(FRONTEND_SOURCES) src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES)
+		$(FRONTEND_SOURCES) src/content.c tests/dummy_core.c $(GE_SOURCES) $(AUDIO_SOURCES) $(PLATFORM_SOURCES) -lm
 
 build/nommu-allocator-check: src/nommu_new.cpp tests/nommu_allocator_test.cpp
 	mkdir -p build
@@ -444,16 +447,24 @@ $(PROSYSTEM_CORE): $(PROSYSTEM_PATCH_STAMP) $(COMMON_DIR)/.git Makefile
 		BUPBOOP_DIR='$(abspath $(PROSYSTEM_DIR)/bupboop)' \
 		TARGET='$(abspath $@)'
 
-$(SNES9X2005_CORE): $(SNES9X2005_DIR)/.git Makefile
+$(SNES9X2005_PATCH_STAMP): $(SNES9X2005_DIR)/.git $(SNES9X2005_PATCHES)
+	git -C '$(SNES9X2005_DIR)' reset --hard '$(SNES9X2005_REV)'
+	for patch_file in $(SNES9X2005_PATCHES); do \
+		patch -d '$(SNES9X2005_DIR)' -p1 < "$$patch_file"; \
+	done
+	touch '$@'
+
+$(SNES9X2005_CORE): $(SNES9X2005_PATCH_STAMP) Makefile
 	mkdir -p build
 	$(MAKE) -C $(SNES9X2005_DIR) clean platform=unix STATIC_LINKING=1
 	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
-		-fno-strict-aliasing -ffunction-sections -fdata-sections' \
+		-fno-strict-aliasing -ffunction-sections -fdata-sections \
+		-DSF2000_NOMMU' \
 	CXXFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 		-G0 -mabicalls -fPIC -fomit-frame-pointer -ffast-math \
 		-fno-strict-aliasing -ffunction-sections -fdata-sections \
-		-fno-exceptions -fno-rtti' \
+		-fno-exceptions -fno-rtti -DSF2000_NOMMU' \
 	$(MAKE) -C $(SNES9X2005_DIR) platform=unix STATIC_LINKING=1 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
