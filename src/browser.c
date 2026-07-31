@@ -41,6 +41,8 @@ extern long syscall(long number, ...);
 #define MAX_FRAME_PIXELS (320u * 240u)
 #define LINUX_DT_DIR 4u
 #define LINUX_DT_REG 8u
+#define UI_DIAGNOSTIC_PATH SD_ROOT "/sf2000/ui-diagnostic.bin"
+#define UI_DIAGNOSTIC_MAGIC "SF2KUID1"
 
 struct linux_dirent64 {
 	uint64_t inode;
@@ -82,6 +84,8 @@ struct entry {
 static struct entry entries[MAX_ENTRIES];
 static unsigned entry_count, selected, first;
 static uint16_t framebuffer[MAX_FRAME_PIXELS];
+static uint16_t diagnostic_ge_scanout[MAX_FRAME_PIXELS];
+static uint16_t diagnostic_scanout[MAX_FRAME_PIXELS];
 static int framebuffer_fd = -1;
 static uint32_t framebuffer_phys;
 static hcge_context ge_storage;
@@ -99,7 +103,29 @@ static struct sf2000_ui ui;
 enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS };
 static enum browser_view view = VIEW_HOME;
 static unsigned framebuffer_writes;
+static unsigned diagnostic_chord_latched;
+static unsigned diagnostic_held;
 static void log_message(const char *message);
+static int write_frame(void);
+
+struct ui_diagnostic_header {
+	char magic[8];
+	uint32_t version;
+	uint32_t width;
+	uint32_t height;
+	uint32_t stride;
+	uint32_t framebuffer_phys;
+	uint32_t ge_source_phys;
+	uint32_t source_hash;
+	uint32_t ge_hash;
+	uint32_t cpu_hash;
+	uint32_t ge_mismatches;
+	uint32_t cpu_mismatches;
+	uint32_t frame_bytes;
+};
+
+_Static_assert(sizeof(struct ui_diagnostic_header) == 56,
+	"unexpected UI diagnostic header size");
 
 static void close_ge_presenter(void)
 {
@@ -193,6 +219,162 @@ static void begin_performance_session(void)
 		log_message("performance journal acknowledgement timeout");
 }
 
+static ssize_t write_cpu_frame(void)
+{
+	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
+
+	return pwrite(framebuffer_fd, framebuffer, bytes, 0);
+}
+
+static uint32_t diagnostic_hash(const uint16_t *pixels)
+{
+	uint32_t hash = 2166136261u;
+	unsigned y, x;
+
+	for (y = 0; y < height; y++)
+		for (x = 0; x < width; x++) {
+			hash ^= pixels[y * stride + x];
+			hash *= 16777619u;
+		}
+	return hash;
+}
+
+static uint32_t diagnostic_mismatches(const uint16_t *pixels)
+{
+	uint32_t mismatches = 0;
+	unsigned y, x;
+
+	for (y = 0; y < height; y++)
+		for (x = 0; x < width; x++)
+			if (pixels[y * stride + x] != framebuffer[y * stride + x])
+				mismatches++;
+	return mismatches;
+}
+
+static int diagnostic_readback(uint16_t *destination)
+{
+	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
+	ssize_t got = pread(framebuffer_fd, destination, bytes, 0);
+
+	if (got != (ssize_t)bytes) {
+		char message[160];
+
+		snprintf(message, sizeof(message),
+			"UI diagnostic framebuffer read failed bytes=%lu got=%ld errno=%d",
+			(unsigned long)bytes, (long)got, errno);
+		log_message(message);
+		return -1;
+	}
+	return 0;
+}
+
+static int diagnostic_write_all(int fd, const void *data, size_t bytes)
+{
+	const uint8_t *cursor = data;
+
+	while (bytes) {
+		ssize_t written = write(fd, cursor, bytes);
+
+		if (written < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (!written)
+			return -1;
+		cursor += written;
+		bytes -= (size_t)written;
+	}
+	return 0;
+}
+
+static int diagnostic_write_packed(int fd, const uint16_t *pixels)
+{
+	unsigned y;
+
+	for (y = 0; y < height; y++)
+		if (diagnostic_write_all(fd, pixels + y * stride,
+			(size_t)width * sizeof(*pixels)) < 0)
+			return -1;
+	return 0;
+}
+
+static void capture_ui_diagnostic(void)
+{
+	struct ui_diagnostic_header header;
+	uint32_t ge_hash = 0, cpu_hash = 0;
+	uint32_t ge_mismatches = UINT32_MAX, cpu_mismatches = UINT32_MAX;
+	unsigned have_ge = ge != NULL;
+	int fd = -1;
+	char message[320];
+
+	/* Finish a fresh GE publication before reading its destination. */
+	if (write_frame() < 0 || diagnostic_readback(diagnostic_ge_scanout) < 0)
+		goto restore;
+	ge_hash = diagnostic_hash(diagnostic_ge_scanout);
+	ge_mismatches = diagnostic_mismatches(diagnostic_ge_scanout);
+
+	/* A CPU publication of the identical source isolates the GE transfer. */
+	if (write_cpu_frame() != (ssize_t)((size_t)height * stride *
+		sizeof(*framebuffer)) || diagnostic_readback(diagnostic_scanout) < 0)
+		goto restore;
+	cpu_hash = diagnostic_hash(diagnostic_scanout);
+	cpu_mismatches = diagnostic_mismatches(diagnostic_scanout);
+
+restore:
+	/* The diagnostic must leave the normal GE presenter on screen. */
+	if (have_ge && write_frame() < 0)
+		log_message("UI diagnostic GE restore failed");
+	if (ge_mismatches == UINT32_MAX || cpu_mismatches == UINT32_MAX) {
+		log_message("UI diagnostic unavailable; framebuffer readback failed");
+		return;
+	}
+
+	memset(&header, 0, sizeof(header));
+	memcpy(header.magic, UI_DIAGNOSTIC_MAGIC, sizeof(header.magic));
+	header.version = 1;
+	header.width = width;
+	header.height = height;
+	header.stride = stride;
+	header.framebuffer_phys = framebuffer_phys;
+	header.ge_source_phys = ge_source_phys;
+	header.source_hash = diagnostic_hash(framebuffer);
+	header.ge_hash = ge_hash;
+	header.cpu_hash = cpu_hash;
+	header.ge_mismatches = ge_mismatches;
+	header.cpu_mismatches = cpu_mismatches;
+	header.frame_bytes = (uint32_t)((size_t)width * height *
+		sizeof(*framebuffer));
+	fd = open(UI_DIAGNOSTIC_PATH,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0 || diagnostic_write_all(fd, &header, sizeof(header)) < 0 ||
+		diagnostic_write_packed(fd, framebuffer) < 0 ||
+		diagnostic_write_packed(fd, diagnostic_ge_scanout) < 0) {
+		snprintf(message, sizeof(message),
+			"UI diagnostic write failed path=%s errno=%d",
+			UI_DIAGNOSTIC_PATH, errno);
+		log_message(message);
+		if (fd >= 0)
+			close(fd);
+		return;
+	}
+	/* The final packed image is the CPU-publication readback. */
+	if (diagnostic_write_packed(fd, diagnostic_scanout) < 0 || fsync(fd) < 0) {
+		snprintf(message, sizeof(message),
+			"UI diagnostic flush failed path=%s errno=%d",
+			UI_DIAGNOSTIC_PATH, errno);
+		log_message(message);
+		close(fd);
+		return;
+	}
+	close(fd);
+	snprintf(message, sizeof(message),
+		"UI diagnostic path=%s source=%08x ge=%08x cpu=%08x ge_mismatch=%u cpu_mismatch=%u",
+		UI_DIAGNOSTIC_PATH, header.source_hash, header.ge_hash,
+		header.cpu_hash, header.ge_mismatches, header.cpu_mismatches);
+	log_message(message);
+}
+
 static int write_frame(void)
 {
 	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
@@ -244,7 +426,7 @@ static int write_frame(void)
 		written = (ssize_t)bytes;
 		presenter = "GE";
 	} else {
-		written = pwrite(framebuffer_fd, framebuffer, bytes, 0);
+		written = write_cpu_frame();
 	}
 
 	if (written != (ssize_t)bytes) {
@@ -989,6 +1171,22 @@ int main(void)
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			unsigned visible = height > 78 ? (height - 78) / 22u : 1u;
 			if (event.type != EV_KEY) continue;
+			if (event.code == BTN_START || event.code == BTN_DPAD_UP) {
+				unsigned bit = event.code == BTN_START ? 1u : 2u;
+
+				if (event.value)
+					diagnostic_held |= bit;
+				else {
+					diagnostic_held &= ~bit;
+					diagnostic_chord_latched = 0;
+				}
+				if (event.value == 1 && diagnostic_held == 3u &&
+						!diagnostic_chord_latched) {
+					diagnostic_chord_latched = 1;
+					capture_ui_diagnostic();
+					continue;
+				}
+			}
 			if (event.value != 1) continue;
 			if (view == VIEW_HOME) {
 				if (event.code == BTN_DPAD_UP && selected)
