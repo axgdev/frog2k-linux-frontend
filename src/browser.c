@@ -843,6 +843,18 @@ int main(void)
 	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
 	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
 	(void)sf2000_ui_init(&ui, framebuffer, width, height, stride, &config);
+	{
+		char message[320];
+
+		if (ui.font)
+			snprintf(message, sizeof(message), "font loaded path=%s",
+				config.font);
+		else
+			snprintf(message, sizeof(message),
+				"font unavailable path=%s; using fallback glyphs",
+				config.font);
+		log_message(message);
+	}
 	input = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (input < 0) {
 		sf2000_ui_close(&ui);
