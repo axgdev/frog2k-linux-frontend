@@ -91,6 +91,7 @@ static unsigned extra_root_count;
 static struct sf2000_ui ui;
 enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS };
 static enum browser_view view = VIEW_HOME;
+static unsigned framebuffer_writes;
 static void log_message(const char *message);
 
 static void load_storage_roots(void)
@@ -175,10 +176,24 @@ static void begin_performance_session(void)
 
 static int write_frame(void)
 {
-	if (pwrite(framebuffer_fd, framebuffer,
-			(size_t)height * stride * sizeof(*framebuffer), 0) < 0) {
-		log_message("framebuffer write failed");
+	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
+	ssize_t written = pwrite(framebuffer_fd, framebuffer, bytes, 0);
+	char message[160];
+
+	if (written != (ssize_t)bytes) {
+		snprintf(message, sizeof(message),
+			"framebuffer write failed bytes=%lu written=%ld errno=%d",
+			(unsigned long)bytes, (long)written, errno);
+		log_message(message);
 		return -1;
+	}
+	/* Keep the first complete publication visible in loglinux.txt. This
+	 * distinguishes a short fbdev write from a later panel scanout issue. */
+	if (!framebuffer_writes++) {
+		snprintf(message, sizeof(message),
+			"framebuffer write complete bytes=%lu stride=%u",
+			(unsigned long)bytes, stride * (unsigned)sizeof(*framebuffer));
+		log_message(message);
 	}
 	return 0;
 }
