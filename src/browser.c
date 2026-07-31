@@ -1131,8 +1131,9 @@ int main(void)
 		char message[320];
 
 		if (ui.font)
-			snprintf(message, sizeof(message), "font loaded path=%s",
-				config.font);
+			snprintf(message, sizeof(message),
+				"font loaded path=%s stb_alloc_failures=%u",
+				config.font, sf2000_ui_allocation_failures());
 		else
 			snprintf(message, sizeof(message),
 				"font unavailable path=%s; using fallback glyphs",

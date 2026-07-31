@@ -64,5 +64,6 @@ int sf2000_ui_text(struct sf2000_ui *ui, int x, int y, const char *text,
 int sf2000_ui_measure(struct sf2000_ui *ui, const char *text);
 const char *sf2000_ui_label(const struct sf2000_ui *ui,
 	enum sf2000_ui_label label);
+unsigned sf2000_ui_allocation_failures(void);
 
 #endif

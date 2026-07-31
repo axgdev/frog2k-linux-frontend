@@ -1,8 +1,27 @@
 // SPDX-License-Identifier: MIT
 #include <stdlib.h>
 
+static unsigned ui_allocation_failures;
+
+static void *ui_stb_malloc(size_t bytes)
+{
+	void *memory = calloc(1, bytes);
+
+	if (!memory)
+		ui_allocation_failures++;
+	return memory;
+}
+
 #define STB_TRUETYPE_IMPLEMENTATION
-#define STBTT_malloc(x, u) ((void)(u), malloc(x))
+/*
+ * stb_truetype can return a bitmap after an internal temporary allocation
+ * fails.  The bitmap allocation itself succeeds, but the rasterizer then
+ * leaves it untouched.  malloc() makes that look like a glyph made from
+ * stale heap contents, which is especially visible on the small NOMMU
+ * target.  Zero every stb allocation so an incomplete rasterization is
+ * transparent rather than displaying old pixels.
+ */
+#define STBTT_malloc(x, u) ((void)(u), ui_stb_malloc(x))
 #define STBTT_free(x, u) ((void)(u), free(x))
 #include "stb_truetype.h"
 
@@ -468,4 +487,9 @@ const char *sf2000_ui_label(const struct sf2000_ui *ui,
 		if (!strcasecmp(ui->config.language, translations[i].language))
 			return translations[i].labels[label];
 	return translations[0].labels[label];
+}
+
+unsigned sf2000_ui_allocation_failures(void)
+{
+	return ui_allocation_failures;
 }

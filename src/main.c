@@ -1187,9 +1187,10 @@ static int prepare_pause_ui(void)
 		char message[128];
 
 		snprintf(message, sizeof(message),
-			"pause UI prepared font=%u fb=%ux%u stride=%u\n",
+			"pause UI prepared font=%u fb=%ux%u stride=%u stb_alloc_failures=%u\n",
 			pause_ui.font != NULL, host.fb_width, host.fb_height,
-			(unsigned)(PAUSE_WIDTH * sizeof(*pause_pixels)));
+			(unsigned)(PAUSE_WIDTH * sizeof(*pause_pixels)),
+			sf2000_ui_allocation_failures());
 		log_kmsg(message);
 	}
 	return 0;
