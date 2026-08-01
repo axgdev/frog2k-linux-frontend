@@ -7,12 +7,14 @@
 enum sf2000_input_action {
 	SF2000_INPUT_NONE = 0,
 	SF2000_INPUT_PAUSE = 1u << 0,
+	SF2000_INPUT_LOG_FLUSH = 1u << 1,
 };
 
 struct sf2000_input {
 	int fd;
 	uint32_t keys;
 	unsigned pause_chord_latched;
+	unsigned log_chord_latched;
 	unsigned polls;
 	unsigned events;
 	unsigned interval_max_latency_us;

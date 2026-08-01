@@ -6,6 +6,7 @@
 #include "hc15xx_resampler.h"
 #include "hc15xx_retained.h"
 #include "sf2000_input.h"
+#include "sf2000_log.h"
 #include "sf2000_pacer.h"
 #include "sf2000_browser_ui.h"
 
@@ -107,6 +108,7 @@ static unsigned pause_frame_writes;
 static unsigned pause_ge_disabled;
 static unsigned pause_ge_presented;
 static void render_pause_menu(struct sf2000_ui *menu, unsigned selected);
+static unsigned poll_controls(void);
 
 struct core_option {
 	char key[CORE_OPTION_TEXT_MAX];
@@ -1187,10 +1189,10 @@ static int prepare_pause_ui(void)
 		char message[128];
 
 		snprintf(message, sizeof(message),
-			"pause UI prepared font=%u fb=%ux%u stride=%u stb_alloc_failures=%u\n",
+			"pause UI prepared font=%u fb=%ux%u stride=%u stb_alloc_failures=%u glyph_failures=%u\n",
 			pause_ui.font != NULL, host.fb_width, host.fb_height,
 			(unsigned)(PAUSE_WIDTH * sizeof(*pause_pixels)),
-			sf2000_ui_allocation_failures());
+			sf2000_ui_allocation_failures(), sf2000_ui_glyph_failures());
 		log_kmsg(message);
 	}
 	return 0;
@@ -1418,7 +1420,7 @@ static void run_pause_menu(long frame_ns)
 	pause_frame_writes = 0;
 	while ((host.input.keys & ((1u << RETRO_DEVICE_ID_JOYPAD_START) |
 			(1u << RETRO_DEVICE_ID_JOYPAD_SELECT))) != 0u) {
-		(void)sf2000_input_poll(&host.input);
+		(void)poll_controls();
 		(void)poll(NULL, 0, 5);
 	}
 	previous = host.input.keys;
@@ -1444,7 +1446,7 @@ static void run_pause_menu(long frame_ns)
 	while (!resume && !stopping) {
 		unsigned pressed;
 
-		(void)sf2000_input_poll(&host.input);
+		(void)poll_controls();
 		pressed = host.input.keys & ~previous;
 		previous = host.input.keys;
 		if (pressed & (1u << RETRO_DEVICE_ID_JOYPAD_UP)) {
@@ -1487,9 +1489,23 @@ static void run_pause_menu(long frame_ns)
 	}
 }
 
-static void input_poll(void)
+static unsigned poll_controls(void)
 {
 	unsigned actions = sf2000_input_poll(&host.input);
+
+	if (actions & SF2000_INPUT_LOG_FLUSH) {
+		log_kmsg("START+RIGHT log flush requested\n");
+		if (sf2000_log_flush("START+RIGHT") != 0)
+			log_kmsg("START+RIGHT log flush timed out\n");
+		else
+			log_kmsg("START+RIGHT log flush complete\n");
+	}
+	return actions;
+}
+
+static void input_poll(void)
+{
+	unsigned actions = poll_controls();
 
 	if (actions & SF2000_INPUT_PAUSE)
 		pause_requested = 1;
@@ -1710,7 +1726,7 @@ int main(int argc, char **argv)
 			frame_ns, host.audio_rate, AUDIO_OUTPUT_RATE);
 		log_kmsg(details);
 	}
-	log_kmsg("frontend running START+SELECT opens pause and core options\n");
+	log_kmsg("frontend running START+SELECT pauses; START+RIGHT saves logs\n");
 	retained_stage("frontend-run", 7);
 	start_metrics_logging();
 	signal(SIGINT, stop_signal);

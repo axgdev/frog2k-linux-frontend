@@ -12,6 +12,9 @@ QUICKNES_REV := 7848e1ac22b1c69d056ae4cb57710651ff1dd169
 PROSYSTEM_REV := 4202ac5bdb2ce1a21f84efc0e26d75bb5aa7e248
 SNES9X2005_REV := b60356971fc9caae02cd0853676dced886a08be7
 SNES9X2002_REV := 39e0d8c6daf4b1b1302eeecfee8309570aeb6a82
+STELLA_REV := 30e01eb2acb6587bd7cf2253fe7dbbcaa496ad8e
+GEARBOY_REV := 36f9faf04bcb6c023176de12dddae99ffc1ceb10
+PCE_FAST_REV := 9ba79648d6ec85e833aef719d7f359117498d89c
 COMMON_REV := 9e2af2c23ff2595f096e2f591ea49a9bcb65401d
 STB_REV := 31c1ad37456438565541f4919958214b6e762fb4
 GAMBATTE_DIR := .deps/gambatte
@@ -21,6 +24,9 @@ QUICKNES_DIR := .deps/quicknes
 PROSYSTEM_DIR := .deps/prosystem
 SNES9X2005_DIR := .deps/snes9x2005
 SNES9X2002_DIR := .deps/snes9x2002
+STELLA_DIR := .deps/stella2014
+GEARBOY_DIR := .deps/gearboy
+PCE_FAST_DIR := .deps/pce-fast
 QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
@@ -32,10 +38,11 @@ AUDIO_SOURCES := $(AUDIO_DIR)/hc15xx_resampler.c
 PLATFORM_DIR := $(SF2000_LINUX_DIR)/platform
 PLATFORM_SOURCES := $(PLATFORM_DIR)/hc15xx_retained.c
 FRONTEND_SOURCES := src/main.c src/sf2000_input.c src/sf2000_pacer.c \
-	src/sf2000_browser_ui.c
+	src/sf2000_browser_ui.c src/sf2000_log.c
 SF2000_HOST_OBJECTS := build/host-main.o build/host-input.o \
 	build/host-pacer.o \
 	build/host-ui.o \
+	build/host-log.o \
 	build/host-ge-linux.o build/host-ge-node.o build/host-audio.o \
 	build/host-retained.o build/host-nommu-new.o build/host-content.o
 GAMBATTE_CORE := build/gambatte_libretro_linux.a
@@ -45,6 +52,9 @@ QUICKNES_CORE := build/quicknes_libretro_linux.a
 PROSYSTEM_CORE := build/prosystem_libretro_linux.a
 SNES9X2005_CORE := build/snes9x2005_libretro_linux.a
 SNES9X2002_CORE := build/snes9x2002_libretro_linux.a
+STELLA_CORE := build/stella2014_libretro_linux.a
+GEARBOY_CORE := build/gearboy_libretro_linux.a
+PCE_FAST_CORE := build/pce_fast_libretro_linux.a
 SNES9X2002_MEMORY := build/snes9x2002-memory-stream.o
 GAMBATTE_PATCHES := $(wildcard patches/gambatte/*.patch)
 GPSP_PATCHES := $(wildcard patches/gpsp/*.patch)
@@ -80,6 +90,7 @@ GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
+	encodings/encoding_crc32.c \
 	file/file_path.c file/file_path_io.c \
 	streams/file_stream.c streams/file_stream_transforms.c \
 	string/stdstring.c time/rtime.c vfs/vfs_implementation.c
@@ -91,6 +102,12 @@ SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float \
 	-I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include
 SF2000_SYSROOT ?= $(shell $(SF2000_CC) -print-sysroot)
 SF2000_CRT_DIR ?= $(SF2000_SYSROOT)/usr/lib
+STELLA_INCLUDES := -I$(abspath $(STELLA_DIR)) \
+	-I$(abspath $(STELLA_DIR)/stella) -I$(abspath $(STELLA_DIR)/stella/src) \
+	-I$(abspath $(STELLA_DIR)/stella/stubs) \
+	-I$(abspath $(STELLA_DIR)/stella/src/emucore) \
+	-I$(abspath $(STELLA_DIR)/stella/src/common) \
+	-I$(abspath $(STELLA_DIR)/stella/src/gui) -I$(abspath $(COMMON_DIR)/include)
 SF2000_STARTFILES = $(SF2000_CRT_DIR)/rcrt1.o $(SF2000_CRT_DIR)/crti.o \
 	$(shell $(SF2000_CC) -print-file-name=crtbeginS.o)
 SF2000_ENDFILES = $(shell $(SF2000_CC) -print-file-name=crtendS.o) \
@@ -98,10 +115,16 @@ SF2000_ENDFILES = $(shell $(SF2000_CC) -print-file-name=crtendS.o) \
 SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 	-Wl,--no-dynamic-linker -Wl,-z,text \
 	-Wl,--gc-sections
+PCE_FAST_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 \
+	-msoft-float -G0 -mabicalls -fPIC -ffast-math \
+	-fomit-frame-pointer -ffunction-sections -fdata-sections \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables \
+	-DFRONTEND_SUPPORTS_RGB565 -DNO_THREADS
+PCE_FAST_CXXFLAGS := $(PCE_FAST_CFLAGS) -fno-rtti
 
 .PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
-	core-packages integrated
+	stella2014 gearboy pce-fast core-packages integrated
 
 all: check
 
@@ -163,14 +186,14 @@ gpsp-pic-audit: build/sf2000-gpsp
 	grep -Eq 'lw[[:space:]]+t9,.*[(]s0[)]' "$$body"; \
 	grep -Eq 'lw[[:space:]]+gp,.*[(]s0[)]' "$$body"
 
-sf2000: $(STB_DIR)/.git
+sf2000: $(STB_DIR)/.git $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 	test -n "$(CORE)" || { echo 'set CORE=/path/to/libretro_core.a' >&2; exit 2; }
 	mkdir -p build
-	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
+	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) \
+		$(SF2000_LDFLAGS) \
 		-o build/sf2000-frontend \
-		$(SF2000_STARTFILES) $(FRONTEND_SOURCES) $(GE_SOURCES) \
-		$(AUDIO_SOURCES) $(PLATFORM_SOURCES) src/content.c \
-		$(CORE) -lm $(SF2000_ENDFILES)
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
+		$(CORE) $(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
 
 demo: $(STB_DIR)/.git
 	mkdir -p build
@@ -191,11 +214,12 @@ frogui: $(STB_DIR)/.git
 		$(SF2000_ENDFILES)
 
 browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h \
-		src/browser.c src/sf2000_browser_ui.c
+		src/browser.c src/sf2000_browser_ui.c src/sf2000_log.c \
+		include/sf2000_browser_ui.h include/sf2000_log.h
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
 		-o build/sf2000-browser $(SF2000_STARTFILES) src/browser.c \
-		src/sf2000_browser_ui.c $(GE_SOURCES) -lm \
+		src/sf2000_browser_ui.c src/sf2000_log.c $(GE_SOURCES) -lm \
 		$(SF2000_ENDFILES)
 
 gambatte: $(SF2000_HOST_OBJECTS)
@@ -248,18 +272,43 @@ snes9x2002: $(SNES9X2002_CORE) $(SNES9X2002_MEMORY) $(LIBRETRO_COMMON) \
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
 		-Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: quicknes prosystem snes9x2005 snes9x2002
+stella2014: $(STELLA_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-stella2014 \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(STELLA_CORE) \
+		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
+		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
+
+gearboy: $(GEARBOY_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-gearboy \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(GEARBOY_CORE) \
+		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
+		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
+
+pce-fast: $(PCE_FAST_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o build/sf2000-pce-fast \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) $(PCE_FAST_CORE) \
+		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
+		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
+
+core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast
 	mkdir -p build/core-packages/licenses
 	cp build/sf2000-quicknes build/core-packages/
 	cp build/sf2000-prosystem build/core-packages/
 	cp build/sf2000-snes9x2005 build/core-packages/
 	cp build/sf2000-snes9x2002 build/core-packages/
+	cp build/sf2000-stella2014 build/core-packages/
+	cp build/sf2000-gearboy build/core-packages/
+	cp build/sf2000-pce-fast build/core-packages/
 	cp $(QUICKNES_DIR)/LICENSE build/core-packages/licenses/quicknes-LICENSE
 	cp $(PROSYSTEM_DIR)/License.txt build/core-packages/licenses/prosystem-LICENSE
 	cp $(SNES9X2005_DIR)/copyright build/core-packages/licenses/snes9x2005-copyright
 	cp $(SNES9X2002_DIR)/src/copyright.h build/core-packages/licenses/snes9x2002-copyright.h
+	cp $(STELLA_DIR)/stella/license.txt build/core-packages/licenses/stella2014-license.txt
+	cp $(GEARBOY_DIR)/LICENSE build/core-packages/licenses/gearboy-LICENSE
+	cp $(PCE_FAST_DIR)/COPYING build/core-packages/licenses/pce-fast-COPYING
 
-build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h
+build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h \
+		include/sf2000_browser_ui.h include/sf2000_log.h
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
@@ -275,6 +324,10 @@ build/host-ui.o: src/sf2000_browser_ui.c include/sf2000_browser_ui.h \
 		$(STB_DIR)/.git
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) -c -o $@ $<
+
+build/host-log.o: src/sf2000_log.c include/sf2000_log.h
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
 build/host-ge-linux.o: $(GE_DIR)/hcge_linux.c
 	mkdir -p build
@@ -314,6 +367,21 @@ $(STB_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/nothings/stb.git $(STB_DIR)
 	git -C $(STB_DIR) checkout --detach $(STB_REV)
+
+$(STELLA_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/madcock/libretro-stella2014.git $(STELLA_DIR)
+	git -C $(STELLA_DIR) checkout --detach $(STELLA_REV)
+
+$(GEARBOY_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/drhelius/Gearboy.git $(GEARBOY_DIR)
+	git -C $(GEARBOY_DIR) checkout --detach $(GEARBOY_REV)
+
+$(PCE_FAST_DIR)/.git:
+	mkdir -p .deps
+	git clone --filter=blob:none https://github.com/libretro/beetle-pce-fast-libretro.git $(PCE_FAST_DIR)
+	git -C $(PCE_FAST_DIR) checkout --detach $(PCE_FAST_REV)
 
 $(GPSP_DIR)/.git:
 	mkdir -p .deps
@@ -483,6 +551,46 @@ $(SNES9X2002_CORE): $(SNES9X2002_DIR)/.git Makefile
 	$(MAKE) -C $(SNES9X2002_DIR) platform=unix STATIC_LINKING=1 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
+
+$(STELLA_CORE): $(STELLA_DIR)/.git $(COMMON_DIR)/.git Makefile
+	mkdir -p build
+	$(MAKE) -C $(STELLA_DIR) clean platform=sf2000 STATIC_LINKING=1
+	$(MAKE) -C $(STELLA_DIR) platform=sf2000 STATIC_LINKING=1 \
+		TARGET='$(abspath $@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' \
+		CFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -ffast-math -fomit-frame-pointer \
+		-ffunction-sections -fdata-sections -DSF2000 -DHAVE_STRL \
+		-DFRONTEND_SUPPORTS_RGB565 $(STELLA_INCLUDES)' \
+		CXXFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -ffast-math -fomit-frame-pointer \
+		-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti \
+		-DSF2000 -DHAVE_STRL -DFRONTEND_SUPPORTS_RGB565 \
+		$(STELLA_INCLUDES)'
+
+$(GEARBOY_CORE): $(GEARBOY_DIR)/.git Makefile
+	mkdir -p build
+	$(MAKE) -C $(GEARBOY_DIR)/platforms/libretro clean \
+		platform=unix STATIC_LINKING=1 CC='$(SF2000_CC)' \
+		CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar'
+	CFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -ffast-math -fomit-frame-pointer \
+		-ffunction-sections -fdata-sections' \
+	CXXFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
+		-G0 -mabicalls -fPIC -ffast-math -fomit-frame-pointer \
+		-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti' \
+	$(MAKE) -C $(GEARBOY_DIR)/platforms/libretro platform=unix \
+		STATIC_LINKING=1 CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
+
+$(PCE_FAST_CORE): $(PCE_FAST_DIR)/.git Makefile
+	mkdir -p build
+	$(MAKE) -C $(PCE_FAST_DIR) clean platform=unix STATIC_LINKING=1 \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar'
+	CFLAGS='$(PCE_FAST_CFLAGS)' CXXFLAGS='$(PCE_FAST_CXXFLAGS)' \
+	$(MAKE) -C $(PCE_FAST_DIR) platform=unix STATIC_LINKING=1 HAVE_CHD=1 \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
+		GIT_VERSION='$(PCE_FAST_REV)' fpic= TARGET='$(abspath $@)'
 
 $(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git
 	mkdir -p build

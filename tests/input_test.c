@@ -51,6 +51,22 @@ int main(void)
 			!sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
 				RETRO_DEVICE_ID_JOYPAD_L))
 		return 1;
+	if (send_key(pipe_fd[1], BTN_START, 1) ||
+			send_key(pipe_fd[1], BTN_DPAD_RIGHT, 1))
+		return 1;
+	actions = sf2000_input_poll(&input);
+	if (!(actions & SF2000_INPUT_LOG_FLUSH) ||
+			input.events != 7 ||
+			sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
+				RETRO_DEVICE_ID_JOYPAD_START) ||
+			sf2000_input_state(&input, 0, RETRO_DEVICE_JOYPAD, 0,
+				RETRO_DEVICE_ID_JOYPAD_RIGHT) ||
+			sf2000_input_poll(&input) != SF2000_INPUT_NONE)
+		return 1;
+	if (send_key(pipe_fd[1], BTN_DPAD_RIGHT, 0) ||
+			send_key(pipe_fd[1], BTN_START, 0) ||
+			sf2000_input_poll(&input) != SF2000_INPUT_NONE)
+		return 1;
 	input.interval_max_latency_us = 123;
 	sf2000_input_reset_interval(&input);
 	if (input.interval_max_latency_us)

@@ -20,6 +20,7 @@
 
 #include "ge_api.h"
 #include "sf2000_browser_ui.h"
+#include "sf2000_log.h"
 
 extern long syscall(long number, ...);
 
@@ -105,6 +106,8 @@ static enum browser_view view = VIEW_HOME;
 static unsigned framebuffer_writes;
 static unsigned diagnostic_chord_latched;
 static unsigned diagnostic_held;
+static unsigned log_flush_chord_latched;
+static unsigned log_flush_held;
 static void log_message(const char *message);
 static int write_frame(void);
 
@@ -369,9 +372,10 @@ restore:
 	}
 	close(fd);
 	snprintf(message, sizeof(message),
-		"UI diagnostic path=%s source=%08x ge=%08x cpu=%08x ge_mismatch=%u cpu_mismatch=%u",
+		"UI diagnostic path=%s source=%08x ge=%08x cpu=%08x ge_mismatch=%u cpu_mismatch=%u stb_alloc_failures=%u glyph_failures=%u",
 		UI_DIAGNOSTIC_PATH, header.source_hash, header.ge_hash,
-		header.cpu_hash, header.ge_mismatches, header.cpu_mismatches);
+		header.cpu_hash, header.ge_mismatches, header.cpu_mismatches,
+		sf2000_ui_allocation_failures(), sf2000_ui_glyph_failures());
 	log_message(message);
 }
 
@@ -726,6 +730,8 @@ static const struct core_route core_routes[] = {
 	{ "QUICKNES", "nes",
 		"/mnt/sd/sf2000/cores/sf2000-quicknes", "QuickNES", 0 },
 	{ "GB|GBC", "gb|gbc", GAMBATTE_PATH, "Gambatte", 0 },
+	{ "GB|GBC", "gb|gbc",
+		"/mnt/sd/sf2000/cores/sf2000-gearboy", "Gearboy", 0 },
 	{ "GBA", "gba", GPSP_PATH, "gpSP", 40 },
 	{ "NES|FDS", "nes|fds", FCEUMM_PATH, "FCEUmm", 0 },
 	{ "MD|GENESIS|MEGADRIVE|SMS|GG|32X",
@@ -910,6 +916,16 @@ static const struct core_route *choose_snes_core(int input,
 	return choose_core(input, fallback, choices, 2u, "SNES");
 }
 
+static const struct core_route *choose_gb_core(int input,
+	const struct core_route *fallback)
+{
+	const struct core_route *choices[] = {
+		route_named("Gambatte"), route_named("Gearboy"),
+	};
+
+	return choose_core(input, fallback, choices, 2u, "GB");
+}
+
 static int media_path(const char *p)
 {
 	const char *dot = strrchr(p, '.');
@@ -957,6 +973,8 @@ static void launch_selected(int input)
 				"MEDIA", ui.config.header);
 			begin_performance_session();
 			log_message(message);
+			if (sf2000_log_flush("pre-player-launch") != 0)
+				log_message("pre-player-launch log flush timed out");
 			close_ge_presenter();
 			execve(PLAYER_PATH, argv, envp);
 			(void)unlink(PERFORMANCE_MARKER);
@@ -976,8 +994,14 @@ static void launch_selected(int input)
 				return;
 		} else if (extension &&
 				(!strcasecmp(extension, ".sfc") ||
-				 !strcasecmp(extension, ".smc"))) {
+					 !strcasecmp(extension, ".smc"))) {
 			route = choose_snes_core(input, route);
+			if (!route)
+				return;
+		} else if (extension &&
+				(!strcasecmp(extension, ".gb") ||
+					 !strcasecmp(extension, ".gbc"))) {
+			route = choose_gb_core(input, route);
 			if (!route)
 				return;
 		}
@@ -1019,6 +1043,8 @@ static void launch_selected(int input)
 			ui.config.header);
 		begin_performance_session();
 		log_message(message);
+		if (sf2000_log_flush("pre-core-launch") != 0)
+			log_message("pre-core-launch log flush timed out");
 		close_ge_presenter();
 		{
 			char *const argv[] = {
@@ -1172,6 +1198,26 @@ int main(void)
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			unsigned visible = height > 78 ? (height - 78) / 22u : 1u;
 			if (event.type != EV_KEY) continue;
+			if (event.code == BTN_START || event.code == BTN_DPAD_RIGHT) {
+				unsigned bit = event.code == BTN_START ? 1u : 2u;
+
+				if (event.value)
+					log_flush_held |= bit;
+				else {
+					log_flush_held &= ~bit;
+					log_flush_chord_latched = 0;
+				}
+				if (event.value == 1 && log_flush_held == 3u &&
+						!log_flush_chord_latched) {
+					log_flush_chord_latched = 1;
+					log_message("START+RIGHT log flush requested");
+					if (sf2000_log_flush("START+RIGHT") != 0)
+						log_message("START+RIGHT log flush timed out");
+					else
+						log_message("START+RIGHT log flush complete");
+					continue;
+				}
+			}
 			if (event.code == BTN_START || event.code == BTN_DPAD_UP) {
 				unsigned bit = event.code == BTN_START ? 1u : 2u;
 

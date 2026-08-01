@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 static unsigned ui_allocation_failures;
+static unsigned ui_glyph_failures;
 
 static void *ui_stb_malloc(size_t bytes)
 {
@@ -34,6 +35,7 @@ static void *ui_stb_malloc(size_t bytes)
 
 #define FONT_LIMIT (8u * 1024u * 1024u)
 #define GLYPH_CACHE 192u
+#define GLYPH_MAX_DIM 64u
 
 struct glyph {
 	uint32_t codepoint;
@@ -249,6 +251,8 @@ static struct glyph *font_glyph(struct font *font, uint32_t codepoint)
 	int index;
 	int advance;
 	int bearing;
+	int x0, y0, x1, y1;
+	size_t bitmap_bytes;
 
 	for (i = 0; i < GLYPH_CACHE; i++) {
 		struct glyph *glyph = &font->glyphs[i];
@@ -274,9 +278,35 @@ static struct glyph *font_glyph(struct font *font, uint32_t codepoint)
 	stbtt_GetGlyphHMetrics(&font->info, index, &advance, &bearing);
 	(void)bearing;
 	oldest->advance = (int)(advance * font->scale + 0.5f);
-	oldest->bitmap = stbtt_GetGlyphBitmap(&font->info, 0, font->scale,
-		index, &oldest->width, &oldest->height, &oldest->xoff,
-		&oldest->yoff);
+	/* Keep the persistent bitmap allocation separate from stb_truetype's
+	 * temporary contour/raster allocations. A failed temporary allocation
+	 * must leave a known-zero bitmap, never stale heap bytes. */
+	stbtt_GetGlyphBitmapBox(&font->info, index, font->scale, font->scale,
+		&x0, &y0, &x1, &y1);
+	oldest->width = x1 - x0;
+	oldest->height = y1 - y0;
+	oldest->xoff = x0;
+	oldest->yoff = y0;
+	if (oldest->width < 0 || oldest->height < 0 ||
+			(unsigned)oldest->width > GLYPH_MAX_DIM ||
+			(unsigned)oldest->height > GLYPH_MAX_DIM) {
+		ui_glyph_failures++;
+		oldest->width = oldest->height = 0;
+		oldest->xoff = oldest->yoff = 0;
+		return oldest;
+	}
+	bitmap_bytes = (size_t)oldest->width * (size_t)oldest->height;
+	if (!bitmap_bytes)
+		return oldest;
+	oldest->bitmap = calloc(1, bitmap_bytes);
+	if (!oldest->bitmap) {
+		ui_glyph_failures++;
+		oldest->width = oldest->height = 0;
+		oldest->xoff = oldest->yoff = 0;
+		return oldest;
+	}
+	stbtt_MakeGlyphBitmap(&font->info, oldest->bitmap, oldest->width,
+		oldest->height, oldest->width, font->scale, font->scale, index);
 	return oldest;
 }
 
@@ -501,4 +531,9 @@ const char *sf2000_ui_label(const struct sf2000_ui *ui,
 unsigned sf2000_ui_allocation_failures(void)
 {
 	return ui_allocation_failures;
+}
+
+unsigned sf2000_ui_glyph_failures(void)
+{
+	return ui_glyph_failures;
 }
