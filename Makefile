@@ -578,7 +578,8 @@ $(GEARBOY_CORE): $(GEARBOY_DIR)/.git Makefile
 		-ffunction-sections -fdata-sections' \
 	CXXFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 		-G0 -mabicalls -fPIC -ffast-math -fomit-frame-pointer \
-		-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti' \
+		-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti \
+		-DPERFORMANCE' \
 	$(MAKE) -C $(GEARBOY_DIR)/platforms/libretro platform=unix \
 		STATIC_LINKING=1 CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'

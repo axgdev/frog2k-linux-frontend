@@ -60,7 +60,7 @@ struct font {
 
 struct translation {
 	const char *language;
-	const char *labels[SF2000_UI_FRAMESKIP + 1];
+	const char *labels[SF2000_UI_LABEL_COUNT];
 };
 
 static const struct translation translations[] = {
@@ -69,37 +69,43 @@ static const struct translation translations[] = {
 		"NOT ENOUGH MEMORY", "CLOSE OTHER APPLICATIONS",
 		"CORE IS NOT INSTALLED", "COPY THE CORE PACKAGE TO THE SD CARD",
 		"HOME", "SETTINGS", "RESET", "SAFE SHUTDOWN", "SELECT EMULATOR",
-		"RESUME", "FAST FORWARD", "FRAMESKIP" } },
+		"RESUME", "FAST FORWARD", "FRAMESKIP", "STATE SLOT", "SAVE STATE",
+		"LOAD STATE" } },
 	{ "es", { "BIBLIOTECA", "SIN ARCHIVOS", "ABRIR", "ATRÁS", "SALIR",
 		"CARGANDO EMULADOR", "ESPERA - EL SISTEMA ESTÁ ACTIVO",
 		"MEMORIA INSUFICIENTE", "CIERRA OTRAS APLICACIONES",
 		"EL NÚCLEO NO ESTÁ INSTALADO", "COPIA EL NÚCLEO A LA TARJETA SD",
 		"INICIO", "AJUSTES", "REINICIAR", "APAGADO SEGURO",
-		"ELIGE EMULADOR", "CONTINUAR", "AVANCE RÁPIDO", "SALTO DE FOTOGRAMAS" } },
+		"ELIGE EMULADOR", "CONTINUAR", "AVANCE RÁPIDO", "SALTO DE FOTOGRAMAS",
+		"RANURA", "GUARDAR ESTADO", "CARGAR ESTADO" } },
 	{ "pt", { "BIBLIOTECA", "SEM ARQUIVOS", "ABRIR", "VOLTAR", "SAIR",
 		"CARREGANDO EMULADOR", "AGUARDE - SISTEMA ATIVO",
 		"MEMÓRIA INSUFICIENTE", "FECHE OUTROS APLICATIVOS",
 		"NÚCLEO NÃO INSTALADO", "COPIE O NÚCLEO PARA O CARTÃO SD",
 		"INÍCIO", "CONFIGURAÇÕES", "REINICIAR", "DESLIGAMENTO SEGURO",
-		"ESCOLHA O EMULADOR", "CONTINUAR", "AVANÇO RÁPIDO", "PULAR QUADROS" } },
+		"ESCOLHA O EMULADOR", "CONTINUAR", "AVANÇO RÁPIDO", "PULAR QUADROS",
+		"RANHURA", "GUARDAR ESTADO", "CARREGAR ESTADO" } },
 	{ "pl", { "BIBLIOTEKA", "BRAK PLIKÓW", "OTWÓRZ", "WSTECZ", "WYJDŹ",
 		"ŁADOWANIE EMULATORA", "CZEKAJ - SYSTEM DZIAŁA",
 		"ZA MAŁO PAMIĘCI", "ZAMKNIJ INNE APLIKACJE",
 		"RDZEŃ NIE JEST ZAINSTALOWANY", "SKOPIUJ RDZEŃ NA KARTĘ SD",
 		"START", "USTAWIENIA", "RESTART", "BEZPIECZNE WYŁĄCZENIE",
-		"WYBIERZ EMULATOR", "WZNÓW", "PRZEWIJANIE", "POMIJANIE KLATEK" } },
+		"WYBIERZ EMULATOR", "WZNÓW", "PRZEWIJANIE", "POMIJANIE KLATEK",
+		"SLOT", "ZAPISZ STAN", "WCZYTAJ STAN" } },
 	{ "vi", { "THƯ VIỆN", "KHÔNG CÓ TỆP", "MỞ", "QUAY LẠI", "THOÁT",
 		"ĐANG TẢI TRÌNH GIẢ LẬP", "VUI LÒNG ĐỢI - HỆ THỐNG ĐANG CHẠY",
 		"KHÔNG ĐỦ BỘ NHỚ", "ĐÓNG CÁC ỨNG DỤNG KHÁC",
 		"CHƯA CÀI ĐẶT LÕI", "CHÉP GÓI LÕI VÀO THẺ SD",
 		"TRANG CHỦ", "CÀI ĐẶT", "KHỞI ĐỘNG LẠI", "TẮT AN TOÀN",
-		"CHỌN TRÌNH GIẢ LẬP", "TIẾP TỤC", "TUA NHANH", "BỎ QUA KHUNG" } },
+		"CHỌN TRÌNH GIẢ LẬP", "TIẾP TỤC", "TUA NHANH", "BỎ QUA KHUNG",
+		"KHE", "LƯU TRẠNG THÁI", "TẢI TRẠNG THÁI" } },
 	{ "ja", { "ライブラリ", "ファイルなし", "ひらく", "もどる", "おわる",
 		"エミュレータをよみこみちゅう", "しばらくおまちください",
 		"メモリがたりません", "ほかのアプリをとじてください",
 		"コアがインストールされていません", "コアをSDカードへコピーしてください",
 		"ホーム", "せってい", "さいきどう", "あんぜんにでんげんをきる",
-		"エミュレータをえらぶ", "つづける", "はやおくり", "フレームスキップ" } },
+		"エミュレータをえらぶ", "つづける", "はやおくり", "フレームスキップ",
+		"スロット", "ステートセーブ", "ステートロード" } },
 };
 
 static uint16_t parse_color(const char *value, uint16_t fallback)

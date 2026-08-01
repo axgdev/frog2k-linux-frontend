@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -49,6 +50,11 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
+#define SAVE_STATE_SLOTS 10u
+#define SAVE_PATH_MAX 512u
+#define SAVE_RAM_MAX (8u * 1024u * 1024u)
+#define SAVE_RAM_POLL_FRAMES 30u
+#define SAVE_RAM_FLUSH_US 2000000u
 #define PAUSE_WIDTH 320u
 #define PAUSE_HEIGHT 240u
 
@@ -107,6 +113,17 @@ static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
 static unsigned pause_ge_disabled;
 static unsigned pause_ge_presented;
+static unsigned state_slot;
+static char pause_status[96];
+static char save_ram_path[SAVE_PATH_MAX];
+static char state_base_path[SAVE_PATH_MAX];
+static void *save_ram_data;
+static size_t save_ram_size;
+static uint32_t save_ram_hash;
+static unsigned save_ram_dirty;
+static unsigned save_ram_poll_frames;
+static uint64_t save_ram_last_flush_us;
+static uint32_t state_key_hash;
 static void render_pause_menu(struct sf2000_ui *menu, unsigned selected);
 static unsigned poll_controls(void);
 
@@ -1164,6 +1181,362 @@ static void pause_audio(unsigned resume)
 		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
 }
 
+static uint32_t save_hash(const void *data, size_t size)
+{
+	const unsigned char *bytes = data;
+	uint32_t hash = 2166136261u;
+
+	while (size--) {
+		hash ^= *bytes++;
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+static void save_hash_string(uint32_t *hash, const char *text)
+{
+	if (!text)
+		return;
+	while (*text) {
+		*hash ^= (unsigned char)*text++;
+		*hash *= 16777619u;
+	}
+	*hash ^= 0xffu;
+	*hash *= 16777619u;
+}
+
+static int write_all_fd(int fd, const void *data, size_t size)
+{
+	const unsigned char *cursor = data;
+
+	while (size) {
+		ssize_t written = write(fd, cursor, size);
+
+		if (written < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (!written)
+			return -1;
+		cursor += written;
+		size -= (size_t)written;
+	}
+	return 0;
+}
+
+static int read_all_fd(int fd, void *data, size_t size)
+{
+	unsigned char *cursor = data;
+
+	while (size) {
+		ssize_t got = read(fd, cursor, size);
+
+		if (got < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (!got)
+			return -1;
+		cursor += got;
+		size -= (size_t)got;
+	}
+	return 0;
+}
+
+static int ensure_save_dir(void)
+{
+	if (mkdir(host.save_dir, 0755) < 0 && errno != EEXIST)
+		return -1;
+	return 0;
+}
+
+static int save_blob_atomic(const char *path, const void *header,
+	size_t header_size, const void *data, size_t data_size)
+{
+	char temporary[SAVE_PATH_MAX + 8u];
+	int fd;
+	int result = -1;
+
+	if (snprintf(temporary, sizeof(temporary), "%s.tmp", path) >=
+			(int)sizeof(temporary))
+		return -1;
+	(void)unlink(temporary);
+	fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return -1;
+	if (write_all_fd(fd, header, header_size) == 0 &&
+			write_all_fd(fd, data, data_size) == 0 && fsync(fd) == 0)
+		result = 0;
+	if (close(fd) < 0)
+		result = -1;
+	if (result == 0 && rename(temporary, path) == 0)
+		return 0;
+	(void)unlink(temporary);
+	return -1;
+}
+
+static uint64_t monotonic_us(void);
+
+static int make_save_stem(const char *game_path, char *stem, size_t size)
+{
+	const char *base = strrchr(game_path, '/');
+	const char *dot;
+	size_t length;
+	size_t i;
+
+	base = base ? base + 1 : game_path;
+	dot = strrchr(base, '.');
+	length = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+	if (!length || length >= size)
+		return -1;
+	for (i = 0; i < length; i++) {
+		unsigned char character = (unsigned char)base[i];
+
+		if (!(character >= 'a' && character <= 'z') &&
+				!(character >= 'A' && character <= 'Z') &&
+				!(character >= '0' && character <= '9') &&
+				character != '-' && character != '_')
+			character = '_';
+		stem[i] = (char)character;
+	}
+	stem[length] = 0;
+	return 0;
+}
+
+static int state_path(unsigned slot, char *path, size_t size)
+{
+	if (slot >= SAVE_STATE_SLOTS || !state_base_path[0])
+		return -1;
+	if (snprintf(path, size, "%s.state%u", state_base_path, slot) >=
+			(int)size)
+		return -1;
+	return 0;
+}
+
+static void save_ram_load(void)
+{
+	int fd;
+	struct stat status;
+
+	if (!save_ram_data || !save_ram_size || !save_ram_path[0])
+		return;
+	fd = open(save_ram_path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		if (errno != ENOENT)
+			log_kmsg("save RAM open failed\n");
+		return;
+	}
+	if (fstat(fd, &status) < 0 || status.st_size != (off_t)save_ram_size ||
+			read_all_fd(fd, save_ram_data, save_ram_size) < 0) {
+		log_kmsg("save RAM ignored due to size or read error\n");
+		close(fd);
+		return;
+	}
+	close(fd);
+	save_ram_hash = save_hash(save_ram_data, save_ram_size);
+	save_ram_dirty = 0;
+	log_kmsg("save RAM loaded\n");
+}
+
+static void save_ram_flush(void)
+{
+	uint32_t hash;
+
+	if (!save_ram_data || !save_ram_size || !save_ram_path[0])
+		return;
+	hash = save_hash(save_ram_data, save_ram_size);
+	if (hash != save_ram_hash)
+		save_ram_dirty = 1;
+	if (!save_ram_dirty)
+		return;
+	if (ensure_save_dir() < 0 || save_blob_atomic(save_ram_path, NULL, 0,
+			save_ram_data, save_ram_size) < 0) {
+		log_kmsg("save RAM write failed\n");
+		return;
+	}
+	save_ram_hash = hash;
+	save_ram_dirty = 0;
+	save_ram_last_flush_us = monotonic_us();
+	sync();
+	log_kmsg("save RAM written\n");
+}
+
+static uint64_t monotonic_us(void)
+{
+	struct timespec now;
+
+	(void)clock_gettime(CLOCK_MONOTONIC, &now);
+	return (uint64_t)now.tv_sec * 1000000u +
+		(uint64_t)now.tv_nsec / 1000u;
+}
+
+static void save_ram_poll(void)
+{
+	uint64_t now;
+	uint32_t hash;
+
+	if (!save_ram_data || !save_ram_size || ++save_ram_poll_frames <
+			SAVE_RAM_POLL_FRAMES)
+		return;
+	save_ram_poll_frames = 0;
+	hash = save_hash(save_ram_data, save_ram_size);
+	if (hash != save_ram_hash)
+		save_ram_dirty = 1;
+	if (!save_ram_dirty)
+		return;
+	now = monotonic_us();
+	if (!save_ram_last_flush_us || now - save_ram_last_flush_us >=
+			SAVE_RAM_FLUSH_US)
+		save_ram_flush();
+}
+
+static void configure_saves(const struct retro_system_info *info,
+	const char *game_path)
+{
+	char stem[256];
+
+	save_ram_data = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	save_ram_size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+	save_ram_hash = save_ram_data && save_ram_size ?
+		save_hash(save_ram_data, save_ram_size) : 0;
+	save_ram_dirty = 0;
+	save_ram_poll_frames = 0;
+	save_ram_last_flush_us = 0;
+	save_ram_path[0] = 0;
+	state_base_path[0] = 0;
+	state_key_hash = 2166136261u;
+	save_hash_string(&state_key_hash, info->library_name);
+	save_hash_string(&state_key_hash, info->library_version);
+	save_hash_string(&state_key_hash, game_path);
+	if (make_save_stem(game_path, stem, sizeof(stem)) < 0 ||
+			snprintf(save_ram_path, sizeof(save_ram_path), "%s/%s.srm",
+				host.save_dir, stem) >= (int)sizeof(save_ram_path) ||
+			snprintf(state_base_path, sizeof(state_base_path), "%s/%s",
+				host.save_dir, stem) >= (int)sizeof(state_base_path)) {
+		save_ram_path[0] = 0;
+		state_base_path[0] = 0;
+		log_kmsg("save path too long\n");
+		return;
+	}
+	if (save_ram_size > SAVE_RAM_MAX) {
+		log_kmsg("save RAM exceeds safe limit\n");
+		save_ram_data = NULL;
+		save_ram_size = 0;
+	} else if (save_ram_data && save_ram_size) {
+		if (ensure_save_dir() == 0)
+			save_ram_load();
+		else
+			log_kmsg("save directory unavailable\n");
+	}
+}
+
+struct state_file_header {
+	char magic[8];
+	uint32_t version;
+	uint32_t key_hash;
+	uint32_t payload_size;
+	uint32_t reserved;
+};
+
+_Static_assert(sizeof(struct state_file_header) == 24,
+	"unexpected save state header size");
+
+static int save_state_slot(unsigned slot)
+{
+	struct state_file_header header;
+	char path[SAVE_PATH_MAX];
+	void *data;
+	size_t size;
+
+	size = retro_serialize_size();
+	if (state_path(slot, path, sizeof(path)) < 0 || !size ||
+			size > SAVE_RAM_MAX || size > UINT32_MAX ||
+			ensure_save_dir() < 0) {
+		log_kmsg("save state unavailable\n");
+		return -1;
+	}
+	data = malloc(size);
+	if (!data) {
+		log_kmsg("save state allocation failed\n");
+		return -1;
+	}
+	if (!retro_serialize(data, size)) {
+		free(data);
+		log_kmsg("save state serialization failed\n");
+		return -1;
+	}
+	memset(&header, 0, sizeof(header));
+	memcpy(header.magic, "SF2KST01", sizeof(header.magic));
+	header.version = 1;
+	header.key_hash = state_key_hash;
+	header.payload_size = (uint32_t)size;
+	if (save_blob_atomic(path, &header, sizeof(header), data, size) < 0) {
+		free(data);
+		log_kmsg("save state write failed\n");
+		return -1;
+	}
+	free(data);
+	sync();
+	{
+		char details[96];
+
+		snprintf(details, sizeof(details),
+			"save state written slot=%u bytes=%lu\n", slot,
+			(unsigned long)(sizeof(header) + size));
+		log_kmsg(details);
+	}
+	return 0;
+}
+
+static int load_state_slot(unsigned slot)
+{
+	struct state_file_header header;
+	char path[SAVE_PATH_MAX];
+	struct stat status;
+	void *data;
+	int fd;
+
+	if (state_path(slot, path, sizeof(path)) < 0)
+		return -1;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0 || fstat(fd, &status) < 0 ||
+			read_all_fd(fd, &header, sizeof(header)) < 0 ||
+			memcmp(header.magic, "SF2KST01", sizeof(header.magic)) != 0 ||
+			header.version != 1 || header.key_hash != state_key_hash ||
+			header.payload_size == 0 || header.payload_size > SAVE_RAM_MAX ||
+			status.st_size != (off_t)(sizeof(header) + header.payload_size)) {
+		if (fd >= 0)
+			close(fd);
+		log_kmsg("save state rejected\n");
+		return -1;
+	}
+	data = malloc(header.payload_size);
+	if (!data || read_all_fd(fd, data, header.payload_size) < 0) {
+		free(data);
+		close(fd);
+		log_kmsg("save state read failed\n");
+		return -1;
+	}
+	close(fd);
+	if (!retro_unserialize(data, header.payload_size)) {
+		free(data);
+		log_kmsg("save state unserialization failed\n");
+		return -1;
+	}
+	free(data);
+	{
+		char details[96];
+
+		snprintf(details, sizeof(details),
+			"save state loaded slot=%u bytes=%u\n", slot,
+			header.payload_size);
+		log_kmsg(details);
+	}
+	return 0;
+}
+
 static int prepare_pause_ui(void)
 {
 	struct sf2000_ui_config config;
@@ -1304,7 +1677,7 @@ static int write_pause_frame(void)
 
 static void render_pause_menu(struct sf2000_ui *menu, unsigned selected)
 {
-	unsigned total = 4u + core_option_count;
+	unsigned total = 7u + core_option_count;
 	unsigned first_item = selected > 5u ? selected - 5u : 0u;
 	unsigned row;
 	char text[160];
@@ -1333,8 +1706,17 @@ static void render_pause_menu(struct sf2000_ui *menu, unsigned selected)
 		else if (item == 2u)
 			snprintf(text, sizeof(text), "%s: %u",
 				sf2000_ui_label(menu, SF2000_UI_FRAMESKIP), frameskip);
-		else if (item < 3u + core_option_count) {
-			struct core_option *option = &core_options[item - 3u];
+		else if (item == 3u)
+			snprintf(text, sizeof(text), "%s: %u",
+				sf2000_ui_label(menu, SF2000_UI_STATE_SLOT), state_slot);
+		else if (item == 4u)
+			snprintf(text, sizeof(text), "%s",
+				sf2000_ui_label(menu, SF2000_UI_SAVE_STATE));
+		else if (item == 5u)
+			snprintf(text, sizeof(text), "%s",
+				sf2000_ui_label(menu, SF2000_UI_LOAD_STATE));
+		else if (item < 6u + core_option_count) {
+			struct core_option *option = &core_options[item - 6u];
 
 			snprintf(text, sizeof(text), "%s: %s", option->label,
 				option->values[option->selected]);
@@ -1347,6 +1729,9 @@ static void render_pause_menu(struct sf2000_ui *menu, unsigned selected)
 		sf2000_ui_text(menu, 15, y, text, color,
 			(int)host.fb_width - 30);
 	}
+	if (pause_status[0])
+		sf2000_ui_text(menu, 12, (int)host.fb_height - 42,
+			pause_status, menu->config.header, (int)host.fb_width - 24);
 	sf2000_ui_text(menu, 12, (int)host.fb_height - 20,
 		"A SELECT   B RESUME", menu->config.muted,
 		(int)host.fb_width - 24);
@@ -1390,8 +1775,11 @@ static void change_pause_value(unsigned item, int direction)
 	} else if (item == 2u) {
 		frameskip = direction > 0 ? (frameskip + 1u) % 6u :
 			(frameskip + 5u) % 6u;
-	} else if (item >= 3u && item < 3u + core_option_count) {
-		struct core_option *option = &core_options[item - 3u];
+	} else if (item == 3u) {
+		state_slot = direction > 0 ? (state_slot + 1u) % SAVE_STATE_SLOTS :
+			(state_slot + SAVE_STATE_SLOTS - 1u) % SAVE_STATE_SLOTS;
+	} else if (item >= 6u && item < 6u + core_option_count) {
+		struct core_option *option = &core_options[item - 6u];
 
 		option->selected = direction > 0 ?
 			(option->selected + 1u) % option->value_count :
@@ -1405,11 +1793,13 @@ static void run_pause_menu(long frame_ns)
 {
 	unsigned selected_item = 0;
 	unsigned previous;
-	unsigned total = 4u + core_option_count;
+	unsigned total = 7u + core_option_count;
 	int resume = 0;
 
 	pause_requested = 0;
 	log_kmsg("pause menu opened\n");
+	save_ram_flush();
+	pause_status[0] = 0;
 	pause_audio(0);
 	(void)finish_game_present();
 	if (prepare_pause_ui() < 0) {
@@ -1467,6 +1857,23 @@ static void run_pause_menu(long frame_ns)
 				resume = 1;
 			else if (selected_item == total - 1u)
 				stopping = 1;
+			else if (selected_item == 4u) {
+				if (save_state_slot(state_slot) == 0)
+					snprintf(pause_status, sizeof(pause_status),
+						"STATE SAVED - SLOT %u", state_slot);
+				else
+					snprintf(pause_status, sizeof(pause_status),
+						"STATE SAVE FAILED - SLOT %u", state_slot);
+				draw_pause_menu(&pause_ui, selected_item);
+			} else if (selected_item == 5u) {
+				if (load_state_slot(state_slot) == 0)
+					snprintf(pause_status, sizeof(pause_status),
+						"STATE LOADED - SLOT %u", state_slot);
+				else
+					snprintf(pause_status, sizeof(pause_status),
+						"STATE LOAD FAILED - SLOT %u", state_slot);
+				draw_pause_menu(&pause_ui, selected_item);
+			}
 			else {
 				change_pause_value(selected_item, 1);
 				draw_pause_menu(&pause_ui, selected_item);
@@ -1709,6 +2116,7 @@ int main(int argc, char **argv)
 	loading_game = 0;
 	log_kmsg("ROM load complete\n");
 	retained_stage("frontend-rom-done", 6);
+	configure_saves(&info, game.path);
 	retro_get_system_av_info(&av);
 	host.fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
 	host.audio_rate = av.timing.sample_rate > 1.0 ?
@@ -1754,6 +2162,7 @@ int main(int argc, char **argv)
 			run_pause_menu(frame_ns);
 			continue;
 		}
+		save_ram_poll();
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);
 			continue;
@@ -1783,6 +2192,7 @@ int main(int argc, char **argv)
 	}
 	if (pause_ui_ready)
 		sf2000_ui_close(&pause_ui);
+	save_ram_flush();
 	retro_unload_game();
 	retro_deinit();
 	close_platform();

@@ -82,6 +82,7 @@ struct retro_framebuffer {
 #define RETRO_MEMORY_ACCESS_WRITE (1u << 0)
 #define RETRO_MEMORY_ACCESS_READ (1u << 1)
 #define RETRO_MEMORY_TYPE_CACHED (1u << 0)
+#define RETRO_MEMORY_SAVE_RAM 0
 
 typedef bool (*retro_environment_t)(unsigned, void *);
 typedef void (*retro_video_refresh_t)(const void *, unsigned, unsigned, size_t);
@@ -104,5 +105,10 @@ void retro_get_system_av_info(struct retro_system_av_info *);
 bool retro_load_game(const struct retro_game_info *);
 void retro_unload_game(void);
 void retro_run(void);
+void *retro_get_memory_data(unsigned id);
+size_t retro_get_memory_size(unsigned id);
+size_t retro_serialize_size(void);
+bool retro_serialize(void *data, size_t size);
+bool retro_unserialize(const void *data, size_t size);
 
 #endif
