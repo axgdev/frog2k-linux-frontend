@@ -1,0 +1,42 @@
+--- a/libretro/core/libretro-core.cpp
++++ b/libretro/core/libretro-core.cpp
+@@ -70,1 +70,1 @@
+-static const char *DEBUG_LOG_PATH = "/mnt/sda1/log.txt";
++static const char *DEBUG_LOG_PATH = "/mnt/sd/log.txt";
+@@ -690,6 +690,6 @@
+-#define QPSX_VERSION "398"
+-#define QPSX_GLOBAL_CONFIG_PATH "/mnt/sda1/cores/config/pcsx4all.cfg"
+-#define QPSX_NATIVE_CONFIG_PATH "/mnt/sda1/cores/config/psx_native.cfg"
+-#define QPSX_ASM_CONFIG_PATH "/mnt/sda1/cores/config/psx_asm.cfg"
+-#define QPSX_CRASH_MARKER_PATH "/mnt/sda1/cores/config/psx_crash.tmp"
+-#define QPSX_STARTUP_CONFIG_PATH "/mnt/sda1/cores/config/psx_startup.cfg"
++#define QPSX_VERSION "398"
++#define QPSX_GLOBAL_CONFIG_PATH "/mnt/sd/cores/config/pcsx4all.cfg"
++#define QPSX_NATIVE_CONFIG_PATH "/mnt/sd/cores/config/psx_native.cfg"
++#define QPSX_ASM_CONFIG_PATH "/mnt/sd/cores/config/psx_asm.cfg"
++#define QPSX_CRASH_MARKER_PATH "/mnt/sd/cores/config/psx_crash.tmp"
++#define QPSX_STARTUP_CONFIG_PATH "/mnt/sd/cores/config/psx_startup.cfg"
+@@ -1547,1 +1547,1 @@
+-        strcpy(fb_game_dir, "/mnt/sda1/ROMS");
++        strcpy(fb_game_dir, "/mnt/sd/ROMS");
+@@ -1924,1 +1924,1 @@
+-    snprintf(path, maxlen, "/mnt/sda1/cores/config/%s.cfg", base);
++    snprintf(path, maxlen, "/mnt/sd/cores/config/%s.cfg", base);
+@@ -1931,1 +1931,1 @@
+-        snprintf(path, maxlen, "/mnt/sda1/cores/config/%s.cfg", CdromId);
++        snprintf(path, maxlen, "/mnt/sd/cores/config/%s.cfg", CdromId);
+@@ -2135,1 +2135,1 @@
+-    int dir = fs_opendir("/mnt/sda1/cores/config");
++    int dir = fs_opendir("/mnt/sd/cores/config");
+@@ -2159,1 +2159,1 @@
+-        snprintf(cfg_path, sizeof(cfg_path), "/mnt/sda1/cores/config/%s", entry.d_name);
++        snprintf(cfg_path, sizeof(cfg_path), "/mnt/sd/cores/config/%s", entry.d_name);
+@@ -3870,1 +3870,1 @@
+-    snprintf(Config.BiosDir, sizeof(Config.BiosDir), "/mnt/sda1/bios");
++    snprintf(Config.BiosDir, sizeof(Config.BiosDir), "/mnt/sd/bios");
+@@ -3887,1 +3887,1 @@
+-        static const char* PSX_SAVE_DIR = "/mnt/sda1/ROMS/SAVE/PSX";
++        static const char* PSX_SAVE_DIR = "/mnt/sd/ROMS/SAVE/PSX";
+@@ -3895,1 +3895,1 @@
+-        fs_mkdir("/mnt/sda1/ROMS/SAVE", 0755);
++        fs_mkdir("/mnt/sd/ROMS/SAVE", 0755);

@@ -1,0 +1,8 @@
+--- a/src/burn/burn.cpp
++++ b/src/burn/burn.cpp
+@@ -217,1 +217,1 @@
+-							nRet = wcstombs(szFullNameA, pszCurrentNameW, 256);
++							nRet = sf2000_mufrog_wcstombs(szFullNameA, pszCurrentNameW, 256);
+@@ -284,1 +284,1 @@
+-			if (wcstombs(pszStringA, pszStringW, 256) != -1U) {
++			if (sf2000_mufrog_wcstombs(pszStringA, pszStringW, 256) != -1U) {

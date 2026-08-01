@@ -1,0 +1,8 @@
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -87,4 +87,5 @@
+ else
+ SOURCES += $(CORE_DIR)/ppu_.c
++SOURCES += $(CORE_DIR)/rops.c
+ SOURCES += $(CORE_DIR)/gfx.c
+ SOURCES += $(CORE_DIR)/tile.c

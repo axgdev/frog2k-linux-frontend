@@ -1,0 +1,10 @@
+--- a/Src/Memory/romMapperTurboRTimer.h
++++ b/Src/Memory/romMapperTurboRTimer.h
+@@ -33,1 +33,1 @@
+-int romMapperTurboRTimerCreate();
++int romMapperTurboRTimerCreate(int unused);
+--- a/Src/Memory/romMapperTurboRTimer.c
++++ b/Src/Memory/romMapperTurboRTimer.c
+@@ -114,1 +114,1 @@
+-int romMapperTurboRTimerCreate() 
++int romMapperTurboRTimerCreate(int unused) 

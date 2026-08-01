@@ -1,0 +1,26 @@
+--- a/source/mathhelpers.h
++++ b/source/mathhelpers.h
+@@ -8,1 +8,1 @@
+-float lerp (float a, float b, float t);
++float fake08_lerp (float a, float b, float t);
+--- a/source/mathhelpers.cpp
++++ b/source/mathhelpers.cpp
+@@ -14,1 +14,1 @@
+-float lerp(float a, float b, float t) {
++float fake08_lerp(float a, float b, float t) {
+--- a/source/Audio.cpp
++++ b/source/Audio.cpp
+@@ -515,1 +515,1 @@
+-            freq = lerp(key_to_freq(prev_note.getKey()), freq, tmod);
++            freq = fake08_lerp(key_to_freq(prev_note.getKey()), freq, tmod);
+@@ -517,1 +517,1 @@
+-                volume = lerp(fast_div7(prev_note.getVolume()), volume, tmod);
++                volume = fake08_lerp(fast_div7(prev_note.getVolume()), volume, tmod);
+@@ -526,1 +526,1 @@
+-            freq = lerp(freq, freq * 1.059463094359f, t);
++            freq = fake08_lerp(freq, freq * 1.059463094359f, t);
+--- a/libs/simpleini/SimpleIni.h
++++ b/libs/simpleini/SimpleIni.h
+@@ -2000,1 +2000,1 @@
+-        uLen = wcslen((const wchar_t *)a_pString);
++        uLen = sf2000_mufrog_wcslen((const wchar_t *)a_pString);

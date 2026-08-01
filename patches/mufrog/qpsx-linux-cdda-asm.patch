@@ -1,0 +1,9 @@
+--- a/Makefile.libretro
++++ b/Makefile.libretro
+@@ -159,7 +159,7 @@
+ # QPSX v111: MIPS32 ASM CDDA mixer (SF2000 only)
+-ifeq ($(platform), sf2000)
++ifeq ($(RECOMPILER), mips)
+ OBJS += \
+ 	src/spu/$(SPU)/cdda_mix_asm.o
+ endif

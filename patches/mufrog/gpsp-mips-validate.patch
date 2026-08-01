@@ -1,0 +1,5 @@
+--- a/memmap.c
++++ b/memmap.c
+@@ -32,1 +32,1 @@
+-          validate_addr_section_mips(ptr, size)
++          validate_addr_section_mips(ptr, size, 256)

@@ -750,7 +750,11 @@ static const struct core_route core_routes[] = {
 	{ "GB|GBC", "gb|gbc",
 		"/mnt/sd/sf2000/cores/sf2000-gearboy", "Gearboy", 0 },
 	{ "GBA", "gba", GPSP_PATH, "gpSP", 40 },
+	{ "GBA", "gba",
+		"/mnt/sd/sf2000/cores/sf2000-gpsp-multicore", "gpSP multicore", 40 },
 	{ "NES|FDS", "nes|fds", FCEUMM_PATH, "FCEUmm", 0 },
+	{ "NES|FDS", "nes|fds",
+		"/mnt/sd/sf2000/cores/sf2000-fceumm-prosty", "FCEUmm Prosty", 0 },
 	{ "MD|GENESIS|MEGADRIVE|SMS|GG|32X",
 		"md|gen|smd|sms|gg|sg|32x|cue|chd|iso",
 		"/mnt/sd/sf2000/cores/sf2000-picodrive", "PicoDrive", 0 },
@@ -758,6 +762,14 @@ static const struct core_route core_routes[] = {
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2005", "Snes9x 2005", 0 },
 	{ "SNES9X2002", "sfc|smc",
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2002", "Snes9x 2002", 0 },
+	{ "SNES|SFC", "sfc|smc",
+		"/mnt/sd/sf2000/cores/sf2000-snes9x2005-prosty", "Snes9x 2005 Prosty", 0 },
+	{ "SNES9X2002", "sfc|smc",
+		"/mnt/sd/sf2000/cores/sf2000-snes9x2002-prosty", "Snes9x 2002 Prosty", 0 },
+	{ "GB|GBC", "gb|gbc",
+		"/mnt/sd/sf2000/cores/sf2000-gambatte-prosty", "Gambatte Prosty", 0 },
+	{ "NES|FDS", "nes|fds",
+		"/mnt/sd/sf2000/cores/sf2000-quicknes-prosty", "QuickNES Prosty", 0 },
 	{ "PCE|PCENGINE|SGX", "pce|sgx|cue|chd",
 		"/mnt/sd/sf2000/cores/sf2000-pce-fast", "PCE Fast", 0 },
 	{ "PS|PSX|PLAYSTATION", "bin|iso|img|cue|pbp",
@@ -770,6 +782,8 @@ static const struct core_route core_routes[] = {
 		"/mnt/sd/sf2000/cores/sf2000-stella2014", "Stella 2014", 0 },
 	{ "ATARI5200|A5200", "a52|bin",
 		"/mnt/sd/sf2000/cores/sf2000-a5200", "A5200", 0 },
+	{ "ATARI800|A800|ATARI8", "a8|atr|xex|xfd|dcm|cas",
+		"/mnt/sd/sf2000/cores/sf2000-atari800lib", "Atari 800", 0 },
 	{ "ATARI7800|A7800", "a78|bin",
 		"/mnt/sd/sf2000/cores/sf2000-prosystem", "ProSystem", 0 },
 	{ "LYNX", "lnx",
@@ -918,9 +932,10 @@ static const struct core_route *choose_nes_core(int input,
 {
 	const struct core_route *choices[] = {
 		route_named("FCEUmm"), route_named("QuickNES"),
+		route_named("FCEUmm Prosty"), route_named("QuickNES Prosty"),
 	};
 
-	return choose_core(input, fallback, choices, 2u, "NES");
+	return choose_core(input, fallback, choices, 4u, "NES");
 }
 
 static const struct core_route *choose_snes_core(int input,
@@ -928,9 +943,21 @@ static const struct core_route *choose_snes_core(int input,
 {
 	const struct core_route *choices[] = {
 		route_named("Snes9x 2005"), route_named("Snes9x 2002"),
+		route_named("Snes9x 2005 Prosty"),
+		route_named("Snes9x 2002 Prosty"),
 	};
 
-	return choose_core(input, fallback, choices, 2u, "SNES");
+	return choose_core(input, fallback, choices, 4u, "SNES");
+}
+
+static const struct core_route *choose_gba_core(int input,
+	const struct core_route *fallback)
+{
+	const struct core_route *choices[] = {
+		route_named("gpSP"), route_named("gpSP multicore"),
+	};
+
+	return choose_core(input, fallback, choices, 2u, "GBA");
 }
 
 static const struct core_route *choose_gb_core(int input,
@@ -938,9 +965,10 @@ static const struct core_route *choose_gb_core(int input,
 {
 	const struct core_route *choices[] = {
 		route_named("Gambatte"), route_named("Gearboy"),
+		route_named("Gambatte Prosty"),
 	};
 
-	return choose_core(input, fallback, choices, 2u, "GB");
+	return choose_core(input, fallback, choices, 3u, "GB");
 }
 
 static int media_path(const char *p)
@@ -1019,6 +1047,10 @@ static void launch_selected(int input)
 				(!strcasecmp(extension, ".gb") ||
 					 !strcasecmp(extension, ".gbc"))) {
 			route = choose_gb_core(input, route);
+			if (!route)
+				return;
+		} else if (extension && !strcasecmp(extension, ".gba")) {
+			route = choose_gba_core(input, route);
 			if (!route)
 				return;
 		}

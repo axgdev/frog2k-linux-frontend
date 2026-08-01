@@ -3,6 +3,8 @@ CXX ?= c++
 CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-linux-uclibc-
 SF2000_CC ?= $(CROSS_COMPILE)gcc
 SF2000_CXX ?= $(CROSS_COMPILE)g++
+SF2000_OBJCOPY ?= $(CROSS_COMPILE)objcopy
+SF2000_NM ?= $(CROSS_COMPILE)nm
 CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
@@ -31,6 +33,9 @@ QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
 SF2000_LINUX_DIR ?= ../sf2000_linux
+MUFROG_ROOT ?= /root/host-frogdev/universal/temp/mufrog-commandc
+MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
+MUFROG_SDK ?= $(MUFROG_ROOT)/unifrog-hcrtos-sdk
 GE_DIR := $(SF2000_LINUX_DIR)/ge
 GE_SOURCES := $(GE_DIR)/hcge_linux.c $(GE_DIR)/hcge_node.c
 AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
@@ -90,9 +95,13 @@ GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
 	-DFRONTEND_SUPPORTS_RGB565
 COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	compat/compat_strcasestr.c compat/compat_strl.c compat/fopen_utf8.c \
-	encodings/encoding_crc32.c \
+	encodings/encoding_crc32.c encodings/encoding_deflate.c \
 	file/file_path.c file/file_path_io.c \
 	streams/file_stream.c streams/file_stream_transforms.c \
+	streams/trans_stream.c streams/trans_stream_zlib.c \
+	streams/trans_stream_deflate.c streams/trans_stream_pipe.c \
+	streams/rzip_stream.c \
+	formats/png/rpng.c \
 	string/stdstring.c time/rtime.c vfs/vfs_implementation.c
 COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_compat.o
 LIBRETRO_COMMON := build/libretro-common-linux.a
@@ -122,9 +131,123 @@ PCE_FAST_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 \
 	-DFRONTEND_SUPPORTS_RGB565 -DNO_THREADS
 PCE_FAST_CXXFLAGS := $(PCE_FAST_CFLAGS) -fno-rtti
 
+# Mufrog's firmware archives use fixed-address HCRTOS objects.  The Linux
+# NOMMU loader only accepts static-PIE executables, so these cores are rebuilt
+# from the same pinned checkouts with the Linux o32 PIC ABI below.
+MUFROG_CORE_CFLAGS := -EL -march=mips32 -mtune=mips32 -mabi=32 \
+	-msoft-float -G0 -mabicalls -fPIC -Os -fomit-frame-pointer \
+	-ffunction-sections -fdata-sections -fno-unwind-tables \
+	-fno-asynchronous-unwind-tables -ffast-math -D_GNU_SOURCE \
+	-D__LIBRETRO__
+MUFROG_CORE_INCLUDES := \
+	-I$(SF2000_SYSROOT)/usr/include \
+	-I$(MUFROG_SOURCE_ROOT)/libretro-common/include \
+	-idirafter $(MUFROG_SDK)/include \
+	-idirafter $(MUFROG_SDK)/include/hcrtos \
+	-idirafter $(MUFROG_SDK)/include/newlib
+LIBRETRO_API_SYMBOLS := \
+	retro_set_environment retro_set_video_refresh retro_set_audio_sample \
+	retro_set_audio_sample_batch retro_set_input_poll retro_set_input_state \
+	retro_init retro_deinit retro_api_version retro_get_system_info \
+	retro_get_system_av_info retro_load_game retro_unload_game retro_run \
+	retro_get_memory_data retro_get_memory_size retro_serialize_size \
+	retro_serialize retro_unserialize
+
+# id:source-directory:makefile:source-archive:symbol-prefix:extra-make-vars
+MUFROG_CORE_SPECS := \
+	gpsp-multicore:gpsp_multicore:Makefile:gpsp_multicore_libretro_sf2000.a:gpsp_multicore: \
+	picodrive:picodrive:Makefile.libretro:picodrive_libretro_sf2000.a:picodrive:PLATFORM_TREMOR=1 \
+	qpsx:sf2000-qpsx-playstation-emulator:Makefile.libretro:pcsx4all_libretro_sf2000.a:qpsx: \
+	mame2000:libretro-mame2000:Makefile:mame2000_libretro_sf2000.a:mame2000: \
+	fbalpha2012:fbalpha2012/svn-current/trunk:makefile.libretro:fbalpha2012_libretro_sf2000.a:fbalpha2012:PROFILE=performance \
+	a5200:a5200:Makefile:a5200_libretro_sf2000.a:a5200: \
+	atari800lib:libretro-atari800lib:Makefile:libatari800_libretro_sf2000.a:atari800lib:A5200=0 \
+	handy:libretro-handy:Makefile:handy_libretro_sf2000.a:handy: \
+	race:RACE:Makefile:race_libretro_sf2000.a:race: \
+	beetle-cygne:libretro-beetle-wswan:Makefile:mednafen_wswan_libretro_sf2000.a:beetle_cygne: \
+	gearcoleco:Gearcoleco:Makefile:gearcoleco_libretro_sf2000.a:gearcoleco: \
+	frodo:libretro-frodo-prosty:Makefile.libretro:frodo_libretro_sf2000.a:frodo_prosty:EMUTYPE=frodo \
+	fake08:fake-08-prosty:Makefile:fake08_libretro_sf2000.a:fake08_prosty: \
+	bluemsx:libretro-blueMSX-prosty:Makefile.libretro:bluemsx_libretro_sf2000.a:bluemsx_prosty: \
+	snes9x2005-prosty:snes9x2005-prosty:Makefile:snes9x2005_libretro_sf2000.a:snes9x2005_prosty:USE_BLARGG_APU=0 \
+snes9x2002-prosty:snes9x2002-prosty:Makefile:snes9x2002_libretro_sf2000.a:snes9x2002_prosty: \
+	gambatte-prosty:libretro-gambatte-prosty:Makefile.libretro:gambatte_libretro_sf2000.a:gambatte_prosty:HAVE_NETWORK=0 \
+	quicknes-prosty:QuickNES_Core-prosty:Makefile:quicknes_libretro_sf2000.a:quicknes_prosty: \
+	fceumm-prosty:libretro-fceumm-prosty:Makefile.libretro:fceumm_libretro_sf2000.a:fceumm_prosty:
+
+mufrog_key = $(subst -,_,$(1))
+
+define MUFROG_CORE_REGISTER
+MUFROG_$(call mufrog_key,$(1))_SOURCE := $(MUFROG_SOURCE_ROOT)/$(2)
+MUFROG_$(call mufrog_key,$(1))_MAKEFILE := $(3)
+MUFROG_$(call mufrog_key,$(1))_ARCHIVE := $(4)
+MUFROG_$(call mufrog_key,$(1))_PREFIX := $(5)
+MUFROG_$(call mufrog_key,$(1))_ARGS := $(6)
+endef
+$(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,$(subst :, ,$(spec))),$(word 2,$(subst :, ,$(spec))),$(word 3,$(subst :, ,$(spec))),$(word 4,$(subst :, ,$(spec))),$(word 5,$(subst :, ,$(spec))),$(word 6,$(subst :, ,$(spec))))))
+MUFROG_picodrive_EXTRA_CFLAGS := -include$(SF2000_SYSROOT)/usr/include/wchar.h \
+	-include$(abspath src/mufrog_picodrive_config.h) -DDR_MP3_NO_STDIO -DUSE_TREMOR \
+	-DEMU_F68K -D_USE_CZ80 -DDRC_SH2
+MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
+MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
+	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
+	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
+	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
+	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
+	-include$(abspath src/mufrog_qpsx_config.h)
+MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
+	patches/mufrog/qpsx-linux-cdda-asm.patch
+MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
+MUFROG_handy_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/handy/lynx) -DWANT_CRC32
+MUFROG_fbalpha2012_EXTRA_CFLAGS := -include$(abspath src/mufrog_wchar_compat.h) \
+	-D__LIBRETRO_OPTIMIZATIONS__
+MUFROG_fbalpha2012_PATCHES := patches/mufrog/fbalpha-wchar.patch
+MUFROG_race_EXTRA_CFLAGS := -DCZ80 -D_MAX_PATH=2048
+MUFROG_beetle_cygne_EXTRA_CFLAGS := -DMEDNAFEN_VERSION_NUMERIC=931
+MUFROG_gearcoleco_WORKDIR := platforms/libretro
+MUFROG_gearcoleco_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/gearcoleco/platforms/shared/dependencies/miniz)
+MUFROG_fake08_WORKDIR := platform/libretro
+MUFROG_fake08_EXTRA_CFLAGS := \
+  -I$(abspath build/mufrog/src/fake08/libs/z8lua) \
+  -I$(abspath build/mufrog/src/fake08/libs/simpleini) \
+  -I$(abspath build/mufrog/src/fake08/libs/lodepng) \
+  -I$(abspath build/mufrog/src/fake08/libs/miniz) \
+  -include$(abspath src/mufrog_wchar_compat.h)
+MUFROG_fake08_PATCHES := patches/mufrog/fake08-cxx17.patch
+MUFROG_snes9x2005_prosty_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/snes9x2005-prosty/source)
+MUFROG_snes9x2002_prosty_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/snes9x2002-prosty/source) -DUSE_SA1
+MUFROG_snes9x2002_prosty_PATCHES := patches/mufrog/snes9x2002-rops.patch
+MUFROG_bluemsx_EXTRA_CFLAGS := -Wno-error=incompatible-pointer-types
+MUFROG_bluemsx_PATCHES := patches/mufrog/bluemsx-linux-compat.patch
+MUFROG_gambatte_prosty_EXTRA_CFLAGS := \
+	-I$(abspath build/mufrog/src/gambatte-prosty/libgambatte/include) \
+	-I$(abspath build/mufrog/src/gambatte-prosty/libgambatte/src) \
+	-I$(abspath build/mufrog/src/gambatte-prosty/common) \
+	-I$(abspath build/mufrog/src/gambatte-prosty/libgambatte/libretro) \
+	-DHAVE_STDINT_H
+MUFROG_fceumm_prosty_EXTRA_CFLAGS := -DFCEU_VERSION_NUMERIC=9813
+MUFROG_mame2000_ADAPTER_OBJECTS := build/mufrog/mame2000-libco.o
+MUFROG_frodo_PATCHES := patches/mufrog/frodo-autoload-visibility.patch
+MUFROG_frodo_EXTRA_CFLAGS := \
+	-I$(abspath build/mufrog/src/frodo/libretro/core) \
+	-I$(abspath build/mufrog/src/frodo/libretro/include) \
+	-I$(abspath build/mufrog/src/frodo/Src/libretro-common/include) \
+	-I$(abspath build/mufrog/src/frodo/Src) \
+	-I$(abspath build/mufrog/src/frodo/Src/zlib)
+MUFROG_gpsp_multicore_EXTRA_CFLAGS := -DSF2000 -DMMAP_JIT_CACHE \
+	-DHAVE_DYNAREC -DMIPS_ARCH -DGPSP_DYNAREC_SAFE_SMC_PATCH \
+	-DGPSP_DYNAREC_SAFE_FALLBACK -DGPSP_ROM_BUFFER_MMAP \
+	-DROM_BUFFER_SIZE=32 \
+	-DFRONTEND_SUPPORTS_RGB565 -DSF2000_OPTIMIZATION_LEVEL=2
+MUFROG_gpsp_multicore_PATCHES := patches/mufrog/gpsp-mips-validate.patch
+MUFROG_gpsp_multicore_EXTRA_ARGS := HAVE_DYNAREC=1 CPU_ARCH=mips MMAP_JIT_CACHE=1 SF2000=1
+
+MUFROG_CORE_EXECUTABLES := $(foreach spec,$(MUFROG_CORE_SPECS),build/sf2000-$(word 1,$(subst :, ,$(spec))))
+MUFROG_MEMORY_STREAM := build/mufrog/libretro-memory-stream.a
+
 .PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
-	stella2014 gearboy pce-fast core-packages integrated
+	stella2014 gearboy pce-fast mufrog-cores core-packages integrated
 
 all: check
 
@@ -290,7 +413,7 @@ pce-fast: $(PCE_FAST_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast
+core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores
 	mkdir -p build/core-packages/licenses
 	cp build/sf2000-quicknes build/core-packages/
 	cp build/sf2000-prosystem build/core-packages/
@@ -299,6 +422,7 @@ core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-f
 	cp build/sf2000-stella2014 build/core-packages/
 	cp build/sf2000-gearboy build/core-packages/
 	cp build/sf2000-pce-fast build/core-packages/
+	cp $(MUFROG_CORE_EXECUTABLES) build/core-packages/
 	cp $(QUICKNES_DIR)/LICENSE build/core-packages/licenses/quicknes-LICENSE
 	cp $(PROSYSTEM_DIR)/License.txt build/core-packages/licenses/prosystem-LICENSE
 	cp $(SNES9X2005_DIR)/copyright build/core-packages/licenses/snes9x2005-copyright
@@ -306,6 +430,24 @@ core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-f
 	cp $(STELLA_DIR)/stella/license.txt build/core-packages/licenses/stella2014-license.txt
 	cp $(GEARBOY_DIR)/LICENSE build/core-packages/licenses/gearboy-LICENSE
 	cp $(PCE_FAST_DIR)/COPYING build/core-packages/licenses/pce-fast-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/gpsp_multicore/COPYING build/core-packages/licenses/gpsp-multicore-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/picodrive/COPYING build/core-packages/licenses/picodrive-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/sf2000-qpsx-playstation-emulator/LICENSE build/core-packages/licenses/qpsx-LICENSE
+	cp $(MUFROG_SOURCE_ROOT)/fbalpha2012/docs/COPYING build/core-packages/licenses/fbalpha2012-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/a5200/License.txt build/core-packages/licenses/a5200-License.txt
+	cp $(MUFROG_SOURCE_ROOT)/libretro-atari800lib/atari800/COPYING build/core-packages/licenses/atari800lib-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/libretro-handy/lynx/license.txt build/core-packages/licenses/handy-license.txt
+	cp $(MUFROG_SOURCE_ROOT)/RACE/license.txt build/core-packages/licenses/race-license.txt
+	cp $(MUFROG_SOURCE_ROOT)/libretro-beetle-wswan/COPYING build/core-packages/licenses/beetle-cygne-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/Gearcoleco/LICENSE build/core-packages/licenses/gearcoleco-LICENSE
+	cp $(MUFROG_SOURCE_ROOT)/libretro-frodo-prosty/COPYING build/core-packages/licenses/frodo-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/fake-08-prosty/LICENSE.MD build/core-packages/licenses/fake08-LICENSE.MD
+	cp $(MUFROG_SOURCE_ROOT)/libretro-blueMSX-prosty/license.txt build/core-packages/licenses/bluemsx-license.txt
+	cp $(MUFROG_SOURCE_ROOT)/snes9x2005-prosty/copyright build/core-packages/licenses/snes9x2005-prosty-copyright
+	cp $(MUFROG_SOURCE_ROOT)/snes9x2002-prosty/src/copyright.h build/core-packages/licenses/snes9x2002-prosty-copyright.h
+	cp $(MUFROG_SOURCE_ROOT)/libretro-gambatte-prosty/COPYING build/core-packages/licenses/gambatte-prosty-COPYING
+	cp $(MUFROG_SOURCE_ROOT)/QuickNES_Core-prosty/LICENSE build/core-packages/licenses/quicknes-prosty-LICENSE
+	cp $(MUFROG_SOURCE_ROOT)/libretro-fceumm-prosty/Copying build/core-packages/licenses/fceumm-prosty-Copying
 
 build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h \
 		include/sf2000_browser_ui.h include/sf2000_log.h
@@ -593,6 +735,101 @@ $(PCE_FAST_CORE): $(PCE_FAST_DIR)/.git Makefile
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		GIT_VERSION='$(PCE_FAST_REV)' fpic= TARGET='$(abspath $@)'
 
+define MUFROG_CORE_RULE
+build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES)
+	mkdir -p '$$(@D)'
+	test -d '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)'
+	cp -a '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)/.' '$$(@D)/'
+	for patch_file in $(MUFROG_$(call mufrog_key,$(1))_PATCHES); do \
+		patch -d '$$(@D)' -p1 < "$$$$patch_file"; \
+	done
+	touch '$$@'
+
+build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile \
+		src/mufrog_picodrive_config.h
+	mkdir -p '$$(@D)'
+	find 'build/mufrog/src/$(1)' -type f -name '*.o' -delete
+	find 'build/mufrog/src/$(1)' -type f -name '*.a' -delete
+	$(MAKE) -C 'build/mufrog/src/$(1)/$(MUFROG_$(call mufrog_key,$(1))_WORKDIR)' \
+		-f '$(MUFROG_$(call mufrog_key,$(1))_MAKEFILE)' \
+		platform=unix STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		TARGET='$(abspath $$@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
+		AR='$(CROSS_COMPILE)ar' \
+		CFLAGS='$(MUFROG_CORE_CFLAGS) \
+			-I$(abspath build/mufrog/src/$(1)) \
+			-I$(abspath build/mufrog/src/$(1))/src \
+			-I$(abspath build/mufrog/src/$(1))/emu \
+			-I$(abspath build/mufrog/src/$(1))/libretro \
+			-I$(abspath build/mufrog/src/$(1))/libretro/libretro-common/include \
+			-I$(abspath build/mufrog/src/$(1))/platform/common/tremor \
+			-I$(abspath build/mufrog/src/$(1))/zlib \
+			$(MUFROG_CORE_INCLUDES) $(MUFROG_$(call mufrog_key,$(1))_EXTRA_CFLAGS)' \
+		CXXFLAGS='$(MUFROG_CORE_CFLAGS) \
+			-I$(abspath build/mufrog/src/$(1)) \
+			-I$(abspath build/mufrog/src/$(1))/src \
+			-I$(abspath build/mufrog/src/$(1))/emu \
+			-I$(abspath build/mufrog/src/$(1))/libretro \
+			-I$(abspath build/mufrog/src/$(1))/libretro/libretro-common/include \
+			-I$(abspath build/mufrog/src/$(1))/platform/common/tremor \
+			-I$(abspath build/mufrog/src/$(1))/zlib \
+			$(MUFROG_CORE_INCLUDES) $(MUFROG_$(call mufrog_key,$(1))_EXTRA_CFLAGS)' \
+		$(MUFROG_$(call mufrog_key,$(1))_ARGS) \
+		$(MUFROG_$(call mufrog_key,$(1))_EXTRA_ARGS)
+	test -s '$$@'
+
+build/mufrog/$(1)_libretro_linux.a: build/mufrog/raw/$(1).a Makefile
+	mkdir -p '$$(@D)'
+	$(SF2000_OBJCOPY) $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=$(MUFROG_$(call mufrog_key,$(1))_PREFIX)_$(symbol)) \
+		'$$<' '$$@'
+	set -eu; symbols='$$@.symbols'; trap 'rm -f "$$$$symbols"' EXIT HUP INT TERM; \
+	$(SF2000_NM) -g --defined-only '$$@' | awk '{print $$$$3}' > "$$$$symbols"; \
+	for symbol in $(LIBRETRO_API_SYMBOLS); do \
+		grep -Fqx '$(MUFROG_$(call mufrog_key,$(1))_PREFIX)_'$$$$symbol "$$$$symbols" || { \
+			echo "missing renamed libretro entry point: $$$$symbol" >&2; exit 1; }; \
+		if grep -Fqx "$$$$symbol" "$$$$symbols"; then \
+			echo "unrenamed libretro entry point remains: $$$$symbol" >&2; exit 1; \
+		fi; \
+	done
+
+build/mufrog/adapter-$(1).o: src/core_adapter.c include/libretro_min.h Makefile
+	mkdir -p '$$(@D)'
+	$(SF2000_CC) $(SF2000_CFLAGS) -DCORE_PREFIX=$(MUFROG_$(call mufrog_key,$(1))_PREFIX) -c -o '$$@' '$$<'
+
+build/sf2000-$(1): build/mufrog/$(1)_libretro_linux.a \
+		build/mufrog/adapter-$(1).o $(SF2000_HOST_OBJECTS) \
+		$(LIBRETRO_COMMON) $(MUFROG_MEMORY_STREAM) \
+		$(MUFROG_$(call mufrog_key,$(1))_ADAPTER_OBJECTS)
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o '$$@' \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
+		build/mufrog/adapter-$(1).o '$$<' $(MUFROG_MEMORY_STREAM) \
+		$(MUFROG_$(call mufrog_key,$(1))_ADAPTER_OBJECTS) \
+		$(LIBRETRO_COMMON) -lm \
+		$(SF2000_ENDFILES)
+endef
+$(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_RULE,$(word 1,$(subst :, ,$(spec))))))
+
+build/mufrog/qpsx-adapter.o: src/qpsx_adapter.c Makefile
+	mkdir -p '$(@D)'
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
+
+build/mufrog/mame2000-libco.o: build/mufrog/src/mame2000/.source Makefile
+	mkdir -p '$(@D)'
+	$(SF2000_CC) $(MUFROG_CORE_CFLAGS) \
+		-I$(abspath build/mufrog/src/mame2000/src/libretro/libretro-common/include) \
+		-c -o '$@' \
+		'build/mufrog/src/mame2000/src/libretro/libretro-common/libco/ucontext.c'
+
+build/mufrog/libretro-memory-stream.o: \
+		$(MUFROG_SOURCE_ROOT)/libretro-common/streams/memory_stream.c Makefile
+	mkdir -p '$(@D)'
+	$(SF2000_CC) $(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) -c -o '$@' '$<'
+
+$(MUFROG_MEMORY_STREAM): build/mufrog/libretro-memory-stream.o
+	mkdir -p '$(@D)'
+	$(CROSS_COMPILE)ar rcs '$@' '$<'
+
+mufrog-cores: $(MUFROG_CORE_EXECUTABLES)
+
 $(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git
 	mkdir -p build
 	$(SF2000_CC) $(filter-out -Werror,$(SF2000_CFLAGS)) \
@@ -603,7 +840,8 @@ $(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git
 build/common/%.o: $(COMMON_DIR)/.git
 	mkdir -p '$(dir $@)'
 	$(SF2000_CC) $(filter-out -Werror,$(SF2000_CFLAGS)) -include stdlib.h \
-		-I$(COMMON_DIR)/include -c -o '$@' '$(COMMON_DIR)/$*.c'
+		-I$(COMMON_DIR)/include -I$(MUFROG_SOURCE_ROOT)/picodrive/zlib \
+		-c -o '$@' '$(COMMON_DIR)/$*.c'
 
 build/utf8_compat.o: src/utf8_compat.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
