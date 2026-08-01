@@ -84,7 +84,11 @@ struct entry {
 };
 static struct entry entries[MAX_ENTRIES];
 static unsigned entry_count, selected, first;
-static uint16_t framebuffer[MAX_FRAME_PIXELS];
+/* Render into normal cached RAM, then publish that immutable image through
+ * the GE.  The fbdev mapping is also the GE destination; using it as the UI
+ * renderer's working buffer lets CPU stores and a later GE write share cache
+ * ownership in a way the small target cannot reliably make coherent. */
+static uint16_t ui_pixels[MAX_FRAME_PIXELS];
 static uint16_t diagnostic_ge_scanout[MAX_FRAME_PIXELS];
 static uint16_t diagnostic_scanout[MAX_FRAME_PIXELS];
 static int framebuffer_fd = -1;
@@ -224,19 +228,31 @@ static void begin_performance_session(void)
 
 static ssize_t write_cpu_frame(void)
 {
-	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
+	size_t row_bytes = (size_t)width * sizeof(*ui_pixels);
+	size_t bytes = (size_t)height * stride * sizeof(*ui_pixels);
+	unsigned y;
 
-	return pwrite(framebuffer_fd, framebuffer, bytes, 0);
+	if (stride == width)
+		return pwrite(framebuffer_fd, ui_pixels, bytes, 0);
+	for (y = 0; y < height; y++) {
+		ssize_t written = pwrite(framebuffer_fd,
+			ui_pixels + y * width, row_bytes,
+			(off_t)y * (off_t)stride * (off_t)sizeof(*ui_pixels));
+
+		if (written != (ssize_t)row_bytes)
+			return written < 0 ? written : -1;
+	}
+	return (ssize_t)bytes;
 }
 
-static uint32_t diagnostic_hash(const uint16_t *pixels)
+static uint32_t diagnostic_hash(const uint16_t *pixels, unsigned row_stride)
 {
 	uint32_t hash = 2166136261u;
 	unsigned y, x;
 
 	for (y = 0; y < height; y++)
 		for (x = 0; x < width; x++) {
-			hash ^= pixels[y * stride + x];
+			hash ^= pixels[y * row_stride + x];
 			hash *= 16777619u;
 		}
 	return hash;
@@ -249,14 +265,14 @@ static uint32_t diagnostic_mismatches(const uint16_t *pixels)
 
 	for (y = 0; y < height; y++)
 		for (x = 0; x < width; x++)
-			if (pixels[y * stride + x] != framebuffer[y * stride + x])
+			if (pixels[y * stride + x] != ui_pixels[y * width + x])
 				mismatches++;
 	return mismatches;
 }
 
 static int diagnostic_readback(uint16_t *destination)
 {
-	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
+	size_t bytes = (size_t)height * stride * sizeof(*ui_pixels);
 	ssize_t got = pread(framebuffer_fd, destination, bytes, 0);
 
 	if (got != (ssize_t)bytes) {
@@ -291,12 +307,13 @@ static int diagnostic_write_all(int fd, const void *data, size_t bytes)
 	return 0;
 }
 
-static int diagnostic_write_packed(int fd, const uint16_t *pixels)
+static int diagnostic_write_packed(int fd, const uint16_t *pixels,
+	unsigned row_stride)
 {
 	unsigned y;
 
 	for (y = 0; y < height; y++)
-		if (diagnostic_write_all(fd, pixels + y * stride,
+		if (diagnostic_write_all(fd, pixels + y * row_stride,
 			(size_t)width * sizeof(*pixels)) < 0)
 			return -1;
 	return 0;
@@ -314,14 +331,14 @@ static void capture_ui_diagnostic(void)
 	/* Finish a fresh GE publication before reading its destination. */
 	if (write_frame() < 0 || diagnostic_readback(diagnostic_ge_scanout) < 0)
 		goto restore;
-	ge_hash = diagnostic_hash(diagnostic_ge_scanout);
+	ge_hash = diagnostic_hash(diagnostic_ge_scanout, stride);
 	ge_mismatches = diagnostic_mismatches(diagnostic_ge_scanout);
 
 	/* A CPU publication of the identical source isolates the GE transfer. */
 	if (write_cpu_frame() != (ssize_t)((size_t)height * stride *
-		sizeof(*framebuffer)) || diagnostic_readback(diagnostic_scanout) < 0)
+		sizeof(*ui_pixels)) || diagnostic_readback(diagnostic_scanout) < 0)
 		goto restore;
-	cpu_hash = diagnostic_hash(diagnostic_scanout);
+	cpu_hash = diagnostic_hash(diagnostic_scanout, stride);
 	cpu_mismatches = diagnostic_mismatches(diagnostic_scanout);
 
 restore:
@@ -341,18 +358,18 @@ restore:
 	header.stride = stride;
 	header.framebuffer_phys = framebuffer_phys;
 	header.ge_source_phys = ge_source_phys;
-	header.source_hash = diagnostic_hash(framebuffer);
+	header.source_hash = diagnostic_hash(ui_pixels, width);
 	header.ge_hash = ge_hash;
 	header.cpu_hash = cpu_hash;
 	header.ge_mismatches = ge_mismatches;
 	header.cpu_mismatches = cpu_mismatches;
 	header.frame_bytes = (uint32_t)((size_t)width * height *
-		sizeof(*framebuffer));
+		sizeof(*ui_pixels));
 	fd = open(UI_DIAGNOSTIC_PATH,
 		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (fd < 0 || diagnostic_write_all(fd, &header, sizeof(header)) < 0 ||
-		diagnostic_write_packed(fd, framebuffer) < 0 ||
-		diagnostic_write_packed(fd, diagnostic_ge_scanout) < 0) {
+		diagnostic_write_packed(fd, ui_pixels, width) < 0 ||
+		diagnostic_write_packed(fd, diagnostic_ge_scanout, stride) < 0) {
 		snprintf(message, sizeof(message),
 			"UI diagnostic write failed path=%s errno=%d",
 			UI_DIAGNOSTIC_PATH, errno);
@@ -362,7 +379,7 @@ restore:
 		return;
 	}
 	/* The final packed image is the CPU-publication readback. */
-	if (diagnostic_write_packed(fd, diagnostic_scanout) < 0 || fsync(fd) < 0) {
+	if (diagnostic_write_packed(fd, diagnostic_scanout, stride) < 0 || fsync(fd) < 0) {
 		snprintf(message, sizeof(message),
 			"UI diagnostic flush failed path=%s errno=%d",
 			UI_DIAGNOSTIC_PATH, errno);
@@ -381,7 +398,7 @@ restore:
 
 static int write_frame(void)
 {
-	size_t bytes = (size_t)height * stride * sizeof(*framebuffer);
+	size_t bytes = (size_t)height * stride * sizeof(*ui_pixels);
 	ssize_t written;
 	const char *presenter = "CPU";
 	int ge_presented = 0;
@@ -389,16 +406,16 @@ static int write_frame(void)
 
 	if (ge) {
 		unsigned y;
-		size_t row_bytes = (size_t)width * sizeof(*framebuffer);
+		size_t row_bytes = (size_t)width * sizeof(*ui_pixels);
 		hcge_state *state = &ge->state;
 		HCGERectangle source = { 0, 0, (int)width, (int)height };
 
 		if (stride == width)
-			memcpy(ge_source, framebuffer, bytes);
+			memcpy(ge_source, ui_pixels, row_bytes * height);
 		else
 			for (y = 0; y < height; y++)
 				memcpy(ge_source + y * width,
-					framebuffer + y * stride, row_bytes);
+					ui_pixels + y * width, row_bytes);
 		if (hcge_linux_cache_clean(ge, ge_source,
 				(unsigned int)(row_bytes * height)) == 0) {
 			memset(state, 0, sizeof(*state));
@@ -412,9 +429,9 @@ static int write_frame(void)
 			state->source.config.size.w = (int)width;
 			state->source.config.size.h = (int)height;
 			state->dst.phys = framebuffer_phys;
-			state->dst.pitch = stride * sizeof(*framebuffer);
+			state->dst.pitch = stride * sizeof(*ui_pixels);
 			state->src.phys = ge_source_phys;
-			state->src.pitch = width * sizeof(*framebuffer);
+			state->src.pitch = width * sizeof(*ui_pixels);
 			state->accel = HCGE_DFXL_BLIT;
 			hcge_set_state(ge, state, state->accel);
 			if (hcge_blit(ge, &source, 0, 0) &&
@@ -445,7 +462,7 @@ static int write_frame(void)
 	if (!framebuffer_writes++) {
 		snprintf(message, sizeof(message),
 			"framebuffer write complete bytes=%lu stride=%u presenter=%s",
-			(unsigned long)bytes, stride * (unsigned)sizeof(*framebuffer),
+			(unsigned long)bytes, stride * (unsigned)sizeof(*ui_pixels),
 			presenter);
 		log_message(message);
 	}
@@ -1136,7 +1153,7 @@ int main(void)
 	if (framebuffer_phys && hcge_open_context(&ge_storage) == 0) {
 		ge = &ge_storage;
 		ge_source = hcge_linux_alloc_buffer(ge,
-			(unsigned int)(width * height * sizeof(*framebuffer)),
+			(unsigned int)(width * height * sizeof(*ui_pixels)),
 			&ge_source_phys, &ge_source_handle);
 		if (!ge_source) {
 			char message[128];
@@ -1144,7 +1161,7 @@ int main(void)
 			snprintf(message, sizeof(message),
 				"GE framebuffer source allocation failed bytes=%lu errno=%d",
 				(unsigned long)((size_t)width * height *
-					sizeof(*framebuffer)), errno);
+					sizeof(*ui_pixels)), errno);
 			log_message(message);
 			close_ge_presenter();
 		}
@@ -1152,7 +1169,7 @@ int main(void)
 	sf2000_ui_config_defaults(&config);
 	(void)sf2000_ui_config_load(&config, "/etc/sf2000.conf");
 	(void)sf2000_ui_config_load(&config, "/mnt/sd/sf2000.conf");
-	(void)sf2000_ui_init(&ui, framebuffer, width, height, stride, &config);
+	(void)sf2000_ui_init(&ui, ui_pixels, width, height, width, &config);
 	{
 		char message[320];
 
