@@ -37,6 +37,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define METRICS_PATH "/run/sf2000-frontend-metrics"
 #define AUDIO_BUFFER_SAMPLES 16384u
+#define AUDIO_SUSTAIN_SAMPLES 1024u
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
@@ -51,7 +52,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_CONVERT_CAPACITY (AUDIO_CONVERT_SAMPLES * 8u)
 #define GE_SOURCE_BUFFERS 2u
 #define GE_SOURCE_MAX_WIDTH 512u
-#define GE_SOURCE_MAX_HEIGHT 256u
+#define GE_SOURCE_MAX_HEIGHT 320u
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
@@ -78,10 +79,12 @@ struct host {
 	unsigned ge_width, ge_height, ge_buffers, ge_next, ge_pending;
 	int pcm_fd;
 	unsigned audio_rate, audio_head, audio_count;
+	unsigned audio_tail_write, audio_tail_count, audio_tail_play;
 	unsigned audio_resample_rate, audio_feedback_counter;
 	snd_pcm_sframes_t audio_delay;
 	struct hc15xx_resampler resampler;
 	int16_t audio_buffer[AUDIO_BUFFER_SAMPLES];
+	int16_t audio_tail[AUDIO_SUSTAIN_SAMPLES];
 	enum retro_pixel_format format;
 	double fps;
 	const char *system_dir;
@@ -146,7 +149,7 @@ static unsigned core_option_count;
 extern uint32_t reg[] __attribute__((weak));
 extern uint16_t *gba_screen_pixels __attribute__((weak));
 static struct {
-	unsigned generated, submitted, dropped;
+	unsigned generated, submitted, dropped, sustained;
 	unsigned peak, eagain, xruns;
 } audio_metrics;
 
@@ -894,7 +897,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u mode=%s presenter=%s gba_pc=%08x\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u mode=%s presenter=%s gba_pc=%08x sustained=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -910,7 +913,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.input.interval_max_latency_us,
 			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
-			reg ? reg[15] : 0);
+			reg ? reg[15] : 0, audio_metrics.sustained);
 		if (metrics_fd >= 0 &&
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
@@ -1116,7 +1119,33 @@ static void audio_update_feedback(void)
 		host.audio_resample_rate = rate;
 }
 
-static void audio_enqueue(const int16_t *samples, unsigned count)
+static void audio_tail_push(const int16_t *samples, unsigned count)
+{
+	unsigned i;
+
+	if (!count)
+		return;
+	if (count >= AUDIO_SUSTAIN_SAMPLES) {
+		memcpy(host.audio_tail,
+			samples + count - AUDIO_SUSTAIN_SAMPLES,
+			AUDIO_SUSTAIN_SAMPLES * sizeof(*samples));
+		host.audio_tail_count = AUDIO_SUSTAIN_SAMPLES;
+		host.audio_tail_write = 0;
+		host.audio_tail_play = 0;
+		return;
+	}
+	for (i = 0; i < count; ++i) {
+		host.audio_tail[host.audio_tail_write] = samples[i];
+		host.audio_tail_write = (host.audio_tail_write + 1u) %
+			AUDIO_SUSTAIN_SAMPLES;
+		if (host.audio_tail_count < AUDIO_SUSTAIN_SAMPLES)
+			host.audio_tail_count++;
+	}
+	host.audio_tail_play = 0;
+}
+
+static void audio_queue(const int16_t *samples, unsigned count,
+	unsigned generated)
 {
 	const unsigned capacity = sizeof(host.audio_buffer) /
 		sizeof(host.audio_buffer[0]);
@@ -1126,7 +1155,10 @@ static void audio_enqueue(const int16_t *samples, unsigned count)
 
 	if (!count)
 		return;
-	audio_metrics.generated += count;
+	if (generated)
+		audio_metrics.generated += count;
+	else
+		audio_metrics.sustained += count;
 	for (i = 0; i < count; ++i) {
 		unsigned magnitude = samples[i] < 0 ?
 			(unsigned)-(int)samples[i] : (unsigned)samples[i];
@@ -1154,6 +1186,8 @@ static void audio_enqueue(const int16_t *samples, unsigned count)
 		count -= skip;
 		audio_metrics.dropped += skip;
 	}
+	if (generated)
+		audio_tail_push(samples, count);
 	tail = (host.audio_head + host.audio_count) % capacity;
 	first = capacity - tail;
 	if (first > count)
@@ -1163,6 +1197,69 @@ static void audio_enqueue(const int16_t *samples, unsigned count)
 		memcpy(host.audio_buffer, samples + first,
 			(count - first) * sizeof(*samples));
 	host.audio_count += count;
+}
+
+static void audio_enqueue(const int16_t *samples, unsigned count)
+{
+	audio_queue(samples, count, 1);
+}
+
+static void audio_enqueue_repeat(unsigned count)
+{
+	int16_t samples[AUDIO_SUSTAIN_SAMPLES];
+
+	while (count) {
+		unsigned chunk = count > AUDIO_SUSTAIN_SAMPLES ?
+			AUDIO_SUSTAIN_SAMPLES : count;
+		unsigned i;
+
+		if (!host.audio_tail_count) {
+			memset(samples, 0, chunk * sizeof(*samples));
+		} else {
+			unsigned start = (host.audio_tail_write +
+				AUDIO_SUSTAIN_SAMPLES - host.audio_tail_count) %
+				AUDIO_SUSTAIN_SAMPLES;
+
+			for (i = 0; i < chunk; ++i)
+				samples[i] = host.audio_tail[(start +
+					host.audio_tail_play + i) % AUDIO_SUSTAIN_SAMPLES];
+			host.audio_tail_play = (host.audio_tail_play + chunk) %
+				host.audio_tail_count;
+		}
+		audio_queue(samples, chunk, 0);
+		count -= chunk;
+	}
+}
+
+static void audio_tail_reset(void)
+{
+	host.audio_tail_write = 0;
+	host.audio_tail_count = 0;
+	host.audio_tail_play = 0;
+}
+
+static void audio_refill_sustain(void)
+{
+	snd_pcm_sframes_t delay;
+	unsigned missing;
+
+	if (host.pcm_fd < 0 || ioctl(host.pcm_fd,
+		SNDRV_PCM_IOCTL_DELAY, &delay) < 0) {
+		if (host.pcm_fd < 0 || errno != EPIPE)
+			return;
+		if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
+			return;
+		audio_metrics.xruns++;
+		delay = 0;
+	}
+	if (delay < 0)
+		delay = 0;
+	host.audio_delay = delay;
+	if ((unsigned)delay >= AUDIO_DELAY_TARGET)
+		return;
+	missing = AUDIO_DELAY_TARGET - (unsigned)delay;
+	audio_enqueue_repeat(missing);
+	audio_flush();
 }
 
 static size_t audio_batch(const int16_t *samples, size_t frames)
@@ -1220,6 +1317,7 @@ static void set_uncapped_mode(unsigned enable)
 	uncapped_mode = enable;
 	host.audio_head = 0;
 	host.audio_count = 0;
+	audio_tail_reset();
 	if (host.pcm_fd >= 0) {
 		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
 		(void)hc15xx_resampler_init(&host.resampler, host.audio_rate,
@@ -1252,6 +1350,7 @@ static void pause_audio(unsigned resume)
 {
 	host.audio_head = 0;
 	host.audio_count = 0;
+	audio_tail_reset();
 	if (host.pcm_fd < 0)
 		return;
 	(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
@@ -2257,6 +2356,7 @@ int main(int argc, char **argv)
 			run_pause_menu(frame_ns);
 			continue;
 		}
+		audio_refill_sustain();
 		save_ram_poll();
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);

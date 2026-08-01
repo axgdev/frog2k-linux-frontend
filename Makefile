@@ -189,6 +189,7 @@ $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,
 MUFROG_picodrive_EXTRA_CFLAGS := -include$(SF2000_SYSROOT)/usr/include/wchar.h \
 	-include$(abspath src/mufrog_picodrive_config.h) -DDR_MP3_NO_STDIO -DUSE_TREMOR \
 	-DEMU_F68K -D_USE_CZ80 -DDRC_SH2
+MUFROG_picodrive_EXTRA_CFLAGS += -O3
 MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
 MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
@@ -234,6 +235,7 @@ MUFROG_gambatte_prosty_EXTRA_CFLAGS := \
 	-DHAVE_STDINT_H
 MUFROG_fceumm_prosty_EXTRA_CFLAGS := -DFCEU_VERSION_NUMERIC=9813
 MUFROG_mame2000_ADAPTER_OBJECTS := build/mufrog/mame2000-libco.o
+MUFROG_mame2000_EXTRA_CFLAGS := -O3
 MUFROG_fake08_ADAPTER_OBJECTS := build/mufrog/fake08-log.o
 MUFROG_frodo_PATCHES := patches/mufrog/frodo-autoload-visibility.patch
 MUFROG_frodo_EXTRA_CFLAGS := \
@@ -431,8 +433,11 @@ pce-fast: $(PCE_FAST_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores
+core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores
 	mkdir -p build/core-packages/licenses
+	cp build/sf2000-gambatte build/core-packages/
+	cp build/sf2000-gpsp build/core-packages/
+	cp build/sf2000-fceumm build/core-packages/
 	cp build/sf2000-quicknes build/core-packages/
 	cp build/sf2000-prosystem build/core-packages/
 	cp build/sf2000-snes9x2005 build/core-packages/
@@ -441,6 +446,9 @@ core-packages: quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-f
 	cp build/sf2000-gearboy build/core-packages/
 	cp build/sf2000-pce-fast build/core-packages/
 	cp $(MUFROG_CORE_EXECUTABLES) build/core-packages/
+	cp $(GAMBATTE_DIR)/COPYING build/core-packages/licenses/gambatte-COPYING
+	cp $(GPSP_DIR)/COPYING build/core-packages/licenses/gpsp-COPYING
+	cp $(FCEUMM_DIR)/Copying build/core-packages/licenses/fceumm-Copying
 	cp $(QUICKNES_DIR)/LICENSE build/core-packages/licenses/quicknes-LICENSE
 	cp $(PROSYSTEM_DIR)/License.txt build/core-packages/licenses/prosystem-LICENSE
 	cp $(SNES9X2005_DIR)/copyright build/core-packages/licenses/snes9x2005-copyright
