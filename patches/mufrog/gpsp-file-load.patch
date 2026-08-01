@@ -1,0 +1,11 @@
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -765,7 +765,7 @@ void retro_get_system_info(struct retro_system_info* info)
+    info->library_version = GPSP_VERSION;
+ #endif
+    #ifdef SF2000
+-   info->need_fullpath = false;
++   info->need_fullpath = true;
+ #else
+    info->need_fullpath = true;
+ #endif

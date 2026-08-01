@@ -39,10 +39,12 @@ extern long syscall(long number, ...);
 #define PLAYER_PATH "/usr/bin/sf2000-player"
 #define SD_ROOT "/mnt/sd"
 #define STORAGE_ROOTS_PATH "/run/sf2000-storage-roots"
+#define BROWSER_STATE_PATH "/run/sf2000-browser-state"
 #define MAX_ENTRIES 128
 #define MAX_EXTRA_ROOTS 8u
 #define MAX_NAME 128
 #define MAX_PATH 512
+#define MENU_JUMP 5u
 #define MAX_FRAME_PIXELS (320u * 240u)
 #define LINUX_DT_DIR 4u
 #define LINUX_DT_REG 8u
@@ -106,6 +108,8 @@ static uint32_t ge_source_phys;
 static uint32_t ge_source_handle;
 static unsigned width, height, stride;
 static char current[MAX_PATH] = SD_ROOT;
+static char restore_entry[MAX_NAME];
+static int browser_state_valid;
 static char primary_root[MAX_PATH] = SD_ROOT;
 static char extra_roots[MAX_EXTRA_ROOTS][MAX_PATH];
 static char extra_labels[MAX_EXTRA_ROOTS][MAX_NAME];
@@ -120,6 +124,100 @@ static unsigned log_flush_chord_latched;
 static unsigned log_flush_held;
 static void log_message(const char *message);
 static int write_frame(void);
+
+static void save_browser_state(void)
+{
+	char state[MAX_PATH + MAX_NAME + 2u];
+	int length;
+	int fd;
+
+	if (selected >= entry_count)
+		return;
+	length = snprintf(state, sizeof(state), "%s\n%s\n", current,
+		entries[selected].name);
+	if (length <= 0 || (size_t)length >= sizeof(state))
+		return;
+	fd = open(BROWSER_STATE_PATH,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd >= 0) {
+		if (write(fd, state, (size_t)length) != length)
+			log_message("browser state write failed");
+		close(fd);
+	}
+}
+
+static int browser_state_path_allowed(const char *path)
+{
+	size_t root_length = strlen(SD_ROOT);
+
+	return !strncmp(path, SD_ROOT, root_length) &&
+		(path[root_length] == 0 || path[root_length] == '/');
+}
+
+static void load_browser_state(void)
+{
+	char state[MAX_PATH + MAX_NAME + 2u];
+	char *separator;
+	char *name;
+	size_t state_length;
+	size_t name_length;
+	ssize_t bytes;
+	int fd = open(BROWSER_STATE_PATH, O_RDONLY | O_CLOEXEC);
+
+	browser_state_valid = 0;
+	restore_entry[0] = 0;
+	if (fd < 0)
+		return;
+	bytes = read(fd, state, sizeof(state) - 1u);
+	close(fd);
+	if (bytes <= 0)
+		return;
+	state[bytes] = 0;
+	separator = strchr(state, '\n');
+	if (!separator)
+		return;
+	*separator = 0;
+	name = separator + 1;
+	separator = strchr(name, '\n');
+	if (separator)
+		*separator = 0;
+	state_length = strlen(state);
+	name_length = strlen(name);
+	if (!state[0] || !name[0] || !browser_state_path_allowed(state) ||
+		state_length >= sizeof(current) || name_length >= sizeof(restore_entry))
+		return;
+	memcpy(current, state, state_length + 1u);
+	memcpy(restore_entry, name, name_length + 1u);
+	browser_state_valid = 1;
+}
+
+static void restore_browser_selection(void)
+{
+	unsigned i;
+
+	if (!browser_state_valid || !restore_entry[0])
+		return;
+	for (i = 0; i < entry_count; i++)
+		if (!strcmp(entries[i].name, restore_entry)) {
+			selected = i;
+			first = 0;
+			return;
+		}
+}
+
+static unsigned menu_move(unsigned value, unsigned count, int direction)
+{
+	unsigned jump;
+
+	if (!count)
+		return 0;
+	jump = MENU_JUMP % count;
+	if (!jump)
+		jump = count - 1u;
+	if (direction < 0)
+		return (value + count - jump) % count;
+	return (value + jump) % count;
+}
 
 struct ui_diagnostic_header {
 	char magic[8];
@@ -941,6 +1039,10 @@ static const struct core_route *choose_core(int input,
 				choice = (choice + choice_count - 1u) % choice_count;
 			else if (event.code == BTN_DPAD_DOWN)
 				choice = (choice + 1u) % choice_count;
+			else if (event.code == BTN_TL)
+				choice = menu_move(choice, choice_count, -1);
+			else if (event.code == BTN_TR)
+				choice = menu_move(choice, choice_count, 1);
 			else if (event.code == BTN_EAST)
 			{
 				snprintf(message, sizeof(message),
@@ -1201,6 +1303,7 @@ static void launch_selected(int input)
 			log_message(message);
 			if (sf2000_log_flush("pre-player-launch") != 0)
 				log_message("pre-player-launch log flush timed out");
+			save_browser_state();
 			close_ge_presenter();
 			execve(PLAYER_PATH, argv, envp);
 			(void)unlink(PERFORMANCE_MARKER);
@@ -1297,6 +1400,7 @@ static void launch_selected(int input)
 		log_message(message);
 		if (sf2000_log_flush("pre-core-launch") != 0)
 			log_message("pre-core-launch log flush timed out");
+		save_browser_state();
 		close_ge_presenter();
 		{
 			char *const argv[] = {
@@ -1320,6 +1424,11 @@ static void launch_selected(int input)
 static void parent_directory(void)
 {
 	char *slash;
+	char leaving[MAX_NAME] = { 0 };
+	const char *last_slash = strrchr(current, '/');
+
+	if (last_slash && last_slash[1])
+		snprintf(leaving, sizeof(leaving), "%s", last_slash + 1);
 
 	if (!strcmp(current, primary_root) || !strcmp(current, SD_ROOT)) {
 		view = VIEW_HOME;
@@ -1330,7 +1439,7 @@ static void parent_directory(void)
 	if (path_is_extra_root(current)) {
 		snprintf(current, sizeof(current), "%s", primary_root);
 		scan_directory();
-		return;
+		goto highlight_leaving;
 	}
 	slash = strrchr(current, '/');
 	if (slash && slash > current + strlen(primary_root) - 1u &&
@@ -1349,6 +1458,18 @@ static void parent_directory(void)
 		snprintf(current, sizeof(current), "%s", primary_root);
 	}
 	scan_directory();
+
+highlight_leaving:
+	if (leaving[0]) {
+		unsigned i;
+
+		for (i = 0; i < entry_count; i++)
+			if (!strcmp(entries[i].name, leaving)) {
+				selected = i;
+				first = 0;
+				break;
+			}
+	}
 }
 
 static void request_system_action(const char *marker, const char *name)
@@ -1425,6 +1546,7 @@ int main(void)
 		return 1;
 	}
 	load_storage_roots();
+	load_browser_state();
 	scan_directory();
 	selected = first = 0;
 	view = VIEW_HOME;
@@ -1488,18 +1610,25 @@ int main(void)
 			}
 			if (event.value != 1) continue;
 			if (view == VIEW_HOME) {
-				if (event.code == BTN_DPAD_UP && selected)
-					selected--;
+				if (event.code == BTN_DPAD_UP)
+					selected = selected ? selected - 1u : 3u;
 				else if (event.code == BTN_DPAD_DOWN && selected < 3u)
 					selected++;
+				else if (event.code == BTN_TL)
+					selected = menu_move(selected, 4u, -1);
+				else if (event.code == BTN_TR)
+					selected = menu_move(selected, 4u, 1);
 				else if (event.code == BTN_EAST) {
 					if (selected == 0u) {
 						view = VIEW_LIBRARY;
 						selected = first = 0;
 						load_storage_roots();
-						snprintf(current, sizeof(current),
-							"%.500s", primary_root);
+						if (!browser_state_valid)
+							snprintf(current, sizeof(current),
+								"%.500s", primary_root);
 						scan_directory();
+						restore_browser_selection();
+						browser_state_valid = 0;
 					} else if (selected == 1u) {
 						view = VIEW_SETTINGS;
 						selected = 0;
@@ -1515,11 +1644,16 @@ int main(void)
 					view = VIEW_HOME;
 					selected = first = 0;
 				}
-			} else if (event.code == BTN_DPAD_UP && selected) {
-				selected--;
+			} else if (event.code == BTN_DPAD_UP) {
+				selected = entry_count ?
+					(selected ? selected - 1u : entry_count - 1u) : 0u;
 			} else if (event.code == BTN_DPAD_DOWN &&
 					selected + 1 < entry_count) {
 				selected++;
+			} else if (event.code == BTN_TL) {
+				selected = menu_move(selected, entry_count, -1);
+			} else if (event.code == BTN_TR) {
+				selected = menu_move(selected, entry_count, 1);
 			} else if (event.code == BTN_EAST && entry_count) {
 				launch_selected(input);
 				/* Drop the chord which quit a core while waitpid() ran. */

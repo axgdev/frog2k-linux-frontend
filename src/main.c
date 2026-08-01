@@ -42,11 +42,16 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_OUTPUT_RATE 32000u
 #define AUDIO_RECOVERY_RATE 32256u
 #define AUDIO_DRAIN_RATE 31744u
-#define AUDIO_DELAY_LOW 6144
-#define AUDIO_DELAY_TARGET 9216
-#define AUDIO_DELAY_HIGH 12288
+#define AUDIO_DELAY_LOW 4096
+#define AUDIO_DELAY_TARGET 5632
+#define AUDIO_DELAY_HIGH 7168
 #define AUDIO_FEEDBACK_INTERVAL 8u
+#define CORE_LOAD_TIMEOUT_SECONDS 30u
+#define CORE_RUN_TIMEOUT_SECONDS 10u
+#define AUDIO_CONVERT_CAPACITY (AUDIO_CONVERT_SAMPLES * 8u)
 #define GE_SOURCE_BUFFERS 2u
+#define GE_SOURCE_MAX_WIDTH 512u
+#define GE_SOURCE_MAX_HEIGHT 256u
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
@@ -101,6 +106,8 @@ static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
 static unsigned audio_suppressed;
 static unsigned loading_game;
+static int core_watchdog_kmsg_fd = -1;
+static volatile sig_atomic_t core_watchdog_stage;
 static unsigned pause_requested;
 static unsigned fast_forward_rate = 1u;
 static unsigned frameskip;
@@ -199,6 +206,25 @@ static void stop_signal(int signal_number)
 {
 	(void)signal_number;
 	stopping = 1;
+}
+
+static void core_load_timeout_signal(int signal_number)
+{
+	static const char load_message[] =
+		"<3>sf2000-frontend: core load timeout\n";
+	static const char run_message[] =
+		"<3>sf2000-frontend: core run timeout\n";
+	const char *message = core_watchdog_stage == 2 ?
+		run_message : load_message;
+	size_t message_length = core_watchdog_stage == 2 ?
+		sizeof(run_message) - 1u : sizeof(load_message) - 1u;
+
+	(void)signal_number;
+	if (core_watchdog_kmsg_fd >= 0 &&
+		write(core_watchdog_kmsg_fd, message, message_length) < 0) {
+		/* best-effort timeout record */
+	}
+	_exit(124);
 }
 
 static char *append_hex(char *output, unsigned long long value)
@@ -568,8 +594,8 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	unsigned source_index;
 	unsigned y;
 
-	if (!host.ge || !host.ge_buffers || width > host.fb_width ||
-			height > host.fb_height ||
+	if (!host.ge || !host.ge_buffers || width > GE_SOURCE_MAX_WIDTH ||
+			height > GE_SOURCE_MAX_HEIGHT ||
 			(size_t)width * height * sizeof(uint16_t) >
 				host.ge_source_bytes)
 		return -1;
@@ -946,11 +972,13 @@ static int open_audio(void)
 	struct snd_pcm_hw_params hardware;
 	struct snd_pcm_sw_params software;
 	unsigned i;
+	const char *failure_stage = "open";
+	int failure_errno;
 
 	host.pcm_fd = open("/dev/snd/pcmC0D0p",
 		O_WRONLY | O_NONBLOCK | O_CLOEXEC);
 	if (host.pcm_fd < 0)
-		return -1;
+		goto fail;
 	memset(&hardware, 0, sizeof(hardware));
 	for (i = 0; i < sizeof(hardware.masks) / sizeof(hardware.masks[0]); i++)
 		memset(&hardware.masks[i], 0xff, sizeof(hardware.masks[i]));
@@ -968,29 +996,33 @@ static int open_audio(void)
 		SNDRV_PCM_SUBFORMAT_STD);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS, 1);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE, AUDIO_OUTPUT_RATE);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 2048);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 16);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 32768);
+	/* The HC15xx ALSA driver has an 8-period hardware ring.  Keep the
+	 * userspace queue large, but use the device geometry it accepts. */
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 1024);
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 8192);
+	failure_stage = "hw_params";
 	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hardware) < 0)
 		goto fail;
 	memset(&software, 0, sizeof(software));
 	software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
 	software.period_step = 1;
-	software.avail_min = 2048;
+	software.avail_min = 1024;
 	/*
-	 * Prime a little under half of the 32K-frame DMA ring before START. The
-	 * HC15xx ring guard keeps this below the ambiguous completely-full cursor
-	 * state. The resulting lead absorbs ROM-cache and dynarec bursts on the
-	 * single CPU; the kernel repeats the last period if a sustained slow core
-	 * still catches the consumer.
+	 * Prime most of the small DMA ring before START. The kernel repeats the
+	 * last period if a sustained slow core still catches the consumer.
 	 */
 	software.start_threshold = AUDIO_DELAY_TARGET;
-	software.stop_threshold = 32768;
+	software.stop_threshold = 8192;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
-	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS, &software) < 0 ||
-			ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
+	failure_stage = "sw_params";
+	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS, &software) < 0)
 		goto fail;
+	failure_stage = "prepare";
+	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
+		goto fail;
+	failure_stage = "resampler";
 	if (hc15xx_resampler_init(&host.resampler, host.audio_rate,
 			AUDIO_OUTPUT_RATE) < 0)
 		goto fail;
@@ -1000,6 +1032,17 @@ static int open_audio(void)
 	log_kmsg("ALSA mono DMA presenter ready linear-resampler\n");
 	return 0;
 fail:
+	failure_errno = errno;
+	{
+		char details[192];
+
+		snprintf(details, sizeof(details),
+			"ALSA open failed stage=%s errno=%d period=1024 periods=8 buffer=8192\n",
+			failure_stage, failure_errno);
+		log_kmsg(details);
+	}
+	if (host.pcm_fd < 0)
+		return -1;
 	close(host.pcm_fd);
 	host.pcm_fd = -1;
 	return -1;
@@ -1124,7 +1167,7 @@ static void audio_enqueue(const int16_t *samples, unsigned count)
 
 static size_t audio_batch(const int16_t *samples, size_t frames)
 {
-	int16_t converted[AUDIO_CONVERT_SAMPLES];
+	int16_t converted[AUDIO_CONVERT_CAPACITY];
 	size_t offset = 0;
 
 	if (uncapped_mode || fast_forward_rate > 1u) {
@@ -1138,12 +1181,21 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 	while (offset < frames) {
 		size_t input_frames = frames - offset;
 		size_t produced;
+		size_t maximum_input = AUDIO_CONVERT_SAMPLES;
 
 		if (input_frames > AUDIO_CONVERT_SAMPLES)
 			input_frames = AUDIO_CONVERT_SAMPLES;
+		if (host.audio_rate < AUDIO_OUTPUT_RATE) {
+			maximum_input = ((size_t)(AUDIO_CONVERT_CAPACITY - 1u) *
+				host.audio_rate) / AUDIO_OUTPUT_RATE;
+			if (!maximum_input)
+				maximum_input = 1;
+			if (input_frames > maximum_input)
+				input_frames = maximum_input;
+		}
 		produced = hc15xx_resampler_process_stereo_s16(&host.resampler,
 			samples + offset * 2, input_frames, converted,
-			AUDIO_CONVERT_SAMPLES);
+			AUDIO_CONVERT_CAPACITY);
 		offset += input_frames;
 		audio_enqueue(converted, (unsigned)produced);
 	}
@@ -1985,8 +2037,8 @@ static int open_platform(void)
 		unsigned i;
 
 		host.ge = &host.ge_storage;
-		host.ge_source_bytes = (size_t)host.fb_width * host.fb_height *
-			sizeof(uint16_t);
+		host.ge_source_bytes = (size_t)GE_SOURCE_MAX_WIDTH *
+			GE_SOURCE_MAX_HEIGHT * sizeof(uint16_t);
 		for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
 			host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
 				(unsigned int)host.ge_source_bytes,
@@ -2013,11 +2065,11 @@ static int open_platform(void)
 			(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 			snprintf(details, sizeof(details),
-				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u fenced_depth=%u\n",
+				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u fenced_depth=%u max_source=%ux%u\n",
 				host.fb_phys, host.ge_source_phys[0],
-				host.ge_source_phys[1],
+				host.ge_buffers > 1 ? host.ge_source_phys[1] : 0,
 				(unsigned long)host.ge_source_bytes, host.ge_buffers,
-				host.ge_buffers);
+				host.ge_buffers, GE_SOURCE_MAX_WIDTH, GE_SOURCE_MAX_HEIGHT);
 			log_kmsg(details);
 		}
 	}
@@ -2074,6 +2126,7 @@ int main(int argc, char **argv)
 	struct timespec deadline;
 	long frame_ns;
 	struct sigaction fault_action;
+	int load_ok;
 
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s ROM\n", argv[0]);
@@ -2081,6 +2134,8 @@ int main(int argc, char **argv)
 	}
 	log_kmsg("entry\n");
 	retained_stage("frontend-entry", 1);
+	core_watchdog_kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	(void)signal(SIGALRM, core_load_timeout_signal);
 	memset(&fault_action, 0, sizeof(fault_action));
 	fault_action.sa_sigaction = fault_signal;
 	fault_action.sa_flags = SA_SIGINFO;
@@ -2135,7 +2190,12 @@ int main(int argc, char **argv)
 	log_kmsg("ROM load begin\n");
 	retained_stage("frontend-rom-begin", 5);
 	loading_game = 1;
-	if (!retro_load_game(&game)) {
+	core_watchdog_stage = 1;
+	(void)alarm(CORE_LOAD_TIMEOUT_SECONDS);
+	load_ok = retro_load_game(&game);
+	(void)alarm(0);
+	core_watchdog_stage = 0;
+	if (!load_ok) {
 		loading_game = 0;
 		log_kmsg("core rejected game\n");
 		fprintf(stderr, "sf2000-frontend: core rejected %s\n", argv[1]);
@@ -2184,7 +2244,11 @@ int main(int argc, char **argv)
 			(uncapped_mode ? 300u : 60u)) == 0;
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
+		core_watchdog_stage = 2;
+		(void)alarm(CORE_RUN_TIMEOUT_SECONDS);
 		retro_run();
+		(void)alarm(0);
+		core_watchdog_stage = 0;
 		/* Load the pause font after the first game frame is visible. This
 		 * hides the one-time SD/font cost from the first pause invocation. */
 		if (first_frame && !pause_ui_ready)
@@ -2227,6 +2291,8 @@ int main(int argc, char **argv)
 	retro_unload_game();
 	retro_deinit();
 	close_platform();
+	if (core_watchdog_kmsg_fd >= 0)
+		close(core_watchdog_kmsg_fd);
 	free((void *)game.data);
 	log_kmsg("returned cleanly\n");
 	/* The process owns the core and all of its mappings.  Avoid running

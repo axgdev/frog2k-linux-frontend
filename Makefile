@@ -4,6 +4,7 @@ CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mips
 SF2000_CC ?= $(CROSS_COMPILE)gcc
 SF2000_CXX ?= $(CROSS_COMPILE)g++
 SF2000_OBJCOPY ?= $(CROSS_COMPILE)objcopy
+SF2000_STRIP ?= $(CROSS_COMPILE)strip
 SF2000_NM ?= $(CROSS_COMPILE)nm
 CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
@@ -196,7 +197,8 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
 	-include$(abspath src/mufrog_qpsx_config.h)
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
-	patches/mufrog/qpsx-linux-cdda-asm.patch
+	patches/mufrog/qpsx-linux-cdda-asm.patch \
+	patches/mufrog/qpsx-static-load-buffer.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
 MUFROG_handy_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/handy/lynx) -DWANT_CRC32
 MUFROG_fbalpha2012_EXTRA_CFLAGS := -include$(abspath src/mufrog_wchar_compat.h) \
@@ -205,15 +207,20 @@ MUFROG_fbalpha2012_PATCHES := patches/mufrog/fbalpha-wchar.patch
 MUFROG_race_EXTRA_CFLAGS := -DCZ80 -D_MAX_PATH=2048
 MUFROG_beetle_cygne_EXTRA_CFLAGS := -DMEDNAFEN_VERSION_NUMERIC=931
 MUFROG_gearcoleco_WORKDIR := platforms/libretro
-MUFROG_gearcoleco_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/gearcoleco/platforms/shared/dependencies/miniz)
+MUFROG_gearcoleco_EXTRA_CFLAGS := \
+	-I$(abspath build/mufrog/src/gearcoleco/platforms/shared/dependencies/miniz) \
+	-DGEARCOLECO_DISABLE_DISASSEMBLER
 MUFROG_fake08_WORKDIR := platform/libretro
 MUFROG_fake08_EXTRA_CFLAGS := \
-  -I$(abspath build/mufrog/src/fake08/libs/z8lua) \
+	-DSF2000 -DENABLE_AUDIO_OPTIMIZATIONS -O3 \
+	-I$(abspath build/mufrog/src/fake08/libs/z8lua) \
   -I$(abspath build/mufrog/src/fake08/libs/simpleini) \
   -I$(abspath build/mufrog/src/fake08/libs/lodepng) \
   -I$(abspath build/mufrog/src/fake08/libs/miniz) \
   -include$(abspath src/mufrog_wchar_compat.h)
-MUFROG_fake08_PATCHES := patches/mufrog/fake08-cxx17.patch
+MUFROG_fake08_PATCHES := \
+	patches/mufrog/fake08-cxx17.patch \
+	patches/mufrog/fake08-fix32-mips.patch
 MUFROG_snes9x2005_prosty_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/snes9x2005-prosty/source)
 MUFROG_snes9x2002_prosty_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/snes9x2002-prosty/source) -DUSE_SA1
 MUFROG_snes9x2002_prosty_PATCHES := patches/mufrog/snes9x2002-rops.patch
@@ -227,19 +234,30 @@ MUFROG_gambatte_prosty_EXTRA_CFLAGS := \
 	-DHAVE_STDINT_H
 MUFROG_fceumm_prosty_EXTRA_CFLAGS := -DFCEU_VERSION_NUMERIC=9813
 MUFROG_mame2000_ADAPTER_OBJECTS := build/mufrog/mame2000-libco.o
+MUFROG_fake08_ADAPTER_OBJECTS := build/mufrog/fake08-log.o
 MUFROG_frodo_PATCHES := patches/mufrog/frodo-autoload-visibility.patch
 MUFROG_frodo_EXTRA_CFLAGS := \
 	-I$(abspath build/mufrog/src/frodo/libretro/core) \
 	-I$(abspath build/mufrog/src/frodo/libretro/include) \
 	-I$(abspath build/mufrog/src/frodo/Src/libretro-common/include) \
 	-I$(abspath build/mufrog/src/frodo/Src) \
-	-I$(abspath build/mufrog/src/frodo/Src/zlib)
+	-I$(abspath build/mufrog/src/frodo/Src/zlib) \
+	-DSF2000 -DSF2000_C64_OPTIMIZED -DSF2000_FAST_CPU \
+	-DSF2000_FAST_VIC -DSF2000_FAST_SID -DSF2000_FAST_MEMORY \
+	-DSF2000_COMPUTED_GOTO -DSF2000_MIPS_OPTIMIZED \
+	-O3 -funroll-loops
+MUFROG_frodo_EXTRA_ARGS := EMUTYPE=frodo platform=sf2000 \
+	MIPS=$(CROSS_COMPILE) NOLIBCO=0
 MUFROG_gpsp_multicore_EXTRA_CFLAGS := -DSF2000 -DMMAP_JIT_CACHE \
 	-DHAVE_DYNAREC -DMIPS_ARCH -DGPSP_DYNAREC_SAFE_SMC_PATCH \
 	-DGPSP_DYNAREC_SAFE_FALLBACK -DGPSP_ROM_BUFFER_MMAP \
-	-DROM_BUFFER_SIZE=32 \
+	-DSMALL_TRANSLATION_CACHE \
+	-DROM_BUFFER_SIZE=16 \
 	-DFRONTEND_SUPPORTS_RGB565 -DSF2000_OPTIMIZATION_LEVEL=2
-MUFROG_gpsp_multicore_PATCHES := patches/mufrog/gpsp-mips-validate.patch
+MUFROG_gpsp_multicore_PATCHES := \
+	patches/mufrog/gpsp-mips-validate.patch \
+	patches/mufrog/gpsp-file-load.patch \
+	patches/mufrog/gpsp-mips-pic.patch
 MUFROG_gpsp_multicore_EXTRA_ARGS := HAVE_DYNAREC=1 CPU_ARCH=mips MMAP_JIT_CACHE=1 SF2000=1
 
 MUFROG_CORE_EXECUTABLES := $(foreach spec,$(MUFROG_CORE_SPECS),build/sf2000-$(word 1,$(subst :, ,$(spec))))
@@ -805,10 +823,15 @@ build/sf2000-$(1): build/mufrog/$(1)_libretro_linux.a \
 		$(MUFROG_$(call mufrog_key,$(1))_ADAPTER_OBJECTS) \
 		$(LIBRETRO_COMMON) -lm \
 		$(SF2000_ENDFILES)
+	$(SF2000_STRIP) --strip-unneeded '$$@'
 endef
 $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_RULE,$(word 1,$(subst :, ,$(spec))))))
 
 build/mufrog/qpsx-adapter.o: src/qpsx_adapter.c Makefile
+	mkdir -p '$(@D)'
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
+
+build/mufrog/fake08-log.o: src/fake08_log.c Makefile
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 

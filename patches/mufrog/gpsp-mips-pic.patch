@@ -1,0 +1,22 @@
+--- a/mips/mips_emit.h
++++ b/mips/mips_emit.h
+@@ -2067,7 +2067,7 @@ static void emit_mem_access_loadop(
+   };
+ }
+ 
+-#ifdef PIC
++#if defined(PIC) || defined(__PIC__)
+   #define genccall(fn)                                         \
+     mips_emit_lui(mips_reg_t9, ((u32)fn) >> 16);               \
+     mips_emit_ori(mips_reg_t9, mips_reg_t9, ((u32)fn));        \
+--- a/mips/mips_stub.S
++++ b/mips/mips_stub.S
+@@ -221,7 +221,7 @@
+ 
+ # PIC ABI mandates to jump to target via $t9
+ 
+-#ifdef PIC
++#if defined(PIC) || defined(__PIC__)
+ .macro cfncall target, targetid
+   lw $t9, (FNPTRS_BASE + \targetid * 4)($16)
+   jalr $t9

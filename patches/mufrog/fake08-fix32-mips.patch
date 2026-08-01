@@ -1,0 +1,9 @@
+--- a/libs/z8lua/fix32.h
++++ b/libs/z8lua/fix32.h
+@@ -35,8 +35,4 @@ struct fix32
+ 
+-#if defined(SF2000)
+-	inline fix32(signed int x)   : m_bits(int32_t(x << 16)) {}
+-	inline fix32(unsigned int x) : m_bits(int32_t(x << 16)) {}
+-#endif
+ 
