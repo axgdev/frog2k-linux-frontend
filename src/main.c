@@ -53,6 +53,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define GE_SOURCE_BUFFERS 2u
 #define GE_SOURCE_MAX_WIDTH 512u
 #define GE_SOURCE_MAX_HEIGHT 320u
+#define GE_SOURCE_STRIDE (GE_SOURCE_MAX_WIDTH * sizeof(uint16_t))
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
@@ -736,6 +737,79 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	if (!first_frame)
 		log_kmsg("GE first present cache clean\n");
 	state = &host.ge->state;
+	/*
+	 * The physical GE rejects a stretch whose source is larger than the
+	 * framebuffer surface when the destination is the scanout buffer.  C64
+	 * produces 384x288 frames, for example.  Keep that work on the GE by
+	 * scaling into the second managed surface first, then blitting the exact
+	 * framebuffer-sized result.  This is synchronous by design: both source
+	 * surfaces are reused on the next frame, so no surface can remain owned by
+	 * an outstanding command.
+	 */
+	if ((width > out_w || height > out_h) && host.ge_buffers >= 2u) {
+		unsigned scaled_index = (source_index + 1u) % host.ge_buffers;
+		uint32_t scaled_phys = host.ge_source_phys[scaled_index];
+		HCGERectangle scaled_source = { 0, 0, (int)width, (int)height };
+		HCGERectangle scaled_destination = { 0, 0,
+			(int)out_w, (int)out_h };
+
+		if (host.ge_pending) {
+			if (hcge_engine_sync(host.ge) < 0) {
+				log_kmsg("GE oversized scale source fence failed\n");
+				return -1;
+			}
+			host.ge_pending = 0;
+		}
+
+		state->render_options = HCGE_DSRO_NONE;
+		state->drawingflags = HCGE_DSDRAW_NOFX;
+		state->blittingflags = HCGE_DSBLIT_NOFX;
+		state->destination.config.format = HCGE_DSPF_RGB16;
+		state->destination.config.size.w = (int)out_w;
+		state->destination.config.size.h = (int)out_h;
+		state->source.config.format = HCGE_DSPF_RGB16;
+		state->source.config.size.w = (int)width;
+		state->source.config.size.h = (int)height;
+		state->dst.phys = scaled_phys;
+		state->dst.pitch = GE_SOURCE_STRIDE;
+		state->src.phys = source_phys;
+		state->src.pitch = width * sizeof(uint16_t);
+		state->accel = HCGE_DFXL_STRETCHBLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		if (!hcge_stretch_blit(host.ge, &scaled_source,
+				&scaled_destination)) {
+			log_kmsg("GE oversized scale submit failed\n");
+			return -1;
+		}
+
+		state->destination.config.size.w = (int)host.fb_width;
+		state->destination.config.size.h = (int)host.fb_height;
+		state->source.config.size.w = (int)out_w;
+		state->source.config.size.h = (int)out_h;
+		state->dst.phys = host.fb_phys;
+		state->dst.pitch = host.fb_stride * sizeof(uint16_t);
+		state->src.phys = scaled_phys;
+		state->src.pitch = GE_SOURCE_STRIDE;
+		state->accel = HCGE_DFXL_BLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		if (!hcge_blit(host.ge, &scaled_destination, left, top) ||
+				hcge_engine_sync(host.ge) < 0) {
+			log_kmsg("GE oversized scale present failed\n");
+			return -1;
+		}
+		host.ge_pending = 0;
+		host.ge_next = (source_index + 1u) % host.ge_buffers;
+		host.ge_width = width;
+		host.ge_height = height;
+		interval_ge_stage_frames++;
+		if (!first_frame)
+			log_kmsg("GE oversized scale synchronized\n");
+		return 0;
+	}
+	if (width > out_w || height > out_h) {
+		log_kmsg("GE oversized scale needs two source buffers\n");
+		return -1;
+	}
 	memset(state, 0, sizeof(*state));
 	state->render_options = HCGE_DSRO_NONE;
 	state->drawingflags = HCGE_DSDRAW_NOFX;
@@ -1541,7 +1615,6 @@ static void save_ram_flush(void)
 	save_ram_hash = hash;
 	save_ram_dirty = 0;
 	save_ram_last_flush_us = monotonic_us();
-	sync();
 	log_kmsg("save RAM written\n");
 }
 
@@ -1632,12 +1705,27 @@ static int save_state_slot(unsigned slot)
 	void *data;
 	size_t size;
 
+	{
+		char details[96];
+
+		snprintf(details, sizeof(details),
+			"save state serialize begin slot=%u\n", slot);
+		log_kmsg(details);
+	}
 	size = retro_serialize_size();
 	if (state_path(slot, path, sizeof(path)) < 0 || !size ||
 			size > SAVE_RAM_MAX || size > UINT32_MAX ||
 			ensure_save_dir() < 0) {
 		log_kmsg("save state unavailable\n");
 		return -1;
+	}
+	{
+		char details[112];
+
+		snprintf(details, sizeof(details),
+			"save state serialize size slot=%u bytes=%lu\n", slot,
+			(unsigned long)size);
+		log_kmsg(details);
 	}
 	data = malloc(size);
 	if (!data) {
@@ -1649,6 +1737,7 @@ static int save_state_slot(unsigned slot)
 		log_kmsg("save state serialization failed\n");
 		return -1;
 	}
+	log_kmsg("save state serialize complete\n");
 	memset(&header, 0, sizeof(header));
 	memcpy(header.magic, "SF2KST01", sizeof(header.magic));
 	header.version = 1;
@@ -1660,7 +1749,6 @@ static int save_state_slot(unsigned slot)
 		return -1;
 	}
 	free(data);
-	sync();
 	{
 		char details[96];
 

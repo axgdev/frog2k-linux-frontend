@@ -199,7 +199,8 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-include$(abspath src/mufrog_qpsx_config.h)
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
-	patches/mufrog/qpsx-static-load-buffer.patch
+	patches/mufrog/qpsx-static-load-buffer.patch \
+	patches/mufrog/qpsx-cue-failure.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
 MUFROG_handy_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/handy/lynx) -DWANT_CRC32
 MUFROG_fbalpha2012_EXTRA_CFLAGS := -include$(abspath src/mufrog_wchar_compat.h) \
@@ -766,7 +767,7 @@ build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES
 	mkdir -p '$$(@D)'
 	test -d '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)'
 	cp -a '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)/.' '$$(@D)/'
-	for patch_file in $(MUFROG_$(call mufrog_key,$(1))_PATCHES); do \
+	set -eu; for patch_file in $(MUFROG_$(call mufrog_key,$(1))_PATCHES); do \
 		patch -d '$$(@D)' -p1 < "$$$$patch_file"; \
 	done
 	touch '$$@'
