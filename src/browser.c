@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+#define _GNU_SOURCE
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -15,6 +17,8 @@
 #include <sys/ioctl.h>
 #include <sys/sysinfo.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -44,6 +48,8 @@ extern long syscall(long number, ...);
 #define LINUX_DT_REG 8u
 #define UI_DIAGNOSTIC_PATH SD_ROOT "/sf2000/ui-diagnostic.bin"
 #define UI_DIAGNOSTIC_MAGIC "SF2KUID1"
+#define BUSYBOX_PATH "/bin/busybox"
+#define ZIP_WORK_DIR "/tmp/sf2000-rom"
 
 struct linux_dirent64 {
 	uint64_t inode;
@@ -744,63 +750,63 @@ struct core_route {
  * disambiguate generic extensions such as .bin, .rom, and .zip.
  */
 static const struct core_route core_routes[] = {
-	{ "QUICKNES", "nes",
+	{ "QUICKNES", "nes|zip",
 		"/mnt/sd/sf2000/cores/sf2000-quicknes", "QuickNES", 0 },
-	{ "GB|GBC", "gb|gbc", GAMBATTE_PATH, "Gambatte", 0 },
-	{ "GB|GBC", "gb|gbc",
+	{ "GB|GBC", "gb|gbc|zip", GAMBATTE_PATH, "Gambatte", 0 },
+	{ "GB|GBC", "gb|gbc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-gearboy", "Gearboy", 0 },
-	{ "GBA", "gba", GPSP_PATH, "gpSP", 40 },
-	{ "GBA", "gba",
+	{ "GBA", "gba|zip", GPSP_PATH, "gpSP", 40 },
+	{ "GBA", "gba|zip",
 		"/mnt/sd/sf2000/cores/sf2000-gpsp-multicore", "gpSP multicore", 40 },
-	{ "NES|FDS", "nes|fds", FCEUMM_PATH, "FCEUmm", 0 },
-	{ "NES|FDS", "nes|fds",
+	{ "NES|FDS", "nes|fds|zip", FCEUMM_PATH, "FCEUmm", 0 },
+	{ "NES|FDS", "nes|fds|zip",
 		"/mnt/sd/sf2000/cores/sf2000-fceumm-prosty", "FCEUmm Prosty", 0 },
 	{ "MD|GENESIS|MEGADRIVE|SMS|GG|32X",
-		"md|gen|smd|sms|gg|sg|32x|cue|chd|iso",
+		"md|gen|smd|sms|gg|sg|32x|cue|chd|iso|zip",
 		"/mnt/sd/sf2000/cores/sf2000-picodrive", "PicoDrive", 0 },
-	{ "SNES|SFC", "sfc|smc",
+	{ "SNES|SFC", "sfc|smc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2005", "Snes9x 2005", 0 },
-	{ "SNES9X2002", "sfc|smc",
+	{ "SNES9X2002", "sfc|smc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2002", "Snes9x 2002", 0 },
-	{ "SNES|SFC", "sfc|smc",
+	{ "SNES|SFC", "sfc|smc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2005-prosty", "Snes9x 2005 Prosty", 0 },
-	{ "SNES9X2002", "sfc|smc",
+	{ "SNES9X2002", "sfc|smc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-snes9x2002-prosty", "Snes9x 2002 Prosty", 0 },
-	{ "GB|GBC", "gb|gbc",
+	{ "GB|GBC", "gb|gbc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-gambatte-prosty", "Gambatte Prosty", 0 },
-	{ "NES|FDS", "nes|fds",
+	{ "NES|FDS", "nes|fds|zip",
 		"/mnt/sd/sf2000/cores/sf2000-quicknes-prosty", "QuickNES Prosty", 0 },
-	{ "PCE|PCENGINE|SGX", "pce|sgx|cue|chd",
+	{ "PCE|PCENGINE|SGX", "pce|sgx|cue|chd|zip",
 		"/mnt/sd/sf2000/cores/sf2000-pce-fast", "PCE Fast", 0 },
-	{ "PS|PSX|PLAYSTATION", "bin|iso|img|cue|pbp",
+	{ "PS|PSX|PLAYSTATION", "bin|iso|img|cue|pbp|zip",
 		"/mnt/sd/sf2000/cores/sf2000-qpsx", "QPSX", 48 },
 	{ "ARCADE|MAME", "zip",
 		"/mnt/sd/sf2000/cores/sf2000-mame2000", "MAME 2000", 0 },
 	{ "FBNEO|FBA", "zip",
 		"/mnt/sd/sf2000/cores/sf2000-fbalpha2012", "FB Alpha 2012", 0 },
-	{ "ATARI2600|A2600", "a26|bin",
+	{ "ATARI2600|A2600", "a26|bin|zip",
 		"/mnt/sd/sf2000/cores/sf2000-stella2014", "Stella 2014", 0 },
-	{ "ATARI5200|A5200", "a52|bin",
+	{ "ATARI5200|A5200", "a52|bin|zip",
 		"/mnt/sd/sf2000/cores/sf2000-a5200", "A5200", 0 },
-	{ "ATARI800|A800|ATARI8", "a8|atr|xex|xfd|dcm|cas",
+	{ "ATARI800|A800|ATARI8", "a8|atr|xex|xfd|dcm|cas|zip",
 		"/mnt/sd/sf2000/cores/sf2000-atari800lib", "Atari 800", 0 },
-	{ "ATARI7800|A7800", "a78|bin",
+	{ "ATARI7800|A7800", "a78|bin|zip",
 		"/mnt/sd/sf2000/cores/sf2000-prosystem", "ProSystem", 0 },
-	{ "LYNX", "lnx",
+	{ "LYNX", "lnx|zip",
 		"/mnt/sd/sf2000/cores/sf2000-handy", "Handy", 0 },
-	{ "NGP|NGPC", "ngp|ngc",
+	{ "NGP|NGPC", "ngp|ngc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-race", "RACE", 0 },
-	{ "WS|WSC|WONDERSWAN", "ws|wsc",
+	{ "WS|WSC|WONDERSWAN", "ws|wsc|zip",
 		"/mnt/sd/sf2000/cores/sf2000-beetle-cygne", "Beetle Cygne", 0 },
-	{ "COLECO|COLECOVISION", "col|rom",
+	{ "COLECO|COLECOVISION", "col|rom|zip",
 		"/mnt/sd/sf2000/cores/sf2000-gearcoleco", "Gearcoleco", 0 },
-	{ "C64|COMMODORE64", "d64|t64|x64|p00|prg",
+	{ "C64|COMMODORE64", "d64|t64|x64|p00|prg|zip",
 		"/mnt/sd/sf2000/cores/sf2000-frodo", "Frodo", 0 },
-	{ "PICO8", "p8",
+	{ "PICO8", "p8|png|p8c|zip",
 		"/mnt/sd/sf2000/cores/sf2000-fake08", "Fake-08", 0 },
-	{ "MSX", "rom|mx1|mx2|dsk|cas",
+	{ "MSX|MSX1|MSX2", "rom|mx1|mx2|dsk|cas|zip",
 		"/mnt/sd/sf2000/cores/sf2000-bluemsx", "blueMSX", 0 },
-	{ "JAVASCRIPT|JS2300|CHIP8", "js|mjs|ch8|chip8",
+	{ "JAVASCRIPT|JS2300|CHIP8", "js|mjs|ch8|chip8|zip",
 		"/mnt/sd/sf2000/cores/sf2000-js2300", "JS2300", 0 },
 };
 
@@ -867,8 +873,18 @@ static const struct core_route *choose_core(int input,
 	unsigned choice_count, const char *family)
 {
 	unsigned choice = 0;
+	unsigned first_choice = 0;
 	struct input_event event;
 	char message[96];
+	unsigned visible;
+
+	if (!choice_count)
+		return NULL;
+	visible = height > 112u ? (height - 112u) / 45u : 1u;
+	if (visible > choice_count)
+		visible = choice_count;
+	if (!visible)
+		visible = 1u;
 
 	for (unsigned i = 0; i < choice_count; i++)
 		if (!choices[i]) {
@@ -885,22 +901,34 @@ static const struct core_route *choose_core(int input,
 		unsigned i;
 		struct pollfd wait = { .fd = input, .events = POLLIN };
 
+		if (choice < first_choice)
+			first_choice = choice;
+		if (choice >= first_choice + visible)
+			first_choice = choice - visible + 1u;
+
 		sf2000_ui_clear(&ui, ui.config.background);
 		sf2000_ui_fill(&ui, 0, 0, (int)width, 42, ui.config.panel);
 		sf2000_ui_text(&ui, 13, 11,
 			sf2000_ui_label(&ui, SF2000_UI_SELECT_CORE),
 			ui.config.header, (int)width - 26);
-		for (i = 0; i < choice_count; i++) {
+		for (i = 0; i < visible; i++) {
+			unsigned index = first_choice + i;
 			int y = 80 + (int)i * 45;
-			uint16_t color = i == choice ? ui.config.selected_text :
+			uint16_t color = index == choice ? ui.config.selected_text :
 				ui.config.text;
 
-			if (i == choice)
+			if (index == choice)
 				sf2000_ui_round(&ui, 22, y - 10, (int)width - 44,
 					34, 7, ui.config.accent);
-			sf2000_ui_text(&ui, 35, y, choices[i]->name, color,
+			sf2000_ui_text(&ui, 35, y, choices[index]->name, color,
 				(int)width - 70);
 		}
+		if (first_choice)
+			sf2000_ui_text(&ui, (int)width - 30, 55, "^",
+			ui.config.muted, 16);
+		if (first_choice + visible < choice_count)
+			sf2000_ui_text(&ui, (int)width - 30,
+				(int)height - 38, "v", ui.config.muted, 16);
 		sf2000_ui_text(&ui, 14, (int)height - 22, "A  OK    B  BACK",
 			ui.config.muted, (int)width - 28);
 		(void)write_frame();
@@ -925,6 +953,31 @@ static const struct core_route *choose_core(int input,
 				return NULL;
 		}
 	}
+}
+
+static const struct core_route *choose_any_core(int input)
+{
+	const struct core_route *choices[sizeof(core_routes) /
+		(sizeof(core_routes[0]))];
+	unsigned count = 0;
+	unsigned i;
+
+	for (i = 0; i < sizeof(core_routes) / sizeof(core_routes[0]); i++) {
+		unsigned duplicate = 0;
+		unsigned j;
+
+		if (access(core_routes[i].executable, X_OK) < 0)
+			continue;
+		for (j = 0; j < count; j++)
+			if (!strcmp(choices[j]->executable,
+					core_routes[i].executable)) {
+				duplicate = 1;
+				break;
+			}
+		if (!duplicate)
+			choices[count++] = &core_routes[i];
+	}
+	return choose_core(input, NULL, choices, count, "ALL");
 }
 
 static const struct core_route *choose_nes_core(int input,
@@ -971,6 +1024,133 @@ static const struct core_route *choose_gb_core(int input,
 	return choose_core(input, fallback, choices, 3u, "GB");
 }
 
+static int run_busybox(char *const argv[])
+{
+	pid_t child;
+	int status;
+
+	child = vfork();
+	if (child < 0)
+		return -1;
+	if (!child) {
+		execve(BUSYBOX_PATH, argv, (char *const[]){ NULL });
+		_exit(127);
+	}
+	if (waitpid(child, &status, 0) != child)
+		return -1;
+	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int archive_route_keeps_zip(const struct core_route *route)
+{
+	/* Arcade cores need the complete set of files in the archive. */
+	return route && (!strcmp(route->name, "MAME 2000") ||
+		!strcmp(route->name, "FB Alpha 2012"));
+}
+
+static int archive_extension_matches(const char *name,
+	const struct core_route *route)
+{
+	const char *dot = strrchr(name, '.');
+
+	return dot && dot[1] && route && strcasecmp(dot + 1, "zip") &&
+		list_contains(route->extensions, dot + 1, strlen(dot + 1));
+}
+
+static int archive_member_priority(const char *name,
+	const struct core_route *route)
+{
+	const char *dot = strrchr(name, '.');
+
+	if (!archive_extension_matches(name, route))
+		return 0;
+	if (!strcasecmp(dot + 1, "cue") || !strcasecmp(dot + 1, "m3u"))
+		return 3;
+	if (!strcasecmp(dot + 1, "chd") || !strcasecmp(dot + 1, "iso") ||
+			!strcasecmp(dot + 1, "pbp"))
+		return 2;
+	return 1;
+}
+
+static void scan_archive_directory(const char *directory,
+	const struct core_route *route, unsigned depth, char *selected,
+	size_t selected_size, int *selected_priority, char *fallback,
+	size_t fallback_size)
+{
+	DIR *dir;
+	struct dirent *entry;
+	char candidate[MAX_PATH];
+
+	if (depth > 8u)
+		return;
+	dir = opendir(directory);
+	if (!dir)
+		return;
+	while ((entry = readdir(dir))) {
+		struct stat info;
+		int priority;
+
+		if (entry->d_name[0] == '.' ||
+				snprintf(candidate, sizeof(candidate), "%s/%s",
+					directory, entry->d_name) >= (int)sizeof(candidate) ||
+				lstat(candidate, &info) < 0)
+			continue;
+		if (S_ISDIR(info.st_mode)) {
+			scan_archive_directory(candidate, route, depth + 1u,
+				selected, selected_size, selected_priority, fallback,
+				fallback_size);
+			continue;
+		}
+		if (!S_ISREG(info.st_mode))
+			continue;
+		if (!fallback[0])
+			snprintf(fallback, fallback_size, "%s", candidate);
+		priority = archive_member_priority(entry->d_name, route);
+		if (priority > *selected_priority) {
+			snprintf(selected, selected_size, "%s", candidate);
+			*selected_priority = priority;
+		}
+	}
+	closedir(dir);
+}
+
+static int extract_archive(const char *archive,
+	const struct core_route *route, char *output, size_t output_size)
+{
+	char *const remove_argv[] = {
+		(char *)BUSYBOX_PATH, (char *)"rm", (char *)"-rf",
+		(char *)ZIP_WORK_DIR, NULL
+	};
+	char *const mkdir_argv[] = {
+		(char *)BUSYBOX_PATH, (char *)"mkdir", (char *)"-p",
+		(char *)ZIP_WORK_DIR, NULL
+	};
+	char *const unzip_argv[] = {
+		(char *)BUSYBOX_PATH, (char *)"unzip", (char *)"-o", (char *)"-q",
+		(char *)archive, (char *)"-d",
+		(char *)ZIP_WORK_DIR, NULL
+	};
+	char fallback[MAX_PATH] = { 0 };
+	int selected_priority = 0;
+
+	if (run_busybox(remove_argv) != 0 || run_busybox(mkdir_argv) != 0 ||
+			run_busybox(unzip_argv) != 0) {
+		log_message("archive extraction failed");
+		return -1;
+	}
+	scan_archive_directory(ZIP_WORK_DIR, route, 0, output, output_size,
+		&selected_priority, fallback, sizeof(fallback));
+	if (selected_priority)
+		return 0;
+	if (!fallback[0]) {
+		log_message("archive extraction produced no regular ROM member");
+		return -1;
+	}
+	/* A manually selected core is allowed to try an unfamiliar extension. */
+	snprintf(output, output_size, "%s", fallback);
+	return 0;
+}
+
 static int media_path(const char *p)
 {
 	const char *dot = strrchr(p, '.');
@@ -992,7 +1172,7 @@ static int media_path(const char *p)
 
 static void launch_selected(int input)
 {
-	char path[MAX_PATH], message[640];
+	char path[MAX_PATH], launch_path[MAX_PATH], message[640];
 	const struct core_route *route;
 
 	if (snprintf(path, sizeof(path), "%s/%s", current, entries[selected].name) >=
@@ -1007,6 +1187,7 @@ static void launch_selected(int input)
 		scan_directory();
 		return;
 	}
+	snprintf(launch_path, sizeof(launch_path), "%s", path);
 	route = core_for_path(path);
 	if (!route) {
 		if (media_path(path)) {
@@ -1027,32 +1208,53 @@ static void launch_selected(int input)
 			log_message(message);
 			return;
 		}
-		log_message("unsupported file or directory route");
-		return;
+		if (strrchr(path, '.') &&
+				!strcasecmp(strrchr(path, '.') + 1, "zip")) {
+			route = choose_any_core(input);
+			if (!route)
+				return;
+		} else {
+			log_message("unsupported file or directory route; opening core chooser");
+			route = choose_any_core(input);
+			if (!route)
+				return;
+		}
 	}
 	{
 		const char *extension = strrchr(path, '.');
+		int zip = extension && !strcasecmp(extension, ".zip");
 
-		if (extension && !strcasecmp(extension, ".nes")) {
+		if (extension && (!strcasecmp(extension, ".nes") ||
+				(zip && path_has_directory(path, "NES|FDS")))) {
 			route = choose_nes_core(input, route);
 			if (!route)
 				return;
 		} else if (extension &&
 				(!strcasecmp(extension, ".sfc") ||
-					 !strcasecmp(extension, ".smc"))) {
+						 !strcasecmp(extension, ".smc") ||
+						 (zip && path_has_directory(path, "SNES|SFC|SNES9X2002")))) {
 			route = choose_snes_core(input, route);
 			if (!route)
 				return;
 		} else if (extension &&
 				(!strcasecmp(extension, ".gb") ||
-					 !strcasecmp(extension, ".gbc"))) {
+						 !strcasecmp(extension, ".gbc") ||
+						 (zip && path_has_directory(path, "GB|GBC")))) {
 			route = choose_gb_core(input, route);
 			if (!route)
 				return;
-		} else if (extension && !strcasecmp(extension, ".gba")) {
+		} else if (extension && (!strcasecmp(extension, ".gba") ||
+				(zip && path_has_directory(path, "GBA")))) {
 			route = choose_gba_core(input, route);
 			if (!route)
 				return;
+		}
+		if (zip && !archive_route_keeps_zip(route) &&
+				extract_archive(path, route, launch_path,
+					sizeof(launch_path)) < 0) {
+			draw_message(SF2000_UI_LOADING, SF2000_UI_ACTIVE,
+				"ZIP ERROR", 0xf800);
+			return;
 		}
 	}
 	{
@@ -1084,7 +1286,8 @@ static void launch_selected(int input)
 			}
 		}
 
-		snprintf(message, sizeof(message), "launch %s %s", route->name, path);
+		snprintf(message, sizeof(message), "launch %s %s%s", route->name,
+			path, strcmp(path, launch_path) ? " (extracted)" : "");
 		/* Replace the browser before the static-PIE loader allocates and
 		 * relocates the core, so the handoff never looks like a frozen
 		 * selection screen. */
@@ -1097,7 +1300,7 @@ static void launch_selected(int input)
 		close_ge_presenter();
 		{
 			char *const argv[] = {
-				(char *)route->executable, path, NULL
+				(char *)route->executable, launch_path, NULL
 			};
 			char *const envp[] = { NULL };
 

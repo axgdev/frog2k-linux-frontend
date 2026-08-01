@@ -36,15 +36,15 @@ extern int cacheflush(void *address, int bytes, int cache);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
 #define METRICS_PATH "/run/sf2000-frontend-metrics"
-#define AUDIO_BUFFER_SAMPLES 4096u
+#define AUDIO_BUFFER_SAMPLES 16384u
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
 #define AUDIO_RECOVERY_RATE 32256u
 #define AUDIO_DRAIN_RATE 31744u
-#define AUDIO_DELAY_LOW 4096
-#define AUDIO_DELAY_TARGET 5632
-#define AUDIO_DELAY_HIGH 7168
+#define AUDIO_DELAY_LOW 6144
+#define AUDIO_DELAY_TARGET 9216
+#define AUDIO_DELAY_HIGH 12288
 #define AUDIO_FEEDBACK_INTERVAL 8u
 #define GE_SOURCE_BUFFERS 2u
 #define CORE_OPTIONS_MAX 48u
@@ -463,7 +463,8 @@ static bool environment(unsigned command, void *data)
 	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
 		host.format = *(enum retro_pixel_format *)data;
 		return host.format == RETRO_PIXEL_FORMAT_RGB565 ||
-			host.format == RETRO_PIXEL_FORMAT_XRGB8888;
+			host.format == RETRO_PIXEL_FORMAT_XRGB8888 ||
+			host.format == RETRO_PIXEL_FORMAT_0RGB1555;
 	case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
 		*(const char **)data = host.system_dir;
 		return true;
@@ -489,6 +490,16 @@ static uint16_t xrgb8888_to_565(uint32_t pixel)
 {
 	return (uint16_t)(((pixel >> 8) & 0xf800u) |
 		((pixel >> 5) & 0x07e0u) | ((pixel >> 3) & 0x001fu));
+}
+
+static uint16_t rgb1555_to_565(uint16_t pixel)
+{
+	unsigned red = (pixel >> 10) & 0x1fu;
+	unsigned green = (pixel >> 5) & 0x1fu;
+	unsigned blue = pixel & 0x1fu;
+
+	green = (green << 1) | (green >> 4);
+	return (uint16_t)((red << 11) | (green << 5) | blue);
 }
 
 static uint32_t frame_hash(const void *data, unsigned height, size_t pitch)
@@ -530,6 +541,9 @@ static void cpu_present(const void *data, unsigned width, unsigned height,
 			if (host.format == RETRO_PIXEL_FORMAT_RGB565)
 				dst[x] = *(const uint16_t *)((const uint8_t *)data +
 					src_y * pitch + src_x * 2u);
+			else if (host.format == RETRO_PIXEL_FORMAT_0RGB1555)
+				dst[x] = rgb1555_to_565(*(const uint16_t *)((
+					const uint8_t *)data + src_y * pitch + src_x * 2u));
 			else
 				dst[x] = xrgb8888_to_565(*(const uint32_t *)(
 					(const uint8_t *)data + src_y * pitch + src_x * 4u));
@@ -573,9 +587,9 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	 * stretch after the staging fence releases its callback surface.
 	 */
 	if (((host.format == RETRO_PIXEL_FORMAT_RGB565 &&
-			pitch >= (size_t)width * sizeof(uint16_t)) ||
+			pitch == (size_t)width * sizeof(uint16_t)) ||
 			(host.format == RETRO_PIXEL_FORMAT_XRGB8888 &&
-			pitch >= (size_t)width * sizeof(uint32_t))) &&
+			pitch == (size_t)width * sizeof(uint32_t))) &&
 			source_bytes <= UINT_MAX &&
 			(uintptr_t)data + source_bytes >= (uintptr_t)data &&
 			(uintptr_t)data + source_bytes <= 0xa0000000u)
@@ -659,7 +673,7 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 				width * height * sizeof(uint16_t)) < 0)
 			return -1;
 		interval_buffered_frames++;
-	} else {
+	} else if (host.format == RETRO_PIXEL_FORMAT_XRGB8888) {
 		for (y = 0; y < height; y++) {
 			const uint32_t *input = (const uint32_t *)
 				((const uint8_t *)data + y * pitch);
@@ -668,6 +682,21 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 
 			for (x = 0; x < width; x++)
 				output[x] = xrgb8888_to_565(input[x]);
+		}
+		source_phys = host.ge_source_phys[source_index];
+		if (hcge_linux_cache_clean(host.ge, source_buffer,
+				width * height * sizeof(uint16_t)) < 0)
+			return -1;
+		interval_buffered_frames++;
+	} else {
+		for (y = 0; y < height; y++) {
+			const uint16_t *input = (const uint16_t *)
+				((const uint8_t *)data + y * pitch);
+			uint16_t *output = source_buffer + y * width;
+			unsigned x;
+
+			for (x = 0; x < width; x++)
+				output[x] = rgb1555_to_565(input[x]);
 		}
 		source_phys = host.ge_source_phys[source_index];
 		if (hcge_linux_cache_clean(host.ge, source_buffer,
@@ -939,22 +968,24 @@ static int open_audio(void)
 		SNDRV_PCM_SUBFORMAT_STD);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS, 1);
 	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE, AUDIO_OUTPUT_RATE);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 1024);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 8192);
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 2048);
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 16);
+	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 32768);
 	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hardware) < 0)
 		goto fail;
 	memset(&software, 0, sizeof(software));
 	software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
 	software.period_step = 1;
-	software.avail_min = 1024;
+	software.avail_min = 2048;
 	/*
-	 * Prime seven periods before START.  The HC15xx ring guard keeps this
-	 * below the ambiguous completely-full cursor state.  The resulting
-	 * 224 ms lead absorbs ROM-cache and dynarec bursts on the single CPU.
+	 * Prime a little under half of the 32K-frame DMA ring before START. The
+	 * HC15xx ring guard keeps this below the ambiguous completely-full cursor
+	 * state. The resulting lead absorbs ROM-cache and dynarec bursts on the
+	 * single CPU; the kernel repeats the last period if a sustained slow core
+	 * still catches the consumer.
 	 */
-	software.start_threshold = AUDIO_DELAY_HIGH;
-	software.stop_threshold = 8192;
+	software.start_threshold = AUDIO_DELAY_TARGET;
+	software.stop_threshold = 32768;
 	software.boundary = 0x40000000u;
 	software.proto = SNDRV_PCM_VERSION;
 	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS, &software) < 0 ||
