@@ -38,7 +38,8 @@ are routed by directory and extension to independent static-PIE packages below
 instead of a frozen selection. This keeps new cores independently deployable
 and prevents the full core catalog from increasing every boot image.
 `make core-packages` currently produces independently licensed QuickNES,
-Snes9x 2005, Snes9x 2002, and ProSystem executables. Put them below
+Snes9x 2005, Snes9x 2002, ProSystem, Stella 2014, Gearboy, and PCE Fast
+executables. Put them below
 `/sf2000/cores` using
 their existing `sf2000-*` names. Opening a `.nes` file presents a FCEUmm /
 QuickNES chooser; `/NES` initially selects FCEUmm and `/QUICKNES` initially
@@ -89,6 +90,9 @@ ends and drains it after every clean exit or crash before relaunching the home
 menu. This keeps diagnostics intact without allowing logger FAT traffic to
 contend with ROM reads or real-time audio on the single SD/MMC channel, while
 avoiding an indefinitely deferred journal while the idle browser is open.
+START+RIGHT forces the platform logger to commit a durable checkpoint; the
+daemon recognizes it independently of the frontend so it also works during an
+early core hang. START+UP writes the UI source/GE/CPU diagnostic artifact.
 The integrated image covers
 browsing, ROM loading, emulation, video, audio, input, saves, and clean process
 handoff.
