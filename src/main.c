@@ -50,6 +50,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define CORE_LOAD_TIMEOUT_SECONDS 30u
 #define CORE_RUN_TIMEOUT_SECONDS 10u
 #define AUDIO_CONVERT_CAPACITY (AUDIO_CONVERT_SAMPLES * 8u)
+#define AUDIO_WRITE_CHUNK 1024u
 #define GE_SOURCE_BUFFERS 2u
 #define GE_SOURCE_MAX_WIDTH 512u
 #define GE_SOURCE_MAX_HEIGHT 320u
@@ -79,6 +80,7 @@ struct host {
 	size_t ge_source_bytes;
 	unsigned ge_width, ge_height, ge_buffers, ge_next, ge_pending;
 	int pcm_fd;
+	unsigned audio_channels;
 	unsigned audio_rate, audio_head, audio_count;
 	unsigned audio_tail_write, audio_tail_count, audio_tail_play;
 	unsigned audio_resample_rate, audio_feedback_counter;
@@ -1076,82 +1078,108 @@ static void pcm_set_interval(struct snd_pcm_hw_params *parameters,
 
 static int open_audio(void)
 {
-	struct snd_pcm_hw_params hardware;
-	struct snd_pcm_sw_params software;
-	unsigned i;
-	const char *failure_stage = "open";
-	int failure_errno;
+	const unsigned channel_attempts[] = { 2, 1 };
+	unsigned attempt;
 
-	host.pcm_fd = open("/dev/snd/pcmC0D0p",
-		O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-	if (host.pcm_fd < 0)
-		goto fail;
-	memset(&hardware, 0, sizeof(hardware));
-	for (i = 0; i < sizeof(hardware.masks) / sizeof(hardware.masks[0]); i++)
-		memset(&hardware.masks[i], 0xff, sizeof(hardware.masks[i]));
-	for (i = 0; i < sizeof(hardware.intervals) /
-			sizeof(hardware.intervals[0]); i++) {
-		hardware.intervals[i].max = UINT_MAX;
-		hardware.intervals[i].integer = 1;
-	}
-	hardware.rmask = ~0u;
-	pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_ACCESS,
-		SNDRV_PCM_ACCESS_RW_INTERLEAVED);
-	pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_FORMAT,
-		SNDRV_PCM_FORMAT_S16_LE);
-	pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_SUBFORMAT,
-		SNDRV_PCM_SUBFORMAT_STD);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS, 1);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE, AUDIO_OUTPUT_RATE);
-	/* The HC15xx ALSA driver has an 8-period hardware ring.  Keep the
-	 * userspace queue large, but use the device geometry it accepts. */
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 1024);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
-	pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 8192);
-	failure_stage = "hw_params";
-	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hardware) < 0)
-		goto fail;
-	memset(&software, 0, sizeof(software));
-	software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
-	software.period_step = 1;
-	software.avail_min = 1024;
-	/*
-	 * Prime most of the small DMA ring before START. The kernel repeats the
-	 * last period if a sustained slow core still catches the consumer.
-	 */
-	software.start_threshold = AUDIO_DELAY_TARGET;
-	software.stop_threshold = 8192;
-	software.boundary = 0x40000000u;
-	software.proto = SNDRV_PCM_VERSION;
-	failure_stage = "sw_params";
-	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS, &software) < 0)
-		goto fail;
-	failure_stage = "prepare";
-	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
-		goto fail;
-	failure_stage = "resampler";
-	if (hc15xx_resampler_init(&host.resampler, host.audio_rate,
-			AUDIO_OUTPUT_RATE) < 0)
-		goto fail;
-	host.audio_resample_rate = AUDIO_OUTPUT_RATE;
-	host.audio_delay = 0;
-	host.audio_feedback_counter = 0;
-	log_kmsg("ALSA mono DMA presenter ready linear-resampler\n");
-	return 0;
-fail:
-	failure_errno = errno;
-	{
-		char details[192];
+	for (attempt = 0; attempt < sizeof(channel_attempts) /
+			sizeof(channel_attempts[0]); ++attempt) {
+		struct snd_pcm_hw_params hardware;
+		struct snd_pcm_sw_params software;
+		unsigned channels = channel_attempts[attempt];
+		unsigned i;
+		const char *failure_stage = "open";
+		int failure_errno;
 
-		snprintf(details, sizeof(details),
-			"ALSA open failed stage=%s errno=%d period=1024 periods=8 buffer=8192\n",
-			failure_stage, failure_errno);
-		log_kmsg(details);
+		host.pcm_fd = open("/dev/snd/pcmC0D0p",
+			O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+		if (host.pcm_fd < 0)
+			failure_errno = errno;
+		else {
+			memset(&hardware, 0, sizeof(hardware));
+			for (i = 0; i < sizeof(hardware.masks) /
+					sizeof(hardware.masks[0]); i++)
+				memset(&hardware.masks[i], 0xff,
+					sizeof(hardware.masks[i]));
+			for (i = 0; i < sizeof(hardware.intervals) /
+					sizeof(hardware.intervals[0]); i++) {
+				hardware.intervals[i].max = UINT_MAX;
+				hardware.intervals[i].integer = 1;
+			}
+			hardware.rmask = ~0u;
+			pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_ACCESS,
+				SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+			pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_FORMAT,
+				SNDRV_PCM_FORMAT_S16_LE);
+			pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_SUBFORMAT,
+				SNDRV_PCM_SUBFORMAT_STD);
+			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS,
+				channels);
+			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE,
+				AUDIO_OUTPUT_RATE);
+			/* The HC15xx ALSA driver has an 8-period hardware ring. */
+			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+				1024);
+			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
+			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+				8192);
+			failure_stage = "hw_params";
+			if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS,
+					&hardware) >= 0) {
+				memset(&software, 0, sizeof(software));
+				software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
+				software.period_step = 1;
+				software.avail_min = 1024;
+				/* Prime most of the small DMA ring. */
+				software.start_threshold = AUDIO_DELAY_TARGET;
+				software.stop_threshold = 8192;
+				software.boundary = 0x40000000u;
+				software.proto = SNDRV_PCM_VERSION;
+				failure_stage = "sw_params";
+				if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS,
+						&software) >= 0) {
+					failure_stage = "prepare";
+					if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) >= 0) {
+						failure_stage = "resampler";
+						if (hc15xx_resampler_init(&host.resampler,
+								host.audio_rate,
+								AUDIO_OUTPUT_RATE) == 0) {
+							host.audio_channels = channels;
+							host.audio_resample_rate =
+								AUDIO_OUTPUT_RATE;
+							host.audio_delay = 0;
+							host.audio_feedback_counter = 0;
+							{
+								char details[128];
+
+								snprintf(details, sizeof(details),
+									"ALSA %s DMA presenter ready "
+									"linear-resampler\n",
+									channels == 2 ? "stereo" : "mono");
+								log_kmsg(details);
+							}
+							return 0;
+						}
+					}
+				}
+			}
+			failure_errno = errno;
+		}
+
+		if (host.pcm_fd >= 0) {
+			close(host.pcm_fd);
+			host.pcm_fd = -1;
+		}
+		{
+			char details[224];
+
+			snprintf(details, sizeof(details),
+				"ALSA %s open failed stage=%s errno=%d "
+				"period=1024 periods=8 buffer=8192\n",
+				channels == 2 ? "stereo" : "mono", failure_stage,
+				failure_errno);
+			log_kmsg(details);
+		}
 	}
-	if (host.pcm_fd < 0)
-		return -1;
-	close(host.pcm_fd);
-	host.pcm_fd = -1;
 	return -1;
 }
 
@@ -1159,6 +1187,8 @@ static void audio_flush(void)
 {
 	const unsigned capacity = sizeof(host.audio_buffer) /
 		sizeof(host.audio_buffer[0]);
+	int16_t stereo[AUDIO_WRITE_CHUNK * 2];
+	unsigned channels = host.audio_channels ? host.audio_channels : 1;
 
 	if (host.pcm_fd < 0)
 		return;
@@ -1169,8 +1199,25 @@ static void audio_flush(void)
 
 		if (contiguous > host.audio_count)
 			contiguous = host.audio_count;
-		bytes = write(host.pcm_fd, host.audio_buffer + host.audio_head,
-			contiguous * sizeof(host.audio_buffer[0]));
+		if (contiguous > AUDIO_WRITE_CHUNK)
+			contiguous = AUDIO_WRITE_CHUNK;
+		if (channels == 2) {
+			unsigned i;
+
+			for (i = 0; i < contiguous; ++i) {
+				int16_t sample = host.audio_buffer[
+					(host.audio_head + i) % capacity];
+
+				stereo[i * 2] = sample;
+				stereo[i * 2 + 1] = sample;
+			}
+			bytes = write(host.pcm_fd, stereo,
+				contiguous * channels * sizeof(stereo[0]));
+		} else {
+			bytes = write(host.pcm_fd,
+				host.audio_buffer + host.audio_head,
+				contiguous * sizeof(host.audio_buffer[0]));
+		}
 		if (bytes < 0) {
 			if (errno == EPIPE) {
 				(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
@@ -1185,7 +1232,8 @@ static void audio_flush(void)
 				audio_metrics.eagain++;
 			return;
 		}
-		consumed = (unsigned)bytes / sizeof(host.audio_buffer[0]);
+		consumed = (unsigned)bytes /
+			(channels * sizeof(host.audio_buffer[0]));
 		if (!consumed)
 			return;
 		audio_metrics.submitted += consumed;

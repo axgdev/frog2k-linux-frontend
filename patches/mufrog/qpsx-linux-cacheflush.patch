@@ -1,0 +1,42 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] qpsx: use the NOMMU Linux cacheflush syscall
+
+The SF2000 build defines SF2000 for both the original bare-metal core and the
+Linux NOMMU core.  The generic SF2000 branch therefore selected GCC's
+_flush_cache helper even in Linux, which makes the physical instruction-cache
+contract implicit and hides syscall failures.  Use the Linux BCACHE syscall
+explicitly for the Linux build; the bare-metal build retains its framework
+helper.
+
+--- a/src/recompiler/mips/recompiler.cpp
++++ b/src/recompiler/mips/recompiler.cpp
+@@ -387,5 +387,6 @@
+ #include "opcodes.h"
+ 
+-#if !defined(HAVE_MIPS32R2_CACHE_OPS) && !defined(SF2000)
++#if defined(QPSX_LINUX_CACHEFLUSH) || \
++	(!defined(HAVE_MIPS32R2_CACHE_OPS) && !defined(SF2000))
+ #include <sys/cachectl.h>
+ #endif
+@@ -395,9 +396,19 @@
+-#ifdef HAVE_MIPS32R2_CACHE_OPS
++#if defined(HAVE_MIPS32R2_CACHE_OPS) && !defined(QPSX_LINUX_CACHEFLUSH)
+	// MIPS32r2 added fine-grained usermode cache flush ability (yes, please!)
+ 	MIPS32R2_MakeCodeVisible(start, (char *)end - (char *)start);
+-#elif defined(SF2000)
++#elif defined(SF2000) && defined(QPSX_LINUX_CACHEFLUSH)
++	int length = (int)((char *)end - (char *)start);
++
++	if (length > 0 && cacheflush(start, length, BCACHE) != 0) {
++		static unsigned cache_flush_failures;
++
++		if (cache_flush_failures++ == 0)
++			printf("QPSX cacheflush failed start=%p length=%d\n",
++				start, length);
++	}
++#elif defined(SF2000)
+ 	// SF2000 bare metal: use GCC builtin which calls _flush_cache() provided
+	// by the multicore framework. This uses MIPS cache instructions directly
+	// (Index_Writeback_Inv_D + Index_Invalidate_I) since SF2000's MIPS32
+	// doesn't have the synci instruction from MIPS32r2.
+	__builtin___clear_cache((char *)start, (char *)end);
