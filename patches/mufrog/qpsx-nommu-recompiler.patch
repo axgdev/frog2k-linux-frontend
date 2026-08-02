@@ -25,7 +25,7 @@ cannot silently alter the generated code.
 +#if defined(QPSX_ENABLE_MIPS_CONST_MEM) && QPSX_ENABLE_MIPS_CONST_MEM
 +#define USE_CONST_FUZZY_ADDRESSES
 +#endif
-@@ -84,2 +84,10 @@
+@@ -84,2 +84,11 @@
 -/* Generate inline memory access or call psxMemRead/Write C functions */
 -#define USE_DIRECT_MEM_ACCESS
 +/*
@@ -39,3 +39,32 @@ cannot silently alter the generated code.
 +#if defined(QPSX_ENABLE_MIPS_DIRECT_MEM) && QPSX_ENABLE_MIPS_DIRECT_MEM
 +#define USE_DIRECT_MEM_ACCESS
 +#endif
+
+--- a/src/recompiler/mips/mips_codegen.h
++++ b/src/recompiler/mips/mips_codegen.h
+@@ -352,1 +352,2 @@
+-    write32(0x0c000000 | (((u32)(addr) & 0x0fffffff) >> 2));                   \
++    LI32(MIPSREG_T9, (u32)(addr));                                              \
++    write32(0x0000f809 | (MIPSREG_T9 << 21));                                  \
+
+--- a/src/recompiler/mips/rec_lsu.cpp.h
++++ b/src/recompiler/mips/rec_lsu.cpp.h
+@@ -75,2 +75,4 @@
+ /* Cache values in host regs in load/store emitters. */
+-#define USE_LSU_CACHING
++#if defined(QPSX_ENABLE_MIPS_LSU_CACHING) && QPSX_ENABLE_MIPS_LSU_CACHING
++#define USE_LSU_CACHING
++#endif
+
+--- a/src/recompiler/mips/rec_lsu.cpp.h
++++ b/src/recompiler/mips/rec_lsu.cpp.h
+@@ -692,4 +692,5 @@
+-				ADDIU(MIPSREG_A0, rs, imm_max);
+-				SLL(MIPSREG_A1, MIPSREG_A0, 4);
+-				backpatch_label_hle_1 = (u32 *)recMem;
+-				BLTZ(MIPSREG_A1, 0);
++				ADDIU(MIPSREG_A0, rs, imm_max);
++				LUI(TEMP_1, 0x1f80);
++				AND(TEMP_1, TEMP_1, MIPSREG_A0);
++				backpatch_label_hle_1 = (u32 *)recMem;
++				BNE(TEMP_1, 0, 0);

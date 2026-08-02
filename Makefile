@@ -197,7 +197,8 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
 	-DQPSX_ENABLE_MIPS_DIRECT_MEM=1 \
-	-include$(abspath src/mufrog_qpsx_config.h)
+	-DQPSX_ENABLE_MIPS_LSU_CACHING=1 \
+	-include$(abspath src/mufrog_qpsx_config.h) -O3
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
 	patches/mufrog/qpsx-static-load-buffer.patch \
