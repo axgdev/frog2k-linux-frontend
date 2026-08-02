@@ -1,0 +1,41 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] qpsx: keep dynamic memory fast on NOMMU
+
+The SF2000 Linux target is NOMMU and deliberately builds QPSX without
+SHMEM_MIRRORING or TMPFS_MIRRORING.  In that configuration psxM is allocated
+by malloc and the recompiler must use the checked psxMemRead/Write helpers.
+
+The upstream source also enables constant-address emission unconditionally.
+That optimization converts a PSX address to a host pointer while compiling a
+block and is unsafe when psxM is a malloc buffer.  Dynamic accesses already
+have the correct runtime range check and psxM conversion, so keep that fast
+path enabled for this target and disable only the constant-address shortcuts.
+The direct path remains an explicit build option so a future mapping change
+cannot silently alter the generated code.
+
+--- a/src/recompiler/mips/recompiler.cpp
++++ b/src/recompiler/mips/recompiler.cpp
+@@ -79,1 +79,3 @@
+-#define USE_CONST_ADDRESSES
++#if defined(QPSX_ENABLE_MIPS_CONST_MEM) && QPSX_ENABLE_MIPS_CONST_MEM
++#define USE_CONST_ADDRESSES
++#endif
+@@ -82,1 +84,3 @@
+-#define USE_CONST_FUZZY_ADDRESSES
++#if defined(QPSX_ENABLE_MIPS_CONST_MEM) && QPSX_ENABLE_MIPS_CONST_MEM
++#define USE_CONST_FUZZY_ADDRESSES
++#endif
+@@ -84,2 +84,10 @@
+-/* Generate inline memory access or call psxMemRead/Write C functions */
+-#define USE_DIRECT_MEM_ACCESS
++/*
++ * Generate inline memory access or call psxMemRead/Write C functions.
++ *
++ * Dynamic accesses perform a runtime PSX-range check and convert through the
++ * malloc-backed psxM pointer when no virtual mapping is available.  Keep this
++ * fast path explicit because the constant-address path above is not safe for
++ * NOMMU builds.
++ */
++#if defined(QPSX_ENABLE_MIPS_DIRECT_MEM) && QPSX_ENABLE_MIPS_DIRECT_MEM
++#define USE_DIRECT_MEM_ACCESS
++#endif
