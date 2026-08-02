@@ -771,15 +771,33 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		state->source.config.size.w = (int)width;
 		state->source.config.size.h = (int)height;
 		state->dst.phys = scaled_phys;
-		state->dst.pitch = GE_SOURCE_STRIDE;
+		/* Keep the intermediate compact.  The HC15xx can stage into a
+		 * larger-pitch buffer, but its physical read-after-write path can
+		 * stall when the scaled result is read through that larger pitch. */
+		state->dst.pitch = out_w * sizeof(uint16_t);
 		state->src.phys = source_phys;
 		state->src.pitch = width * sizeof(uint16_t);
 		state->accel = HCGE_DFXL_STRETCHBLIT;
 		hcge_set_state(host.ge, state, state->accel);
 		if (!hcge_stretch_blit(host.ge, &scaled_source,
 				&scaled_destination)) {
-			log_kmsg("GE oversized scale submit failed\n");
+			log_kmsg("GE oversized scale submit failed stage=stretch\n");
 			return -1;
+		}
+		/* Complete the GE-to-GE read-after-write dependency before the
+		 * second operation. Queue order alone is not sufficient on HC15xx. */
+		{
+			int sync_ret = hcge_engine_sync(host.ge);
+
+			if (sync_ret < 0) {
+				char details[96];
+
+				snprintf(details, sizeof(details),
+					"GE oversized scale sync failed stage=stretch ret=%d\n",
+					sync_ret);
+				log_kmsg(details);
+				return -1;
+			}
 		}
 
 		state->destination.config.size.w = (int)host.fb_width;
@@ -789,13 +807,25 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		state->dst.phys = host.fb_phys;
 		state->dst.pitch = host.fb_stride * sizeof(uint16_t);
 		state->src.phys = scaled_phys;
-		state->src.pitch = GE_SOURCE_STRIDE;
+		state->src.pitch = out_w * sizeof(uint16_t);
 		state->accel = HCGE_DFXL_BLIT;
 		hcge_set_state(host.ge, state, state->accel);
-		if (!hcge_blit(host.ge, &scaled_destination, left, top) ||
-				hcge_engine_sync(host.ge) < 0) {
-			log_kmsg("GE oversized scale present failed\n");
+		if (!hcge_blit(host.ge, &scaled_destination, left, top)) {
+			log_kmsg("GE oversized scale submit failed stage=present\n");
 			return -1;
+		}
+		{
+			int sync_ret = hcge_engine_sync(host.ge);
+
+			if (sync_ret < 0) {
+				char details[96];
+
+				snprintf(details, sizeof(details),
+					"GE oversized scale sync failed stage=present ret=%d\n",
+					sync_ret);
+				log_kmsg(details);
+				return -1;
+			}
 		}
 		host.ge_pending = 0;
 		host.ge_next = (source_index + 1u) % host.ge_buffers;
