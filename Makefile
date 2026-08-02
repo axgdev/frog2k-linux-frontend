@@ -36,7 +36,8 @@ STB_DIR := .deps/stb
 SF2000_LINUX_DIR ?= ../sf2000_linux
 MUFROG_ROOT ?= /root/host-frogdev/universal/temp/mufrog-commandc
 MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
-MUFROG_SDK ?= $(MUFROG_ROOT)/unifrog-hcrtos-sdk
+JS2300_ROOT ?= $(MUFROG_ROOT)/js2300
+JS2300_MQUICKJS_DIR ?= $(MUFROG_ROOT)/.deps/mquickjs
 GE_DIR := $(SF2000_LINUX_DIR)/ge
 GE_SOURCES := $(GE_DIR)/hcge_linux.c $(GE_DIR)/hcge_node.c
 AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
@@ -145,10 +146,7 @@ MUFROG_CORE_CFLAGS := -EL -march=mips32 -mtune=mips32 -mabi=32 \
 	-D__LIBRETRO__
 MUFROG_CORE_INCLUDES := \
 	-I$(SF2000_SYSROOT)/usr/include \
-	-I$(MUFROG_SOURCE_ROOT)/libretro-common/include \
-	-idirafter $(MUFROG_SDK)/include \
-	-idirafter $(MUFROG_SDK)/include/hcrtos \
-	-idirafter $(MUFROG_SDK)/include/newlib
+	-I$(MUFROG_SOURCE_ROOT)/libretro-common/include
 LIBRETRO_API_SYMBOLS := \
 	retro_set_environment retro_set_video_refresh retro_set_audio_sample \
 	retro_set_audio_sample_batch retro_set_input_poll retro_set_input_state \
@@ -274,6 +272,13 @@ MUFROG_gpsp_multicore_EXTRA_ARGS := HAVE_DYNAREC=1 CPU_ARCH=mips MMAP_JIT_CACHE=
 
 MUFROG_CORE_EXECUTABLES := $(foreach spec,$(MUFROG_CORE_SPECS),build/sf2000-$(word 1,$(subst :, ,$(spec))))
 MUFROG_MEMORY_STREAM := build/mufrog/libretro-memory-stream.a
+JS2300_RUNTIME := build/js2300/libjs2300.a
+JS2300_CORE_SOURCE := build/js2300/js2300_libretro_core.c
+JS2300_CORE_OBJECT := build/js2300/js2300_libretro_core.o
+JS2300_CORE_FS_OBJECT := build/js2300/js2300_core_fs.o
+JS2300_CORE_EXECUTABLE := build/sf2000-js2300-core
+JS2300_UI_EXECUTABLE := build/sf2000-js2300-ui
+JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 
 .PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
@@ -380,6 +385,60 @@ browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h 
 		src/sf2000_browser_ui.c src/sf2000_log.c $(GE_SOURCES) -lm \
 		$(SF2000_ENDFILES)
 
+$(JS2300_RUNTIME): $(JS2300_ROOT)/Makefile \
+		$(JS2300_ROOT)/src/js2300_runtime.c \
+		$(JS2300_ROOT)/js2300_stdlib_gen.c \
+		$(JS2300_ROOT)/include/js2300/js2300.h \
+		$(JS2300_MQUICKJS_DIR)/mquickjs.c Makefile
+	mkdir -p '$(@D)'
+	$(MAKE) -C '$(JS2300_ROOT)' \
+		BUILD='$(abspath build/js2300)' OUT='$(abspath build/js2300-out)' \
+		MQUICKJS_DIR='$(JS2300_MQUICKJS_DIR)' \
+		CC='$(SF2000_CC)' AR='$(CROSS_COMPILE)ar' \
+		CFLAGS='$(MUFROG_CORE_CFLAGS) -I$(abspath $(JS2300_ROOT)/include) \
+			-I$(abspath build/js2300) -I$(abspath build/js2300/mquickjs)' \
+		all
+	cp '$(abspath build/js2300-out/libjs2300.a)' '$@'
+	test -s '$@'
+
+$(JS2300_CORE_SOURCE): $(JS2300_ROOT)/src/libretro_core/js2300_libretro_core.c \
+		Makefile
+	mkdir -p '$(@D)'
+	cp '$<' '$@'
+	sed -i 's#/media/mmcblk0/unifrog_data/scripts/js2300-cores#/mnt/sd/sf2000/js2300-cores#g' '$@'
+	sed -i 's/#define JS2300_CORE_HEAP_BYTES (16u \* 1024u \* 1024u)/#define JS2300_CORE_HEAP_BYTES (8u * 1024u * 1024u)/' '$@'
+
+$(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h \
+		$(JS2300_ROOT)/include/js2300/js2300.h include/unifrog/abi.h Makefile
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
+		-I$(abspath $(JS2300_ROOT)/include) -Iinclude -c -o '$@' '$<'
+
+$(JS2300_CORE_FS_OBJECT): src/js2300_core_fs.c Makefile
+	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
+
+$(JS2300_CORE_EXECUTABLE): $(JS2300_RUNTIME) $(JS2300_CORE_OBJECT) \
+		$(JS2300_CORE_FS_OBJECT) $(SF2000_HOST_OBJECTS)
+	$(SF2000_CC) $(SF2000_LDFLAGS) -o '$@' \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
+		$(JS2300_CORE_OBJECT) $(JS2300_CORE_FS_OBJECT) $(JS2300_RUNTIME) \
+		$(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
+	$(SF2000_STRIP) --strip-unneeded '$@'
+
+$(JS2300_UI_EXECUTABLE): $(JS2300_RUNTIME) src/js2300_runner.c \
+		$(JS2300_ROOT)/include/js2300/js2300.h $(SF2000_HOST_OBJECTS) $(GE_SOURCES) \
+		src/sf2000_input.c src/sf2000_browser_ui.c src/sf2000_log.c
+	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
+		-I$(abspath $(JS2300_ROOT)/include) -I$(STB_DIR) \
+		$(SF2000_LDFLAGS) -o '$@' $(SF2000_STARTFILES) \
+		src/js2300_runner.c src/sf2000_input.c src/sf2000_browser_ui.c \
+		src/sf2000_log.c $(GE_SOURCES) $(JS2300_RUNTIME) -lm \
+		$(SF2000_ENDFILES)
+	$(SF2000_STRIP) --strip-unneeded '$@'
+
+.PHONY: js2300-ui js2300-core
+js2300-ui: $(JS2300_UI_EXECUTABLE)
+js2300-core: $(JS2300_CORE_EXECUTABLE)
+
 gambatte: $(SF2000_HOST_OBJECTS)
 	$(MAKE) $(GAMBATTE_CORE) $(LIBRETRO_COMMON)
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
@@ -448,7 +507,8 @@ pce-fast: $(PCE_FAST_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores
+core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores \
+	$(JS2300_CORE_EXECUTABLE) $(JS2300_UI_EXECUTABLE)
 	mkdir -p build/core-packages/licenses
 	cp build/sf2000-gambatte build/core-packages/
 	cp build/sf2000-gpsp build/core-packages/
@@ -461,6 +521,10 @@ core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 ste
 	cp build/sf2000-gearboy build/core-packages/
 	cp build/sf2000-pce-fast build/core-packages/
 	cp $(MUFROG_CORE_EXECUTABLES) build/core-packages/
+	cp $(JS2300_CORE_EXECUTABLE) build/core-packages/
+	cp $(JS2300_UI_EXECUTABLE) build/core-packages/
+	mkdir -p build/core-packages/js2300-cores
+	cp '$(JS2300_ROOT)/scripts/js2300-cores/chip8.js' '$(JS2300_SCRIPT)'
 	cp $(GAMBATTE_DIR)/COPYING build/core-packages/licenses/gambatte-COPYING
 	cp $(GPSP_DIR)/COPYING build/core-packages/licenses/gpsp-COPYING
 	cp $(FCEUMM_DIR)/Copying build/core-packages/licenses/fceumm-Copying

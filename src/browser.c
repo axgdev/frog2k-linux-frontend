@@ -894,7 +894,9 @@ static const struct core_route core_routes[] = {
 	{ "MSX|MSX1|MSX2", "rom|mx1|mx2|dsk|cas|zip",
 		"/mnt/sd/sf2000/cores/sf2000-bluemsx", "blueMSX", 0 },
 	{ "JAVASCRIPT|JS2300|CHIP8", "js|mjs|ch8|chip8|zip",
-		"/mnt/sd/sf2000/cores/sf2000-js2300", "JS2300", 0 },
+		"/mnt/sd/sf2000/cores/sf2000-js2300-core", "JS2300", 0 },
+	{ "SCRIPTS|APPS|JS2300UI", "js|mjs",
+		"/usr/bin/sf2000-js2300", "JS2300 UI", 0 },
 };
 
 static int list_contains(const char *list, const char *value, size_t length)
