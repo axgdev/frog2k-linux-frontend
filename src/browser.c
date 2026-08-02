@@ -29,8 +29,6 @@
 extern long syscall(long number, ...);
 
 #define READY_MARKER "/run/sf2000-frontend-ready"
-#define PERFORMANCE_MARKER "/run/sf2000-performance-active"
-#define PERFORMANCE_READY_MARKER "/run/sf2000-performance-ready"
 #define RESET_MARKER "/run/sf2000-reboot-request"
 #define SHUTDOWN_MARKER "/run/sf2000-shutdown-request"
 #define GAMBATTE_PATH "/mnt/sd/sf2000/cores/sf2000-gambatte"
@@ -317,16 +315,7 @@ static int path_is_extra_root(const char *path)
 
 static void begin_performance_session(void)
 {
-	unsigned attempt;
-	int marker = open(PERFORMANCE_MARKER,
-		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-
-	if (marker >= 0)
-		close(marker);
-	for (attempt = 0; attempt < 100u &&
-			access(PERFORMANCE_READY_MARKER, F_OK) != 0; attempt++)
-		(void)poll(NULL, 0, 10);
-	if (access(PERFORMANCE_READY_MARKER, F_OK) != 0)
+	if (sf2000_performance_begin() != 0)
 		log_message("performance journal acknowledgement timeout");
 }
 
@@ -1306,7 +1295,7 @@ static void launch_selected(int input)
 			save_browser_state();
 			close_ge_presenter();
 			execve(PLAYER_PATH, argv, envp);
-			(void)unlink(PERFORMANCE_MARKER);
+			sf2000_performance_end();
 			snprintf(message, sizeof(message), "player exec failed errno=%d", errno);
 			log_message(message);
 			return;
@@ -1396,7 +1385,6 @@ static void launch_selected(int input)
 		 * selection screen. */
 		draw_message(SF2000_UI_LOADING, SF2000_UI_ACTIVE, route->name,
 			ui.config.header);
-		begin_performance_session();
 		log_message(message);
 		if (sf2000_log_flush("pre-core-launch") != 0)
 			log_message("pre-core-launch log flush timed out");
@@ -1414,7 +1402,7 @@ static void launch_selected(int input)
 			 */
 			execve(route->executable, argv, envp);
 		}
-		(void)unlink(PERFORMANCE_MARKER);
+		sf2000_performance_end();
 		snprintf(message, sizeof(message), "%s exec failed errno=%d",
 			route->name, errno);
 	}

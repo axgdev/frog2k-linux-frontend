@@ -68,6 +68,7 @@ FCEUMM_PATCHES := $(wildcard patches/fceumm/*.patch)
 QUICKNES_PATCHES := $(wildcard patches/quicknes/*.patch)
 PROSYSTEM_PATCHES := $(wildcard patches/prosystem/*.patch)
 SNES9X2005_PATCHES := $(wildcard patches/snes9x2005/*.patch)
+STELLA_PATCHES := $(wildcard patches/stella2014/*.patch)
 GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) | sha256sum | cut -c1-16)
 GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
 FCEUMM_PATCH_ID := $(shell sha256sum $(FCEUMM_PATCHES) | sha256sum | cut -c1-16)
@@ -78,6 +79,8 @@ PROSYSTEM_PATCH_ID := $(shell sha256sum $(PROSYSTEM_PATCHES) | sha256sum | cut -
 PROSYSTEM_PATCH_STAMP := $(PROSYSTEM_DIR)/.sf2000-patched-$(PROSYSTEM_PATCH_ID)
 SNES9X2005_PATCH_ID := $(shell sha256sum $(SNES9X2005_PATCHES) | sha256sum | cut -c1-16)
 SNES9X2005_PATCH_STAMP := $(SNES9X2005_DIR)/.sf2000-patched-$(SNES9X2005_PATCH_ID)
+STELLA_PATCH_ID := $(shell sha256sum $(STELLA_PATCHES) | sha256sum | cut -c1-16)
+STELLA_PATCH_STAMP := $(STELLA_DIR)/.sf2000-patched-$(STELLA_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
 GPSP_CFLAGS := -Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -204,6 +207,7 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
 	patches/mufrog/qpsx-static-load-buffer.patch \
 	patches/mufrog/qpsx-cue-failure.patch \
+	patches/mufrog/qpsx-linux-dirent.patch \
 	patches/mufrog/qpsx-nommu-recompiler.patch \
 	patches/mufrog/qpsx-linux-cacheflush.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
@@ -300,12 +304,17 @@ build/browser-ui-check: src/sf2000_browser_ui.c tests/browser_ui_test.c \
 	$(CC) $(CFLAGS) -I$(STB_DIR) -o $@ \
 		src/sf2000_browser_ui.c tests/browser_ui_test.c -lm
 
+build/qpsx-adapter-check: src/qpsx_adapter.c tests/qpsx_adapter_test.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ src/qpsx_adapter.c tests/qpsx_adapter_test.c
+
 check: build/frontend-check build/nommu-allocator-check build/input-check \
-		build/pacer-check build/browser-ui-check
+		build/pacer-check build/browser-ui-check build/qpsx-adapter-check
 	./build/nommu-allocator-check
 	./build/input-check
 	./build/pacer-check
 	./build/browser-ui-check
+	./build/qpsx-adapter-check
 
 elf-audit:
 	@set -e; \
@@ -726,7 +735,14 @@ $(SNES9X2002_CORE): $(SNES9X2002_DIR)/.git Makefile
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
 
-$(STELLA_CORE): $(STELLA_DIR)/.git $(COMMON_DIR)/.git Makefile
+$(STELLA_PATCH_STAMP): $(STELLA_DIR)/.git $(STELLA_PATCHES)
+	git -C '$(STELLA_DIR)' reset --hard '$(STELLA_REV)'
+	for patch_file in $(STELLA_PATCHES); do \
+		patch -d '$(STELLA_DIR)' -p1 < "$$patch_file"; \
+	done
+	touch '$@'
+
+$(STELLA_CORE): $(STELLA_PATCH_STAMP) $(COMMON_DIR)/.git Makefile
 	mkdir -p build
 	$(MAKE) -C $(STELLA_DIR) clean platform=sf2000 STATIC_LINKING=1
 	$(MAKE) -C $(STELLA_DIR) platform=sf2000 STATIC_LINKING=1 \
@@ -769,9 +785,11 @@ $(PCE_FAST_CORE): $(PCE_FAST_DIR)/.git Makefile
 
 define MUFROG_CORE_RULE
 build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES)
+	rm -rf '$$(@D)'
 	mkdir -p '$$(@D)'
 	test -d '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)'
-	cp -a '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)/.' '$$(@D)/'
+	tar -C '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)' --exclude=.git \
+		-cf - . | tar -C '$$(@D)' -xf -
 	set -eu; for patch_file in $(MUFROG_$(call mufrog_key,$(1))_PATCHES); do \
 		patch -d '$$(@D)' -p1 < "$$$$patch_file"; \
 	done

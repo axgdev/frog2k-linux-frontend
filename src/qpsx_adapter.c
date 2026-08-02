@@ -126,10 +126,12 @@ int fs_opendir(const char *path)
 
 int fs_readdir(int handle, void *buffer)
 {
-	struct dirent *entry;
 	DIR *directory;
-	char *bytes = (char *)buffer;
 	struct dirent *next;
+	struct qpsx_dirent {
+		uint32_t d_ino;
+		char d_name[256];
+	} *entry = buffer;
 	unsigned index;
 
 	if (handle <= 0 || handle > QPSX_DIRECTORY_SLOTS)
@@ -141,9 +143,9 @@ int fs_readdir(int handle, void *buffer)
 	next = readdir(directory);
 	if (!next)
 		return 0;
-	entry = next;
-	memcpy(bytes + 4, entry->d_name, sizeof(entry->d_name));
-	memcpy(bytes + 0x22, entry->d_name, sizeof(entry->d_name));
+	entry->d_ino = (uint32_t)next->d_ino;
+	strncpy(entry->d_name, next->d_name, sizeof(entry->d_name) - 1u);
+	entry->d_name[sizeof(entry->d_name) - 1u] = '\0';
 	return 1;
 }
 

@@ -48,6 +48,7 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DELAY_HIGH 7168
 #define AUDIO_FEEDBACK_INTERVAL 8u
 #define CORE_LOAD_TIMEOUT_SECONDS 30u
+#define CORE_INIT_TIMEOUT_SECONDS 15u
 #define CORE_RUN_TIMEOUT_SECONDS 10u
 #define AUDIO_CONVERT_CAPACITY (AUDIO_CONVERT_SAMPLES * 8u)
 #define AUDIO_WRITE_CHUNK 1024u
@@ -216,14 +217,17 @@ static void stop_signal(int signal_number)
 
 static void core_load_timeout_signal(int signal_number)
 {
+	static const char init_message[] =
+		"<3>sf2000-frontend: core init timeout\n";
 	static const char load_message[] =
 		"<3>sf2000-frontend: core load timeout\n";
 	static const char run_message[] =
 		"<3>sf2000-frontend: core run timeout\n";
-	const char *message = core_watchdog_stage == 2 ?
-		run_message : load_message;
-	size_t message_length = core_watchdog_stage == 2 ?
-		sizeof(run_message) - 1u : sizeof(load_message) - 1u;
+	const char *message = core_watchdog_stage == 3 ? run_message :
+		core_watchdog_stage == 2 ? load_message : init_message;
+	size_t message_length = core_watchdog_stage == 3 ?
+		sizeof(run_message) - 1u : core_watchdog_stage == 2 ?
+		sizeof(load_message) - 1u : sizeof(init_message) - 1u;
 
 	(void)signal_number;
 	if (core_watchdog_kmsg_fd >= 0 &&
@@ -2433,7 +2437,11 @@ int main(int argc, char **argv)
 	retro_get_system_info(&info);
 	log_kmsg("core init begin\n");
 	retained_stage("frontend-core-begin", 3);
+	core_watchdog_stage = 1;
+	(void)alarm(CORE_INIT_TIMEOUT_SECONDS);
 	retro_init();
+	(void)alarm(0);
+	core_watchdog_stage = 0;
 	log_kmsg("core init complete\n");
 	retained_stage("frontend-core-done", 4);
 	if (&gba_screen_pixels) {
@@ -2455,7 +2463,7 @@ int main(int argc, char **argv)
 	log_kmsg("ROM load begin\n");
 	retained_stage("frontend-rom-begin", 5);
 	loading_game = 1;
-	core_watchdog_stage = 1;
+	core_watchdog_stage = 2;
 	(void)alarm(CORE_LOAD_TIMEOUT_SECONDS);
 	load_ok = retro_load_game(&game);
 	(void)alarm(0);
@@ -2492,6 +2500,8 @@ int main(int argc, char **argv)
 	}
 	log_kmsg("frontend running START+SELECT pauses; START+RIGHT saves logs\n");
 	retained_stage("frontend-run", 7);
+	if (sf2000_performance_begin() != 0)
+		log_kmsg("performance journal acknowledgement timeout\n");
 	start_metrics_logging();
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
@@ -2509,7 +2519,7 @@ int main(int argc, char **argv)
 			(uncapped_mode ? 300u : 60u)) == 0;
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
-		core_watchdog_stage = 2;
+		core_watchdog_stage = 3;
 		(void)alarm(CORE_RUN_TIMEOUT_SECONDS);
 		retro_run();
 		(void)alarm(0);

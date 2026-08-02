@@ -1,0 +1,56 @@
+From: SF2000 Linux developers <sf2000-linux@example.invalid>
+Subject: [PATCH] encoding_utf: support libc without wide-character conversion
+
+The size-focused SF2000 uClibc configuration intentionally omits wchar
+conversion routines.  Keep all byte-oriented UTF-8 helpers available, but
+make the two unsupported UTF-16 conversion entry points fail explicitly
+instead of producing undeclared calls and link-time surprises.
+
+---
+ libretro-common/encodings/encoding_utf.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/libretro-common/encodings/encoding_utf.c b/libretro-common/encodings/encoding_utf.c
+index e98c86d..88aa25f 100644
+--- a/libretro-common/encodings/encoding_utf.c
++++ b/libretro-common/encodings/encoding_utf.c
+@@ -419,6 +419,12 @@ wchar_t* utf8_to_utf16_string_alloc(const char *str)
+ {
+    wchar_t *buf = NULL;
+ 
++#if defined(__UCLIBC__) && !defined(__UCLIBC_HAS_WCHAR__)
++   /* This target deliberately has no mbstowcs(3). */
++   (void)str;
++   return NULL;
++#else
++
+    if (!str || !*str)
+       return NULL;
+ 
+@@ -468,6 +474,7 @@ wchar_t* utf8_to_utf16_string_alloc(const char *str)
+ #endif
+ 
+    return buf;
++#endif
+ }
+ 
+ /**
+@@ -485,6 +492,10 @@ char* utf16_to_utf8_string_alloc(const wchar_t *str)
+ #endif
+    char *buf      = NULL;
+ 
++#if defined(__UCLIBC__) && !defined(__UCLIBC_HAS_WCHAR__)
++   (void)str;
++   return NULL;
++#else
+    if (!str || !*str)
+       return NULL;
+ 
+@@ -527,4 +538,5 @@ char* utf16_to_utf8_string_alloc(const wchar_t *str)
+ #endif
+ 
+    return buf;
++#endif
+ }
+-- 
+2.51.0

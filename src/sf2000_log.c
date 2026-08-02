@@ -11,6 +11,8 @@
 
 #define LOG_FLUSH_REQUEST "/run/sf2000-log-flush-request"
 #define LOG_FLUSH_DONE "/run/sf2000-log-flush-done"
+#define PERFORMANCE_MARKER "/run/sf2000-performance-active"
+#define PERFORMANCE_READY_MARKER "/run/sf2000-performance-ready"
 
 static int write_all(int fd, const char *data, size_t bytes)
 {
@@ -66,4 +68,27 @@ int sf2000_log_flush(const char *reason)
 		(void)poll(NULL, 0, 10);
 	}
 	return -1;
+}
+
+int sf2000_performance_begin(void)
+{
+	unsigned attempt;
+	int fd = open(PERFORMANCE_MARKER,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+	if (fd < 0)
+		return -1;
+	if (close(fd) != 0)
+		return -1;
+	for (attempt = 0; attempt < 100u; attempt++) {
+		if (access(PERFORMANCE_READY_MARKER, F_OK) == 0)
+			return 0;
+		(void)poll(NULL, 0, 10);
+	}
+	return -1;
+}
+
+void sf2000_performance_end(void)
+{
+	(void)unlink(PERFORMANCE_MARKER);
 }
