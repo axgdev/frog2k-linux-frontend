@@ -70,17 +70,17 @@ QUICKNES_PATCHES := $(wildcard patches/quicknes/*.patch)
 PROSYSTEM_PATCHES := $(wildcard patches/prosystem/*.patch)
 SNES9X2005_PATCHES := $(wildcard patches/snes9x2005/*.patch)
 STELLA_PATCHES := $(wildcard patches/stella2014/*.patch)
-GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) | sha256sum | cut -c1-16)
+GPSP_PATCH_ID := $(shell sha256sum $(GPSP_PATCHES) </dev/null | sha256sum | cut -c1-16)
 GPSP_PATCH_STAMP := $(GPSP_DIR)/.sf2000-patched-$(GPSP_PATCH_ID)
-FCEUMM_PATCH_ID := $(shell sha256sum $(FCEUMM_PATCHES) | sha256sum | cut -c1-16)
+FCEUMM_PATCH_ID := $(shell sha256sum $(FCEUMM_PATCHES) </dev/null | sha256sum | cut -c1-16)
 FCEUMM_PATCH_STAMP := $(FCEUMM_DIR)/.sf2000-patched-$(FCEUMM_PATCH_ID)
-QUICKNES_PATCH_ID := $(shell sha256sum $(QUICKNES_PATCHES) | sha256sum | cut -c1-16)
+QUICKNES_PATCH_ID := $(shell sha256sum $(QUICKNES_PATCHES) </dev/null | sha256sum | cut -c1-16)
 QUICKNES_PATCH_STAMP := $(QUICKNES_DIR)/.sf2000-patched-$(QUICKNES_PATCH_ID)
-PROSYSTEM_PATCH_ID := $(shell sha256sum $(PROSYSTEM_PATCHES) | sha256sum | cut -c1-16)
+PROSYSTEM_PATCH_ID := $(shell sha256sum $(PROSYSTEM_PATCHES) </dev/null | sha256sum | cut -c1-16)
 PROSYSTEM_PATCH_STAMP := $(PROSYSTEM_DIR)/.sf2000-patched-$(PROSYSTEM_PATCH_ID)
-SNES9X2005_PATCH_ID := $(shell sha256sum $(SNES9X2005_PATCHES) | sha256sum | cut -c1-16)
+SNES9X2005_PATCH_ID := $(shell sha256sum $(SNES9X2005_PATCHES) </dev/null | sha256sum | cut -c1-16)
 SNES9X2005_PATCH_STAMP := $(SNES9X2005_DIR)/.sf2000-patched-$(SNES9X2005_PATCH_ID)
-STELLA_PATCH_ID := $(shell sha256sum $(STELLA_PATCHES) | sha256sum | cut -c1-16)
+STELLA_PATCH_ID := $(shell sha256sum $(STELLA_PATCHES) </dev/null | sha256sum | cut -c1-16)
 STELLA_PATCH_STAMP := $(STELLA_DIR)/.sf2000-patched-$(STELLA_PATCH_ID)
 GPSP_TRANSLATOR_OPTIMIZE := -Os -DNDEBUG -fno-expensive-optimizations \
 	-fno-jump-tables -fno-tree-switch-conversion
@@ -410,10 +410,12 @@ $(JS2300_CORE_SOURCE): $(JS2300_ROOT)/src/libretro_core/js2300_libretro_core.c \
 
 $(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h \
 		$(JS2300_ROOT)/include/js2300/js2300.h include/unifrog/abi.h Makefile
+	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
 		-I$(abspath $(JS2300_ROOT)/include) -Iinclude -c -o '$@' '$<'
 
 $(JS2300_CORE_FS_OBJECT): src/js2300_core_fs.c Makefile
+	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
 $(JS2300_CORE_EXECUTABLE): $(JS2300_RUNTIME) $(JS2300_CORE_OBJECT) \
@@ -439,8 +441,7 @@ $(JS2300_UI_EXECUTABLE): $(JS2300_RUNTIME) src/js2300_runner.c \
 js2300-ui: $(JS2300_UI_EXECUTABLE)
 js2300-core: $(JS2300_CORE_EXECUTABLE)
 
-gambatte: $(SF2000_HOST_OBJECTS)
-	$(MAKE) $(GAMBATTE_CORE) $(LIBRETRO_COMMON)
+gambatte: $(GAMBATTE_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 	$(SF2000_CXX) $(SF2000_LDFLAGS) \
 		-o build/sf2000-gambatte $(SF2000_STARTFILES) \
 		$(SF2000_HOST_OBJECTS) $(GAMBATTE_CORE) \
@@ -963,6 +964,7 @@ build/common/%.o: $(COMMON_DIR)/.git
 		-c -o '$@' '$(COMMON_DIR)/$*.c'
 
 build/utf8_compat.o: src/utf8_compat.c
+	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
 $(LIBRETRO_COMMON): $(COMMON_OBJECTS)
