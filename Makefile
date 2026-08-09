@@ -1,6 +1,7 @@
 CC ?= cc
 CXX ?= c++
 CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-linux-uclibc-
+JOBS ?= $(shell nproc 2>/dev/null || echo 2)
 SF2000_CC ?= $(CROSS_COMPILE)gcc
 SF2000_CXX ?= $(CROSS_COMPILE)g++
 SF2000_OBJCOPY ?= $(CROSS_COMPILE)objcopy
@@ -34,7 +35,10 @@ QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
 SF2000_LINUX_DIR ?= ../sf2000_linux
-MUFROG_ROOT ?= /root/host-frogdev/universal/temp/mufrog-commandc
+# Mufrog-family core sources are cloned from their own upstream repositories
+# (see MUFROG_CORE_CLONES below) so the frontend builds without any external
+# mufrog-commandc checkout.  Override MUFROG_ROOT to reuse an existing tree.
+MUFROG_ROOT ?= $(abspath .deps/mufrog-commandc)
 MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
 JS2300_ROOT ?= $(MUFROG_ROOT)/js2300
 JS2300_MQUICKJS_DIR ?= $(MUFROG_ROOT)/.deps/mquickjs
@@ -108,6 +112,11 @@ COMMON_SOURCES := compat/compat_posix_string.c compat/compat_snprintf.c \
 	streams/rzip_stream.c \
 	formats/png/rpng.c \
 	string/stdstring.c time/rtime.c vfs/vfs_implementation.c
+# The target sysroot intentionally omits zlib, so the only system-zlib
+# translation unit (trans_stream_zlib.c) cannot be compiled for any core.
+# Nothing in the static links references the zlib backends, and rzip_stream.o
+# is only pulled in if actually referenced, so the archive excludes it too.
+COMMON_SOURCES := $(filter-out streams/trans_stream_zlib.c,$(COMMON_SOURCES))
 COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_compat.o
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
@@ -144,6 +153,11 @@ MUFROG_CORE_CFLAGS := -EL -march=mips32 -mtune=mips32 -mabi=32 \
 	-ffunction-sections -fdata-sections -fno-unwind-tables \
 	-fno-asynchronous-unwind-tables -ffast-math -D_GNU_SOURCE \
 	-D__LIBRETRO__
+# These old cores predate GCC 14, which promotes several legacy warning
+# classes to hard errors (implicit function declarations, incompatible
+# pointer types).  Keep them as warnings for the whole core set.
+MUFROG_CORE_CFLAGS += -Wno-error=implicit-function-declaration \
+	-Wno-error=incompatible-pointer-types -Wno-error=implicit-int
 MUFROG_CORE_INCLUDES := \
 	-I$(SF2000_SYSROOT)/usr/include \
 	-I$(MUFROG_SOURCE_ROOT)/libretro-common/include
@@ -187,10 +201,70 @@ MUFROG_$(call mufrog_key,$(1))_PREFIX := $(5)
 MUFROG_$(call mufrog_key,$(1))_ARGS := $(6)
 endef
 $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,$(subst :, ,$(spec))),$(word 2,$(subst :, ,$(spec))),$(word 3,$(subst :, ,$(spec))),$(word 4,$(subst :, ,$(spec))),$(word 5,$(subst :, ,$(spec))),$(word 6,$(subst :, ,$(spec))))))
+# Mufrog-family core sources are cloned from their own upstream repositories at
+# the exact commits the frontend patches were written against.  This mirrors the
+# mufrog-commandc cores/manifest.mk pins without depending on that checkout.
+# Format: id|checkout-directory|upstream-url|pinned-commit
+MUFROG_CORE_CLONES := \
+	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
+	picodrive|picodrive|https://github.com/libretro/picodrive.git|f0d4a0118a9733a1f10bce5a4ac772c474f9300d \
+	qpsx|sf2000-qpsx-playstation-emulator|https://github.com/angree/sf2000-qpsx-playstation-emulator.git|368310aa1b94fe764b8fdf4ddbd7afd06d7bd2a1 \
+	mame2000|libretro-mame2000|https://github.com/libretro/mame2000-libretro.git|905808fbcc3adf8c610c1c60f0e41ce4b35db1c5 \
+	fbalpha2012|fbalpha2012|https://github.com/libretro/fbalpha2012.git|b7ac554c53561d41640372f23dab15cd6fc4f0c4 \
+	a5200|a5200|https://github.com/libretro/a5200.git|0942c88d64cad6853b539f51b39060a9de0cbcab \
+	atari800lib|libretro-atari800lib|https://github.com/nutki/libretro-atari800lib.git|c562f734f80bb47511e8321251751b8566bc1f0d \
+	handy|libretro-handy|https://github.com/libretro/libretro-handy.git|65d6b865544cd441ef2bd18cde7bd834c23d0e48 \
+	race|RACE|https://github.com/libretro/RACE.git|f65011e6639ccbbbb44b6ffa63ca50c070475df4 \
+	beetle-cygne|libretro-beetle-wswan|https://github.com/libretro/beetle-wswan-libretro.git|32bf70a3032a138baa969c22445f4b7821632c30 \
+	gearcoleco|Gearcoleco|https://github.com/drhelius/Gearcoleco.git|149d9687624f845de4f7690b145da172f87d115a \
+	frodo|libretro-frodo-prosty|https://github.com/tzubertowski/libretro-frodo.git|e2de1193e420f00c3eb65a1182bb31aa58fdfebb \
+	fake08|fake-08-prosty|https://github.com/tzubertowski/fake-08.git|b87983eaf7492fdd945f2897024e0bb725e1e15d \
+	bluemsx|libretro-blueMSX-prosty|https://github.com/tzubertowski/libretro-blueMSX.git|0b47ea3e7370bab5766eaa7c470d21247da3764a \
+	snes9x2005-prosty|snes9x2005-prosty|https://github.com/tzubertowski/snes9x2005.git|fa25aaf57a043e999f1bc3d9327a71c4cdb1d942 \
+	snes9x2002-prosty|snes9x2002-prosty|https://github.com/tzubertowski/snes9x2002.git|864c7d26b6bc42f7d648d1ba68dfc37520878629 \
+	gambatte-prosty|libretro-gambatte-prosty|https://github.com/tzubertowski/libretro-gambatte.git|9e8bbe6a9a5e2cb35cfe3a851aaa631a4760f2e3 \
+	quicknes-prosty|QuickNES_Core-prosty|https://github.com/tzubertowski/QuickNES_Core.git|9a6852e768cbabfcaa884f2d69cd8ea8cea37b69 \
+	fceumm-prosty|libretro-fceumm-prosty|https://github.com/tzubertowski/libretro-fceumm.git|e6111e684e7a7761f3f1d6c80d0a825e2c8cdc7e
+
+# Shared libretro-common include root used by every mufrog core build.
+MUFROG_LIBRETRO_COMMON_REV := e2e3eccfd245a04771e6a435320b42234c8cc4d7
+
+mufrog_clone_dir = $(word 2,$(subst |, ,$(filter $(1)|%,$(MUFROG_CORE_CLONES))))
+# Lookups key on the checkout-directory field (e.g. gpsp_multicore), which is
+# what the clone stamps are named after.  (filter only honours a single %,
+# so use findstring to locate the manifest entry instead.)
+mufrog_clone_entry = $(strip $(foreach w,$(MUFROG_CORE_CLONES),$(if $(findstring |$(2)|,$(w)),$(w))))
+mufrog_clone_url = $(word 3,$(subst |, ,$(call mufrog_clone_entry,x,$(2))))
+mufrog_clone_rev = $(word 4,$(subst |, ,$(call mufrog_clone_entry,x,$(2))))
+
+$(MUFROG_SOURCE_ROOT)/libretro-common/.git:
+	mkdir -p '$(dir $@)'
+	test -d '$(@D)/.git' || \
+		git clone --filter=blob:none https://github.com/libretro/libretro-common.git '$(@D)'
+	git -C '$(@D)' checkout --detach '$(MUFROG_LIBRETRO_COMMON_REV)'
+
+$(MUFROG_SOURCE_ROOT)/libretro-common/include: $(MUFROG_SOURCE_ROOT)/libretro-common/.git
+
+$(MUFROG_SOURCE_ROOT)/%.git: Makefile
+	mkdir -p '$(dir $@)'
+	test -d '$(@D)/.git' || \
+		git clone --filter=blob:none '$(call mufrog_clone_url,x,$(notdir $(@D)))' '$(@D)'
+	git -C '$(@D)' checkout --detach '$(call mufrog_clone_rev,x,$(notdir $(@D)))'
+	git -C '$(@D)' submodule update --init --depth 1 --filter=blob:none --jobs '$(JOBS)'
+
+# Any file inside a mufrog core checkout implies the clone stamp.
+$(MUFROG_SOURCE_ROOT)/libretro-common/%: $(MUFROG_SOURCE_ROOT)/libretro-common/.git
+$(MUFROG_SOURCE_ROOT)/%: $(MUFROG_SOURCE_ROOT)/%.git
+
 MUFROG_picodrive_EXTRA_CFLAGS := -include$(SF2000_SYSROOT)/usr/include/wchar.h \
 	-include$(abspath src/mufrog_picodrive_config.h) -DDR_MP3_NO_STDIO -DUSE_TREMOR \
 	-DEMU_F68K -D_USE_CZ80 -DDRC_SH2
 MUFROG_picodrive_EXTRA_CFLAGS += -O3
+# picodrive-no-chd.patch adds a NO_CD_MEDIA switch; the SF2000 build skips the
+# whole libchdr/zstd/lzma dependency stack (no CHD media on cartridge-only
+# targets), which also avoids the vendored libchdr headers being shadowed by
+# the shared libretro-common libchdr module on the include path.
+MUFROG_picodrive_PATCHES := patches/mufrog/picodrive-no-chd.patch
 MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
 MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
@@ -200,14 +274,28 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_ENABLE_MIPS_DIRECT_MEM=1 \
 	-DQPSX_ENABLE_MIPS_LSU_CACHING=1 \
 	-DQPSX_LINUX_CACHEFLUSH=1 \
-	-include$(abspath src/mufrog_qpsx_config.h) -O3
+	-include$(abspath src/mufrog_qpsx_config.h) -O3 \
+	-fno-semantic-interposition
+# QPSX is linked into a static PIE, so disabling shared-library semantic
+# interposition lets GCC bind internal hot-path calls directly and inline them.
+# This common flag intentionally reaches both C and C++; keep it QPSX-scoped
+# because the other Mufrog cores may rely on default semantics.
+# QPSX's MIPS build has no C++ exceptions, RTTI, or threaded static
+# initialization. Keep these C++-only switches out of the C compiler flags so
+# the shared Mufrog rule remains warning-free for the C portions of the core.
+MUFROG_qpsx_EXTRA_CXXFLAGS := \
+	-fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
+# QPSX gates its MIPS GPU/GTE/PSX-memory assembly objects on this platform
+# value even though the frontend supplies the Linux compiler and ABI.
+MUFROG_qpsx_EXTRA_ARGS := platform=sf2000
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
 	patches/mufrog/qpsx-static-load-buffer.patch \
 	patches/mufrog/qpsx-cue-failure.patch \
 	patches/mufrog/qpsx-linux-dirent.patch \
 	patches/mufrog/qpsx-nommu-recompiler.patch \
-	patches/mufrog/qpsx-linux-cacheflush.patch
+	patches/mufrog/qpsx-linux-cacheflush.patch \
+	patches/mufrog/qpsx-xa-time.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
 MUFROG_handy_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/handy/lynx) -DWANT_CRC32
 MUFROG_fbalpha2012_EXTRA_CFLAGS := -include$(abspath src/mufrog_wchar_compat.h) \
@@ -227,14 +315,18 @@ MUFROG_fake08_EXTRA_CFLAGS := \
   -I$(abspath build/mufrog/src/fake08/libs/lodepng) \
   -I$(abspath build/mufrog/src/fake08/libs/miniz) \
   -include$(abspath src/mufrog_wchar_compat.h)
-MUFROG_fake08_PATCHES := \
+MUFROG_fake08_PATCHES := patches/mufrog/fake08-tostring-cxx11.patch \
 	patches/mufrog/fake08-cxx17.patch \
 	patches/mufrog/fake08-fix32-mips.patch
 MUFROG_snes9x2005_prosty_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/snes9x2005-prosty/source)
 MUFROG_snes9x2002_prosty_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/snes9x2002-prosty/source) -DUSE_SA1
 MUFROG_snes9x2002_prosty_PATCHES := patches/mufrog/snes9x2002-rops.patch
 MUFROG_bluemsx_EXTRA_CFLAGS := -Wno-error=incompatible-pointer-types
-MUFROG_bluemsx_PATCHES := patches/mufrog/bluemsx-linux-compat.patch
+MUFROG_bluemsx_PATCHES := patches/mufrog/bluemsx-linux-compat.patch \
+	patches/mufrog/bluemsx-srammapper-prototype.patch \
+	patches/mufrog/bluemsx-savestate-signature.patch \
+	patches/mufrog/bluemsx-zlib-always.patch
+MUFROG_a5200_PATCHES := patches/mufrog/a5200-libretro-common-md5.patch
 MUFROG_gambatte_prosty_EXTRA_CFLAGS := \
 	-I$(abspath build/mufrog/src/gambatte-prosty/libgambatte/include) \
 	-I$(abspath build/mufrog/src/gambatte-prosty/libgambatte/src) \
@@ -243,9 +335,13 @@ MUFROG_gambatte_prosty_EXTRA_CFLAGS := \
 	-DHAVE_STDINT_H
 MUFROG_fceumm_prosty_EXTRA_CFLAGS := -DFCEU_VERSION_NUMERIC=9813
 MUFROG_mame2000_ADAPTER_OBJECTS := build/mufrog/mame2000-libco.o
+MUFROG_mame2000_PATCHES := patches/mufrog/mame2000-libco-external.patch
+MUFROG_mame2000_EXTRA_ARGS := LIBCO_EXTERNAL=1
 MUFROG_mame2000_EXTRA_CFLAGS := -O3
 MUFROG_fake08_ADAPTER_OBJECTS := build/mufrog/fake08-log.o
-MUFROG_frodo_PATCHES := patches/mufrog/frodo-autoload-visibility.patch
+MUFROG_frodo_PATCHES := patches/mufrog/frodo-autoload-visibility.patch \
+	patches/mufrog/frodo-sf2000-fixes.patch
+MUFROG_atari800lib_PATCHES := patches/mufrog/atari800lib-implicit-decl.patch
 MUFROG_frodo_EXTRA_CFLAGS := \
 	-I$(abspath build/mufrog/src/frodo/libretro/core) \
 	-I$(abspath build/mufrog/src/frodo/libretro/include) \
@@ -266,7 +362,6 @@ MUFROG_gpsp_multicore_EXTRA_CFLAGS := -DSF2000 -DMMAP_JIT_CACHE \
 	-DFRONTEND_SUPPORTS_RGB565 -DSF2000_OPTIMIZATION_LEVEL=2
 MUFROG_gpsp_multicore_PATCHES := \
 	patches/mufrog/gpsp-mips-validate.patch \
-	patches/mufrog/gpsp-file-load.patch \
 	patches/mufrog/gpsp-mips-pic.patch
 MUFROG_gpsp_multicore_EXTRA_ARGS := HAVE_DYNAREC=1 CPU_ARCH=mips MMAP_JIT_CACHE=1 SF2000=1
 
@@ -279,6 +374,8 @@ JS2300_CORE_FS_OBJECT := build/js2300/js2300_core_fs.o
 JS2300_CORE_EXECUTABLE := build/sf2000-js2300-core
 JS2300_UI_EXECUTABLE := build/sf2000-js2300-ui
 JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
+# chip8.js is vendored into resources/ (from mufrog js2300 branch v0.5.3-develop1-rebased,
+# commit 5711f97): js2300-private main (pinned JS2300_REV) never shipped scripts/.
 
 .PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
@@ -389,7 +486,9 @@ $(JS2300_RUNTIME): $(JS2300_ROOT)/Makefile \
 		$(JS2300_ROOT)/src/js2300_runtime.c \
 		$(JS2300_ROOT)/js2300_stdlib_gen.c \
 		$(JS2300_ROOT)/include/js2300/js2300.h \
-		$(JS2300_MQUICKJS_DIR)/mquickjs.c Makefile
+		$(JS2300_ROOT)/.git \
+		$(JS2300_MQUICKJS_DIR)/mquickjs.c \
+		$(JS2300_MQUICKJS_DIR)/.git Makefile
 	mkdir -p '$(@D)'
 	$(MAKE) -C '$(JS2300_ROOT)' \
 		BUILD='$(abspath build/js2300)' OUT='$(abspath build/js2300-out)' \
@@ -401,12 +500,9 @@ $(JS2300_RUNTIME): $(JS2300_ROOT)/Makefile \
 	cp '$(abspath build/js2300-out/libjs2300.a)' '$@'
 	test -s '$@'
 
-$(JS2300_CORE_SOURCE): $(JS2300_ROOT)/src/libretro_core/js2300_libretro_core.c \
-		Makefile
+$(JS2300_CORE_SOURCE): src/js2300_libretro_core.c Makefile
 	mkdir -p '$(@D)'
 	cp '$<' '$@'
-	sed -i 's#/media/mmcblk0/unifrog_data/scripts/js2300-cores#/mnt/sd/sf2000/js2300-cores#g' '$@'
-	sed -i 's/#define JS2300_CORE_HEAP_BYTES (16u \* 1024u \* 1024u)/#define JS2300_CORE_HEAP_BYTES (8u * 1024u * 1024u)/' '$@'
 
 $(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h \
 		$(JS2300_ROOT)/include/js2300/js2300.h include/unifrog/abi.h Makefile
@@ -525,7 +621,7 @@ core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 ste
 	cp $(JS2300_CORE_EXECUTABLE) build/core-packages/
 	cp $(JS2300_UI_EXECUTABLE) build/core-packages/
 	mkdir -p build/core-packages/js2300-cores
-	cp '$(JS2300_ROOT)/scripts/js2300-cores/chip8.js' '$(JS2300_SCRIPT)'
+	cp resources/js2300-cores/chip8.js '$(JS2300_SCRIPT)'
 	cp $(GAMBATTE_DIR)/COPYING build/core-packages/licenses/gambatte-COPYING
 	cp $(GPSP_DIR)/COPYING build/core-packages/licenses/gpsp-COPYING
 	cp $(FCEUMM_DIR)/Copying build/core-packages/licenses/fceumm-Copying
@@ -605,6 +701,33 @@ $(GAMBATTE_DIR)/.git:
 	mkdir -p .deps
 	git clone --filter=blob:none https://github.com/libretro/gambatte-libretro.git $(GAMBATTE_DIR)
 	git -C $(GAMBATTE_DIR) checkout --detach $(GAMBATTE_REV)
+
+JS2300_REV := 18c4718143ece724321165615019be65347a1466
+MQUICKJS_REV := 203d5bb79789bc47b74855d9207415dab71661a0
+
+# JS2300 and its embedded MQuickJS runtime are private repositories.  They are
+# cloned here so the js2300-ui/js2300-core builds work from a fresh checkout
+# without a separate mufrog-commandc bootstrap step.  The stamp rules below
+# produce the exact files the build rules reference; make needs a rule for each
+# missing prerequisite before it will run any recipe.
+$(JS2300_ROOT)/.git:
+	mkdir -p '$(MUFROG_ROOT)'
+	test -d '$(JS2300_ROOT)/.git' || \
+		git clone git@github.com:axgdev/js2300-private.git '$(JS2300_ROOT)'
+	git -C '$(JS2300_ROOT)' checkout --detach '$(JS2300_REV)'
+	patch -d '$(JS2300_ROOT)' -p1 < patches/mufrog/js2300-mquickjs-objects.patch
+
+$(JS2300_ROOT)/Makefile $(JS2300_ROOT)/src/js2300_runtime.c \
+$(JS2300_ROOT)/js2300_stdlib_gen.c $(JS2300_ROOT)/include/js2300/js2300.h: $(JS2300_ROOT)/.git
+
+$(JS2300_MQUICKJS_DIR)/.git:
+	mkdir -p '$(dir $(JS2300_MQUICKJS_DIR))'
+	test -d '$(JS2300_MQUICKJS_DIR)/.git' || \
+		git clone git@github.com:bellard/mquickjs.git '$(JS2300_MQUICKJS_DIR)'
+	git -C '$(JS2300_MQUICKJS_DIR)' checkout --detach '$(MQUICKJS_REV)'
+	patch -d '$(JS2300_MQUICKJS_DIR)' -p1 < patches/mufrog/mquickjs-date-constructor.patch
+
+$(JS2300_MQUICKJS_DIR)/mquickjs.c: $(JS2300_MQUICKJS_DIR)/.git
 
 $(COMMON_DIR)/.git:
 	mkdir -p .deps
@@ -849,7 +972,8 @@ $(PCE_FAST_CORE): $(PCE_FAST_DIR)/.git Makefile
 		GIT_VERSION='$(PCE_FAST_REV)' fpic= TARGET='$(abspath $@)'
 
 define MUFROG_CORE_RULE
-build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES)
+build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES) \
+		$(MUFROG_SOURCE_ROOT)/$(call mufrog_clone_dir,$(1))/.git
 	rm -rf '$$(@D)'
 	mkdir -p '$$(@D)'
 	test -d '$(MUFROG_$(call mufrog_key,$(1))_SOURCE)'
@@ -887,7 +1011,8 @@ build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile \
 			-I$(abspath build/mufrog/src/$(1))/libretro/libretro-common/include \
 			-I$(abspath build/mufrog/src/$(1))/platform/common/tremor \
 			-I$(abspath build/mufrog/src/$(1))/zlib \
-			$(MUFROG_CORE_INCLUDES) $(MUFROG_$(call mufrog_key,$(1))_EXTRA_CFLAGS)' \
+			$(MUFROG_CORE_INCLUDES) $(MUFROG_$(call mufrog_key,$(1))_EXTRA_CFLAGS) \
+			$(MUFROG_$(call mufrog_key,$(1))_EXTRA_CXXFLAGS)' \
 		$(MUFROG_$(call mufrog_key,$(1))_ARGS) \
 		$(MUFROG_$(call mufrog_key,$(1))_EXTRA_ARGS)
 	test -s '$$@'
@@ -957,7 +1082,7 @@ $(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git
 		-c -o '$@' \
 		'$(SNES9X2002_DIR)/libretro/libretro-common/streams/memory_stream.c'
 
-build/common/%.o: $(COMMON_DIR)/.git
+build/common/%.o: $(COMMON_DIR)/.git $(MUFROG_SOURCE_ROOT)/picodrive/.git
 	mkdir -p '$(dir $@)'
 	$(SF2000_CC) $(filter-out -Werror,$(SF2000_CFLAGS)) -include stdlib.h \
 		-I$(COMMON_DIR)/include -I$(MUFROG_SOURCE_ROOT)/picodrive/zlib \

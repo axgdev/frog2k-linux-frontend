@@ -1,0 +1,10 @@
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -31,6 +31,7 @@
+ 	$(CORE_SRC_DIR)/sio.c \
+ 	$(CORE_SRC_DIR)/statesav.c \
+ 	$(CORE_SRC_DIR)/util.c \
++	$(LIBRETRO_COMM_DIR)/utils/md5.c \
+ 
+ ifneq ($(STATIC_LINKING), 1)
+ 	SOURCES_C += \

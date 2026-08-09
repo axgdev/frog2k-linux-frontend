@@ -1,0 +1,28 @@
+--- a/Src/1541fs.cpp
++++ b/Src/1541fs.cpp
+@@ -45,6 +45,6 @@
+ #if !defined(SF2000)
+ #include <dirent.h> /* TODO/FIXME - get rid of dirent */
+ #else
+-#include "../../../dirent.h"
++#include <dirent.h>
+ #endif
+ 
+@@ -213,7 +213,7 @@
+ 	  sprintf(fullname,"%s/%s",dir_path, plain_name);
+-	  if ((file[channel] = fopen(fullname, mode)) != NULL)
++	  if ((file[channel] = fopen(fullname, mode_str)) != NULL)
+ 	  {
+ 	    if (mode == FMODE_READ || mode == FMODE_M)
+ 	    {
+ 	      read_char[channel] = fgetc(file[channel]);
+ 	    }
+--- a/libretro/include/scandir.h
++++ b/libretro/include/scandir.h
+@@ -10,5 +10,5 @@
+ #if !defined(SF2000)
+ #include <dirent.h>
+ #else
+-#include "../../../../dirent.h"
++#include <dirent.h>
+ #endif

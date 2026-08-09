@@ -1,0 +1,20 @@
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -321,6 +321,9 @@
+ 	     $(LIBRETRO_COMM_DIR)/compat/compat_strcasestr.c
+ 
+ #include zlib
++endif
++
++#include zlib - always compiled: the SF2000 sysroot has no system libz
+ SOURCES_C += $(DEPS_DIR)/zlib/adler32.c \
+ 	     $(DEPS_DIR)/zlib/compress.c \
+ 	     $(DEPS_DIR)/zlib/crc32.c \
+@@ -331,7 +334,6 @@
+ 	     $(DEPS_DIR)/zlib/trees.c \
+ 	     $(DEPS_DIR)/zlib/uncompr.c \
+ 	     $(DEPS_DIR)/zlib/zutil.c
+-endif
+ 
+ ifeq ($(HAVE_COMPAT), 1)
+ 	SOURCES_C  += $(CORE_DIR)/Src/Libretro/psp/diet-glob.c

@@ -1,0 +1,22 @@
+diff --git a/source/hostCommonFunctions.cpp b/source/hostCommonFunctions.cpp
+index 7c0821b..f87fd95 100644
+--- a/source/hostCommonFunctions.cpp
++++ b/source/hostCommonFunctions.cpp
+@@ -14,17 +14,6 @@
+ #include "cartzip.h"
+ #endif
+ 
+-#if defined(SF2000)
+-namespace std
+-{
+-	std::string to_string(int i)
+-	{
+-		char str[20];
+-		snprintf(str, sizeof(str), "%d", i);
+-		return str;
+-	}
+-}
+-#endif
+ 
+ #if defined(SF2000)
+ // use fopen and fwrite from stock libc instead of freopen and fprintf from toolchain libc
