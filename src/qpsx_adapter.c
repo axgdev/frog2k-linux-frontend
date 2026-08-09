@@ -31,10 +31,33 @@ static const char *qpsx_path(const char *path)
 
 void xlog(const char *format, ...)
 {
-	/* The Linux frontend already has its own bounded journal.  QPSX's
-	 * firmware diagnostics are deliberately quiet here; otherwise its
-	 * unconditional tracing would dominate a no-FPU machine. */
-	(void)format;
+	/* QPSX's firmware diagnostics are routed to the kernel log so the
+	 * device journal can show exactly where a core load or run stalls.
+	 * The core gates every xlog() call behind its own debug-log switch
+	 * (g_debug_log_enabled, forced on by the temporary qpsx-debug.patch
+	 * while the on-device retro_load_game stall is diagnosed), so this
+	 * stays silent in normal use and only appears while tracing.
+	 *
+	 * The kmsg device rate-limits per open fd, so like the frontend's
+	 * log_kmsg() each message opens, writes and closes its own fd. */
+	va_list args;
+	char line[320];
+	int length;
+	int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+
+	if (fd < 0)
+		return;
+	va_start(args, format);
+	length = vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	if (length > 0 && (size_t)length + 3u < sizeof(line)) {
+		memmove(line + 3, line, (size_t)length + 1u);
+		line[0] = '<';
+		line[1] = '6';
+		line[2] = '>';
+		(void)write(fd, line, (size_t)length + 3u);
+	}
+	close(fd);
 }
 
 void xlog_clear(void)

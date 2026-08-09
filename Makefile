@@ -306,7 +306,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-nommu-recompiler.patch \
 	patches/mufrog/qpsx-linux-cacheflush.patch \
 	patches/mufrog/qpsx-xa-time.patch \
-	patches/mufrog/qpsx-libretro-savestate.patch
+	patches/mufrog/qpsx-libretro-savestate.patch \
+	patches/mufrog/qpsx-debug.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
 MUFROG_handy_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/handy/lynx) -DWANT_CRC32
 MUFROG_fbalpha2012_EXTRA_CFLAGS := -include$(abspath src/mufrog_wchar_compat.h) \
