@@ -22,12 +22,15 @@ duplicate-symbol collisions when the objects are linked into the frontend.
  
  .PHONY: all clean check
  
-@@ -59,10 +61,17 @@
+@@ -59,10 +61,20 @@
  	fi
  	@touch $@
  
 +# Staged mquickjs sources are provided by the prepare-stamp recipe above.
++# A prerequisite-only pattern rule leaves the staged files unbuildable on a
++# fresh staging directory, so verify the prepare step really copied them.
 +$(MQUICKJS_BUILD)/%: $(MQUICKJS_PREPARE_STAMP)
++	@test -f '$@'
 +
  $(BUILD)/js2300_stdlib_gen.o: js2300_stdlib_gen.c $(MQUICKJS_PREPARE_STAMP) | $(BUILD)
  	@echo "  HOSTCC  $<"

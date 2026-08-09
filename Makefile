@@ -252,9 +252,19 @@ $(MUFROG_SOURCE_ROOT)/%.git: Makefile
 	git -C '$(@D)' checkout --detach '$(call mufrog_clone_rev,x,$(notdir $(@D)))'
 	git -C '$(@D)' submodule update --init --depth 1 --filter=blob:none --jobs '$(JOBS)'
 
-# Any file inside a mufrog core checkout implies the clone stamp.
+# Any file inside a mufrog core checkout implies the clone stamp, and becomes
+# buildable as soon as the clone materializes it.  The stamp rules above perform
+# the actual clone; these recipes only verify that the referenced file really
+# came from the checkout.  A plain -f test also rejects a directory at the path
+# (which is what an accidental nested clone would leave behind).  The explicit
+# libretro-common/.git and libretro-common/include rules take precedence over
+# these patterns, and the $(MUFROG_SOURCE_ROOT)/%.git stamp rule has a shorter
+# stem than the generic pattern below, so the stamps themselves are never
+# matched here.
 $(MUFROG_SOURCE_ROOT)/libretro-common/%: $(MUFROG_SOURCE_ROOT)/libretro-common/.git
+	@test -f '$@'
 $(MUFROG_SOURCE_ROOT)/%: $(MUFROG_SOURCE_ROOT)/%.git
+	@test -f '$@'
 
 MUFROG_picodrive_EXTRA_CFLAGS := -include$(SF2000_SYSROOT)/usr/include/wchar.h \
 	-include$(abspath src/mufrog_picodrive_config.h) -DDR_MP3_NO_STDIO -DUSE_TREMOR \
