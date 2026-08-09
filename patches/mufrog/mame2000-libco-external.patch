@@ -1,0 +1,12 @@
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -1812,7 +1812,9 @@
+ 
+ ifeq ($(WANT_LIBCO), 1)
+ 	DEFS += -DWANT_LIBCO -I$(LIBRETRO_COMM_DIR)/include
++	ifneq ($(LIBCO_EXTERNAL), 1)
+ 	SOURCES_C += $(LIBRETRO_COMM_DIR)/libco/libco.c
++	endif
+ else
+ 	SOURCES_C += $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+ endif

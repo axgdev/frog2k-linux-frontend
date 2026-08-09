@@ -1,0 +1,19 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] mquickjs: declare js_date_constructor in mquickjs_priv.h
+
+js_date_constructor is defined in mqjs.c and referenced from the generated
+stdlib class tables, but has no header declaration.  The js2300 runtime
+includes those tables directly, so the definition-before-use ordering inside
+mqjs.c does not help.  Declare it next to the other date helpers.
+
+--- a/mquickjs_priv.h
++++ b/mquickjs_priv.h
+@@ -238,6 +238,9 @@ JSValue js_typed_array_set(JSContext *ctx, JSValue *this_val,
+                            int argc, JSValue *argv);
+ 
++JSValue js_date_constructor(JSContext *ctx, JSValue *this_val,
++                            int argc, JSValue *argv);
++
+ JSValue js_date_valueOf(JSContext *ctx, JSValue *this_val,
+                         int argc, JSValue *argv);
+ 

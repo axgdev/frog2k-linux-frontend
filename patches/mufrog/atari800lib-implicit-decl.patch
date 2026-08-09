@@ -1,0 +1,8 @@
+--- a/atari800/src/libatari800/init.h
++++ b/atari800/src/libatari800/init.h
+@@ -4,3 +4,4 @@
+ int LIBATARI800_Initialise(void);
+ void LIBATARI800_Exit(void);
++int LIBATARI800_ReadConfig(char *option, char *parameters);
+ 
+ #endif /* LIBATARI800_INIT_H_ */

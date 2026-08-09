@@ -1,0 +1,12 @@
+diff --git a/Src/Memory/sramMapperMatsuchita.h b/Src/Memory/sramMapperMatsuchita.h
+index dcda36f..ab8a014 100644
+--- a/Src/Memory/sramMapperMatsuchita.h
++++ b/Src/Memory/sramMapperMatsuchita.h
+@@ -30,6 +30,6 @@
+ 
+ #include "MsxTypes.h"
+ 
+-int sramMapperMatsushitaCreate();
++int sramMapperMatsushitaCreate(int inverted);
+ 
+ #endif

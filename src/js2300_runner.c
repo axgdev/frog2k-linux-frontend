@@ -349,52 +349,6 @@ static int runner_fs_write_text(void *opaque, const char *path,
 	return runner_fs_write_bytes(opaque, path, (const uint8_t *)text, size);
 }
 
-static int runner_fs_stat(void *opaque, const char *path,
-	struct js2300_fs_stat *status)
-{
-	struct stat st;
-
-	(void)opaque;
-	if (!path || !status || stat(path, &st) != 0)
-		return -1;
-	memset(status, 0, sizeof(*status));
-	status->exists = 1;
-	status->is_dir = S_ISDIR(st.st_mode) ? 1u : 0u;
-	status->is_file = S_ISREG(st.st_mode) ? 1u : 0u;
-	status->size = st.st_size > 0 ? (uint64_t)st.st_size : 0;
-	status->modified_time = st.st_mtime;
-	return 0;
-}
-
-static int runner_fs_mkdir(void *opaque, const char *path)
-{
-	struct stat st;
-
-	(void)opaque;
-	if (!path || !path[0])
-		return -1;
-	if (mkdir(path, 0777) == 0)
-		return 0;
-	return errno == EEXIST && stat(path, &st) == 0 && S_ISDIR(st.st_mode) ?
-		0 : -1;
-}
-
-static int runner_fs_remove(void *opaque, const char *path)
-{
-	struct stat st;
-
-	(void)opaque;
-	if (!path || stat(path, &st) != 0)
-		return -1;
-	return S_ISDIR(st.st_mode) ? rmdir(path) : unlink(path);
-}
-
-static int runner_fs_rename(void *opaque, const char *from, const char *to)
-{
-	(void)opaque;
-	return from && to ? rename(from, to) : -1;
-}
-
 static int runner_action(void *opaque, const char *id)
 {
 	(void)opaque;
@@ -414,22 +368,12 @@ static void runner_exit(void *opaque, const char *reason)
 	runner_log(reason ? reason : "script exit");
 }
 
-static int runner_cpu_clock(void *opaque, int mhz, int *out_mhz)
-{
-	(void)opaque;
-	(void)mhz;
-	if (out_mhz)
-		*out_mhz = -1;
-	return -1;
-}
-
 static void runner_configure_host(struct js2300_runner *runner,
 	struct js2300_host *host)
 {
 	memset(host, 0, sizeof(*host));
 	host->size = sizeof(*host);
 	host->opaque = runner;
-	host->mode = runner->background ? "standalone" : "extension";
 	host->log = runner_host_log;
 	host->flush_log = runner_flush_log;
 	host->millis = runner_millis;
@@ -447,14 +391,7 @@ static void runner_configure_host(struct js2300_runner *runner,
 	host->backlight = runner_backlight;
 	host->av_output = runner_av_output;
 	host->fs_read_text = runner_fs_read_text;
-	host->fs_read_bytes = runner_fs_read_bytes;
 	host->fs_write_text = runner_fs_write_text;
-	host->fs_write_bytes = runner_fs_write_bytes;
-	host->fs_stat = runner_fs_stat;
-	host->fs_mkdir = runner_fs_mkdir;
-	host->fs_remove = runner_fs_remove;
-	host->fs_rename = runner_fs_rename;
-	host->cpu_clock = runner_cpu_clock;
 }
 
 static int runner_open_ui(struct js2300_runner *runner)

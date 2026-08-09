@@ -1,0 +1,26 @@
+--- a/Makefile
++++ b/Makefile
+@@ -86,6 +86,7 @@ endif
+ CFLAGS += -DREVISION=\"$(GIT_REVISION)\"
+ 
+ # default settings
++NO_CD_MEDIA ?= 0
+ use_libchdr ?= 1
+ ifeq "$(ARCH)" "arm"
+ use_cyclone ?= 1
+@@ -345,6 +346,7 @@ else
+ LDLIBS += -lvorbisfile -lvorbis -logg
+ endif
+ 
++ifneq "$(NO_CD_MEDIA)" "1"
+ ifeq (1,$(use_libchdr))
+ CFLAGS += -DUSE_LIBCHDR
+ 
+@@ -380,6 +382,7 @@ endif
+ # ouf... prepend includes to overload headers available in the toolchain
+ CFLAGS := -I$(LZMA)/include -I$(CHDR)/include $(CFLAGS)
+ endif
++endif
+ 
+ ifeq "$(PLATFORM_ZLIB)" "1"
+ # zlib
