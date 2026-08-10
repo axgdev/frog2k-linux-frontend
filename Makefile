@@ -299,6 +299,7 @@ MUFROG_qpsx_EXTRA_CXXFLAGS := \
 # value even though the frontend supplies the Linux compiler and ABI.
 MUFROG_qpsx_EXTRA_ARGS := platform=sf2000
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
+	patches/mufrog/qpsx-automenu-gate.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
 	patches/mufrog/qpsx-static-load-buffer.patch \
 	patches/mufrog/qpsx-cue-failure.patch \
