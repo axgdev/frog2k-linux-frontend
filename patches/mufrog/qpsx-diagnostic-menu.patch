@@ -1,0 +1,38 @@
+diff --git a/libretro/core/libretro-core.cpp b/libretro/core/libretro-core.cpp
+--- a/libretro/core/libretro-core.cpp
++++ b/libretro/core/libretro-core.cpp
+@@ -691,6 +691,7 @@
+ 
+ /* v395: Global startup option - whether to open menu at startup */
+ static int g_menu_at_start = 1;  /* default: show menu at start */
++static int g_auto_menu = 1;      /* default: run frame-250 compatibility pass */
+ 
+ /* ============== v353: BITFLAGS FOR BOOLEAN OPTIONS ============== */
+ /* Pack ON/OFF options into bytes instead of ints: 8 options = 1 byte vs 32 bytes
+@@ -2410,6 +2411,8 @@
+         int val;
+         if (sscanf(line, "menu_at_start=%d", &val) == 1) {
+             g_menu_at_start = val ? 1 : 0;
++        } else if (sscanf(line, "auto_menu=%d", &val) == 1) {
++            g_auto_menu = val ? 1 : 0;
+         }
+     }
+     fclose(f);
+@@ -3679,7 +3682,7 @@
+      * menu with X/START, qpsx_apply_config() already ran on close; running it
+      * again at frame 250 while the game is rendering stalls the device. */
+     if (run_frame_count == 250 && !menu_active && auto_menu_frames == 0 &&
+-        !menu_was_manually_closed) {
++        !menu_was_manually_closed && g_auto_menu) {
+         XLOG("QPSX_084: AUTO-OPENING INVISIBLE MENU");
+         auto_menu_frames = 3;  /* Just 3 frames - menu is invisible anyway */
+         menu_active = 1;
+         menu_first_frame = 1;
+@@ -3825,6 +3828,7 @@
+     menu_was_manually_closed = 0;
+ 
+     /* v395: Load startup config first (before game config) */
++    g_auto_menu = 1;  /* startup options belong to this loaded game */
+     load_startup_config();
+ 
+     if (!info || !info->path) {
