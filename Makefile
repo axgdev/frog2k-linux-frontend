@@ -284,6 +284,8 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_ENABLE_MIPS_DIRECT_MEM=1 \
 	-DQPSX_ENABLE_MIPS_LSU_CACHING=1 \
 	-DQPSX_LINUX_CACHEFLUSH=1 \
+	-DQPSX_LINUX_ALLOCATED_RAM=1 \
+	-DQPSX_DISABLE_MIPS32R2_GPU_ASM=1 \
 	-include$(abspath src/mufrog_qpsx_config.h) -O3 \
 	-fno-semantic-interposition
 # QPSX is linked into a static PIE, so disabling shared-library semantic
@@ -295,10 +297,13 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 # the shared Mufrog rule remains warning-free for the C portions of the core.
 MUFROG_qpsx_EXTRA_CXXFLAGS := \
 	-fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
-# QPSX gates its MIPS GPU/GTE/PSX-memory assembly objects on this platform
-# value even though the frontend supplies the Linux compiler and ABI.
-MUFROG_qpsx_EXTRA_ARGS := platform=sf2000
+# The upstream "sf2000" platform selects bare-metal GPU/GTE/PSX-memory
+# assembly. Its GPU object explicitly uses MIPS32r2 EXT instructions, while
+# HC15xx is MIPS32r1. The Linux build already supplies every required ABI and
+# core flag above; the MIPS dynarec remains enabled by -DPSXREC -Dmips.
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
+	patches/mufrog/qpsx-linux-memory.patch \
+	patches/mufrog/qpsx-linux-mips32r1.patch \
 	patches/mufrog/qpsx-automenu-gate.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
 	patches/mufrog/qpsx-static-load-buffer.patch \
@@ -391,7 +396,8 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 # chip8.js is vendored into resources/ (from mufrog js2300 branch v0.5.3-develop1-rebased,
 # commit 5711f97): js2300-private main (pinned JS2300_REV) never shipped scripts/.
 
-.PHONY: all clean check elf-audit gpsp-pic-audit sf2000 demo frogui browser \
+.PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
+	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated
 
@@ -444,6 +450,17 @@ elf-audit:
 				($$3 != "R_MIPS_REL32" && $$3 != "R_MIPS_NONE")) { exit 1 }'; \
 	done
 	@if test -f build/sf2000-gpsp; then $(MAKE) gpsp-pic-audit; fi
+	@if test -f build/sf2000-qpsx; then $(MAKE) qpsx-mips32r1-audit; fi
+
+qpsx-mips32r1-audit: build/sf2000-qpsx
+	@set -e; \
+	body="$$(mktemp)"; \
+	trap 'rm -f "$$body"' EXIT HUP INT TERM; \
+	$(CROSS_COMPILE)objdump -d -m mips:isa32r2 '$<' > "$$body"; \
+	if grep -Eq '[[:space:]](ext|ins|rotr|rotrv|seb|seh|wsbh|rdhwr|synci|ehb|jr\.hb)[[:space:]]' "$$body"; then \
+		echo 'QPSX contains MIPS32r2 instructions forbidden on HC15xx MIPS32r1' >&2; \
+		exit 1; \
+	fi
 
 gpsp-pic-audit: build/sf2000-gpsp
 	@set -e; \
@@ -1003,6 +1020,7 @@ build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile \
 	mkdir -p '$$(@D)'
 	find 'build/mufrog/src/$(1)' -type f -name '*.o' -delete
 	find 'build/mufrog/src/$(1)' -type f -name '*.a' -delete
+	rm -f '$$@'
 	$(MAKE) -C 'build/mufrog/src/$(1)/$(MUFROG_$(call mufrog_key,$(1))_WORKDIR)' \
 		-f '$(MUFROG_$(call mufrog_key,$(1))_MAKEFILE)' \
 		platform=unix STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \

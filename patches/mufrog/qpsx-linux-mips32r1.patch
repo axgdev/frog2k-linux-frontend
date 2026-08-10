@@ -1,0 +1,23 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] qpsx: gate the MIPS32r2 GPU helpers explicitly
+
+QPSX treats every MIPS target as able to call gpu_inner_mips32.S, but that
+file declares MIPS32r2 and uses EXT. HC15xx implements MIPS32r1. Let the Linux
+port select the existing C fallbacks while retaining the MIPS dynarec and the
+MIPS32r1 CDDA mixer.
+
+diff --git a/src/gpu/gpu_unai/gpu_inner_mips32.h b/src/gpu/gpu_unai/gpu_inner_mips32.h
+index 151e1b4..29e7412 100644
+--- a/src/gpu/gpu_unai/gpu_inner_mips32.h
++++ b/src/gpu/gpu_unai/gpu_inner_mips32.h
+@@ -19,7 +19,8 @@
+  * All functions are optional - controlled via menu toggles.
+  * When disabled, falls back to C implementations.
+  */
+ 
+-#if defined(SF2000) || defined(__mips__)
++#if (defined(SF2000) || defined(__mips__)) && \
++    !defined(QPSX_DISABLE_MIPS32R2_GPU_ASM)
+ 
+ #ifdef __cplusplus
+ extern "C" {

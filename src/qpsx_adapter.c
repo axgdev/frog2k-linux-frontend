@@ -51,11 +51,14 @@ void xlog(const char *format, ...)
 	length = vsnprintf(line, sizeof(line), format, args);
 	va_end(args);
 	if (length > 0 && (size_t)length + 3u < sizeof(line)) {
+		ssize_t written;
+
 		memmove(line + 3, line, (size_t)length + 1u);
 		line[0] = '<';
 		line[1] = '6';
 		line[2] = '>';
-		(void)write(fd, line, (size_t)length + 3u);
+		written = write(fd, line, (size_t)length + 3u);
+		(void)written;
 	}
 	close(fd);
 }
