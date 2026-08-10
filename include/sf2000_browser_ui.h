@@ -34,6 +34,7 @@ enum sf2000_ui_label {
 struct sf2000_ui_config {
 	char language[8];
 	char font[256];
+	char font_latin[256];
 	unsigned font_px;
 	uint16_t background;
 	uint16_t panel;
@@ -51,6 +52,7 @@ struct sf2000_ui {
 	unsigned stride;
 	struct sf2000_ui_config config;
 	void *font;
+	void *fallback_font;
 };
 
 void sf2000_ui_config_defaults(struct sf2000_ui_config *config);

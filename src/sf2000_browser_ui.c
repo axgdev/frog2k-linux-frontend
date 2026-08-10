@@ -136,6 +136,7 @@ void sf2000_ui_config_defaults(struct sf2000_ui_config *config)
 	memset(config, 0, sizeof(*config));
 	strcpy(config->language, "en");
 	strcpy(config->font, "/mnt/sd/sf2000/ui.ttf");
+	strcpy(config->font_latin, "/mnt/sd/sf2000/ui-latin.ttf");
 	config->font_px = 15;
 	config->background = 0x0862;
 	config->panel = 0x10c4;
@@ -186,6 +187,10 @@ int sf2000_ui_config_load(struct sf2000_ui_config *config, const char *path)
 		} else if (!strcmp(key, "font")) {
 			strncpy(config->font, value, sizeof(config->font) - 1u);
 			config->font[sizeof(config->font) - 1u] = 0;
+		} else if (!strcmp(key, "font_latin")) {
+			strncpy(config->font_latin, value,
+				sizeof(config->font_latin) - 1u);
+			config->font_latin[sizeof(config->font_latin) - 1u] = 0;
 		} else if (!strcmp(key, "font_px")) {
 			number = strtoul(value, NULL, 10);
 			if (number >= 10u && number <= 24u)
@@ -356,6 +361,30 @@ static struct font *font_open(const char *path, unsigned pixels)
 	return font;
 }
 
+static void font_close(struct font *font)
+{
+	unsigned i;
+
+	if (!font)
+		return;
+	for (i = 0; i < GLYPH_CACHE; i++)
+		glyph_release(&font->glyphs[i]);
+	free(font->data);
+	free(font);
+}
+
+static struct font *font_for_codepoint(const struct sf2000_ui *ui,
+	uint32_t codepoint)
+{
+	struct font *font = ui->font;
+	struct font *fallback = ui->fallback_font;
+
+	if (font && (codepoint == 0 ||
+			stbtt_FindGlyphIndex(&font->info, (int)codepoint)))
+		return font;
+	return fallback ? fallback : font;
+}
+
 int sf2000_ui_init(struct sf2000_ui *ui, uint16_t *pixels, unsigned width,
 	unsigned height, unsigned stride, const struct sf2000_ui_config *config)
 {
@@ -365,22 +394,21 @@ int sf2000_ui_init(struct sf2000_ui *ui, uint16_t *pixels, unsigned width,
 	ui->height = height;
 	ui->stride = stride;
 	ui->config = *config;
-	ui->font = font_open(config->font, config->font_px);
+	ui->font = font_open(config->font_latin, config->font_px);
+	ui->fallback_font = font_open(config->font, config->font_px);
+	if (!ui->font) {
+		ui->font = ui->fallback_font;
+		ui->fallback_font = NULL;
+	}
 	return 0;
 }
 
 void sf2000_ui_close(struct sf2000_ui *ui)
 {
-	struct font *font = ui->font;
-	unsigned i;
-
-	if (font) {
-		for (i = 0; i < GLYPH_CACHE; i++)
-			glyph_release(&font->glyphs[i]);
-		free(font->data);
-		free(font);
-	}
+	font_close(ui->font);
+	font_close(ui->fallback_font);
 	ui->font = NULL;
+	ui->fallback_font = NULL;
 }
 
 void sf2000_ui_clear(struct sf2000_ui *ui, uint16_t color)
@@ -473,10 +501,10 @@ int sf2000_ui_text(struct sf2000_ui *ui, int x, int y, const char *text,
 {
 	const char *cursor = text;
 	int origin = x;
-	struct font *font = ui->font;
 
 	while (*cursor) {
 		uint32_t codepoint = utf8_next(&cursor);
+		struct font *font = font_for_codepoint(ui, codepoint);
 		struct glyph *glyph = font ? font_glyph(font, codepoint) : NULL;
 		int advance = glyph ? glyph->advance : fallback_advance(codepoint);
 		int row, column;
@@ -512,10 +540,10 @@ int sf2000_ui_measure(struct sf2000_ui *ui, const char *text)
 {
 	const char *cursor = text;
 	int width = 0;
-	struct font *font = ui->font;
 
 	while (*cursor) {
 		uint32_t codepoint = utf8_next(&cursor);
+		struct font *font = font_for_codepoint(ui, codepoint);
 		struct glyph *glyph = font ? font_glyph(font, codepoint) : NULL;
 
 		width += glyph ? glyph->advance : fallback_advance(codepoint);
