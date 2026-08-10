@@ -313,6 +313,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-linux-cacheflush.patch \
 	patches/mufrog/qpsx-xa-time.patch \
 	patches/mufrog/qpsx-libretro-savestate.patch \
+	patches/mufrog/qpsx-savestate-resume.patch \
+	patches/mufrog/qpsx-libretro-resume-context.patch \
 	patches/mufrog/qpsx-progress-log.patch \
 	patches/mufrog/qpsx-diagnostic-menu.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o

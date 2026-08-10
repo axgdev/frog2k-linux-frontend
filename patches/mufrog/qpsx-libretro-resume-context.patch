@@ -1,0 +1,46 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] qpsx: complete out-of-band libretro state loads
+
+rcntFreezeLoaded exists to stop psxRcntUpdate when the SDL frontend loads a
+state recursively from EmuUpdate.  A libretro unserialize call happens while
+CPU execution is already paused.  Leaving the recursive-load guard armed in
+that case makes the first resumed VBlank return before it advances and
+reschedules the root counter; the following Execute call then stalls.
+
+Expose a narrowly named completion hook and call it only after a successful
+memory-backed libretro load.  Native in-VBlank loads keep their existing
+guard semantics.
+
+--- a/src/psxcounters.h
++++ b/src/psxcounters.h
+@@ -52,5 +52,6 @@ u32 psxRcntRtarget(u32 index);
+ 
+ int psxRcntFreeze(void* f, FreezeMode mode);
+ void psxRcntInitFromFreeze(void);
++void psxRcntCompleteExternalFreeze(void);
+ 
+ void psxRcntAdjustTimestamps(const uint32_t prev_cycle_val);
+--- a/src/psxcounters.cpp
++++ b/src/psxcounters.cpp
+@@ -618,6 +618,11 @@ void psxRcntInitFromFreeze(void)
+ 	rcntFreezeLoaded = true;
+ }
+ 
++void psxRcntCompleteExternalFreeze(void)
++{
++	rcntFreezeLoaded = false;
++}
++
+ /******************************************************************************/
+ // Called before psxRegs.cycle is adjusted back to zero
+ //  by PSXINT_RESET_CYCLE_VAL event in psxevents.cpp
+--- a/libretro/core/libretro-core.cpp
++++ b/libretro/core/libretro-core.cpp
+@@ -4057,6 +4057,8 @@ static int mem_state_run_load(const unsigned char *data, unsigned long capacity)
+   SaveFuncs = mem_state_funcs();
+   result = LoadState("");
+   SaveFuncs = saved;
++  if (result == 0)
++    psxRcntCompleteExternalFreeze();
+   return result;
+ }

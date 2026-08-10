@@ -138,6 +138,7 @@ static unsigned save_ram_dirty;
 static unsigned save_ram_poll_frames;
 static uint64_t save_ram_last_flush_us;
 static uint32_t state_key_hash;
+static unsigned state_resume_probe_frames;
 static void render_pause_menu(struct sf2000_ui *menu, unsigned selected);
 static unsigned poll_controls(void);
 
@@ -1878,6 +1879,7 @@ static int load_state_slot(unsigned slot)
 		return -1;
 	}
 	free(data);
+	state_resume_probe_frames = 2;
 	{
 		char details[96];
 
@@ -2524,6 +2526,15 @@ int main(int argc, char **argv)
 		retro_run();
 		(void)alarm(0);
 		core_watchdog_stage = 0;
+		if (state_resume_probe_frames) {
+			char details[96];
+			unsigned completed = 3u - state_resume_probe_frames;
+
+			snprintf(details, sizeof(details),
+				"save state resume frame=%u complete\n", completed);
+			log_kmsg(details);
+			state_resume_probe_frames--;
+		}
 		/* Load the pause font after the first game frame is visible. This
 		 * hides the one-time SD/font cost from the first pause invocation. */
 		if (first_frame && !pause_ui_ready)

@@ -1,0 +1,40 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] qpsx: rebuild the event queue after loading counters
+
+LoadState restored psxRegs and immediately rebuilt the event queue.  That
+rebuild rebases the emulated cycle counter to zero and adjusts the currently
+live root counters.  The saved root counters were loaded later, so their
+cycleStart values remained relative to the old, non-zero cycle.  After a
+cross-process load this could leave the next VBlank effectively unreachable
+and the following retro_run would never return.
+
+Load every device and counter first, then rebuild the queue.  At that point
+psxEvqueueInitFromFreeze can rebase both the restored event timestamps and the
+restored root counters as one consistent snapshot.
+
+--- a/src/misc.cpp
++++ b/src/misc.cpp
+@@ -923,11 +923,5 @@ int LoadState(const char *file) {
+ 	psxRegs.psxH=psxH;
+ 	psxRegs.io_cycle_counter=0;
+ 
+-	//senquack - Clear & intialize new event scheduler queue based on
+-	// saved contents of psxRegs.interrupt and psxRegs.intCycle[]
+-	// NOTE: important to do this before calling any functions like
+-	// psxRcntFreeze() that will queue events of their own.
+-	psxEvqueueInitFromFreeze();
+-
+ 	if (Config.HLE)
+ 		psxBiosFreeze(0);
+@@ -968,6 +964,12 @@ int LoadState(const char *file) {
+ 	     || mdecFreeze(f, FREEZE_LOAD)     )
+ 		goto error;
+ 
++	/* Rebuild only after rcnts[] has been restored.  This routine rebases
++	 * psxRegs.cycle to zero and adjusts root-counter timestamps; doing it
++	 * before psxRcntFreeze() adjusts stale counters and then overwrites them
++	 * with unrebased values from the state. */
++	psxEvqueueInitFromFreeze();
++
+ 	//XXX: HACK December 2016 -- see comment above
+ skip_missing_data_hack:
