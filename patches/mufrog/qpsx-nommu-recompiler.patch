@@ -13,6 +13,12 @@ path enabled for this target and disable only the constant-address shortcuts.
 The direct path remains an explicit build option so a future mapping change
 cannot silently alter the generated code.
 
+The previous version of this patch replaced the upstream non-mapped address
+range check with a 0x1f800000 mask.  That changed the original bit-27 RAM
+classification and caused Ridge Racer to stop producing frames after startup
+in QEMU.  Keep the upstream range check unchanged; it is the known-good
+predicate for this recompiler path.
+
 --- a/src/recompiler/mips/recompiler.cpp
 +++ b/src/recompiler/mips/recompiler.cpp
 @@ -79,1 +79,3 @@
@@ -25,7 +31,7 @@ cannot silently alter the generated code.
 +#if defined(QPSX_ENABLE_MIPS_CONST_MEM) && QPSX_ENABLE_MIPS_CONST_MEM
 +#define USE_CONST_FUZZY_ADDRESSES
 +#endif
-@@ -84,2 +84,11 @@
+@@ -84,2 +88,11 @@
 -/* Generate inline memory access or call psxMemRead/Write C functions */
 -#define USE_DIRECT_MEM_ACCESS
 +/*
@@ -46,7 +52,6 @@ cannot silently alter the generated code.
 -    write32(0x0c000000 | (((u32)(addr) & 0x0fffffff) >> 2));                   \
 +    LI32(MIPSREG_T9, (u32)(addr));                                              \
 +    write32(0x0000f809 | (MIPSREG_T9 << 21));                                  \
-
 --- a/src/recompiler/mips/rec_lsu.cpp.h
 +++ b/src/recompiler/mips/rec_lsu.cpp.h
 @@ -75,2 +75,4 @@
@@ -55,16 +60,3 @@ cannot silently alter the generated code.
 +#if defined(QPSX_ENABLE_MIPS_LSU_CACHING) && QPSX_ENABLE_MIPS_LSU_CACHING
 +#define USE_LSU_CACHING
 +#endif
-
---- a/src/recompiler/mips/rec_lsu.cpp.h
-+++ b/src/recompiler/mips/rec_lsu.cpp.h
-@@ -692,4 +692,5 @@
--				ADDIU(MIPSREG_A0, rs, imm_max);
--				SLL(MIPSREG_A1, MIPSREG_A0, 4);
--				backpatch_label_hle_1 = (u32 *)recMem;
--				BLTZ(MIPSREG_A1, 0);
-+				ADDIU(MIPSREG_A0, rs, imm_max);
-+				LUI(TEMP_1, 0x1f80);
-+				AND(TEMP_1, TEMP_1, MIPSREG_A0);
-+				backpatch_label_hle_1 = (u32 *)recMem;
-+				BNE(TEMP_1, 0, 0);
