@@ -7,11 +7,10 @@ by malloc and the recompiler must use the checked psxMemRead/Write helpers.
 
 The upstream source also enables constant-address emission unconditionally.
 That optimization converts a PSX address to a host pointer while compiling a
-block and is unsafe when psxM is a malloc buffer.  Dynamic accesses already
-have the correct runtime range check and psxM conversion, so keep that fast
-path enabled for this target and disable only the constant-address shortcuts.
-The direct path remains an explicit build option so a future mapping change
-cannot silently alter the generated code.
+block, so make it an explicit platform contract: it is valid only while psxM
+has a stable lifetime. Dynamic accesses retain their runtime range check and
+psxM conversion. Keeping both paths behind build options prevents a future
+allocation or mapping change from silently altering generated code.
 
 The previous version of this patch replaced the upstream non-mapped address
 range check with a 0x1f800000 mask.  That changed the original bit-27 RAM
@@ -39,8 +38,8 @@ predicate for this recompiler path.
 + *
 + * Dynamic accesses perform a runtime PSX-range check and convert through the
 + * malloc-backed psxM pointer when no virtual mapping is available.  Keep this
-+ * fast path explicit because the constant-address path above is not safe for
-+ * NOMMU builds.
++ * fast path explicit because constant-address emission has the separate,
++ * stricter requirement that psxM remain allocated at one address.
 + */
 +#if defined(QPSX_ENABLE_MIPS_DIRECT_MEM) && QPSX_ENABLE_MIPS_DIRECT_MEM
 +#define USE_DIRECT_MEM_ACCESS

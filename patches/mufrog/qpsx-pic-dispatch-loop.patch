@@ -1,0 +1,119 @@
+From: SF2000 Linux <sf2000@localhost>
+Subject: [PATCH] qpsx: use a PIC-safe MIPS block dispatcher on NOMMU
+
+The C dispatch path enters every translated basic block through recFunc(), so
+GCC saves and restores s0-s7, fp, and ra for every PSX basic block.  Retain the
+same register contract across a complete execute interval instead.
+
+The old optional assembly loop used absolute symbol relocations and therefore
+cannot link into the NOMMU static PIE.  Select only the LUT dispatcher used by
+the malloc-backed SF2000 port, pass every relocated address in from PIC C, and
+save those addresses in the dispatcher frame before entering translated code.
+Local return addresses are derived PC-relatively with BAL.  Other dispatcher
+variants and the execute-block helper keep their established C paths.
+
+--- a/src/recompiler/mips/recompiler.cpp
++++ b/src/recompiler/mips/recompiler.cpp
+@@ -695,7 +695,8 @@ __attribute__((noinline)) void recExecute_indirect_return_lut()
+ 	// QPSX_039: Frame complete flag - must return after VBlank for libretro
+ 	extern volatile int emu_frame_complete;
+ 
+-#ifndef ASM_EXECUTE_LOOP
++#if !defined(QPSX_ENABLE_MIPS_PIC_ASM_DISPATCH) || \
++    !QPSX_ENABLE_MIPS_PIC_ASM_DISPATCH
+ 	emu_frame_complete = 0;
+ 	for (;;) {
+ 		u32 *p = (u32*)PC_REC(psxRegs.pc);
+@@ -724,17 +725,28 @@ __asm__ __volatile__ (
+ ".set noreorder                               \n"
+ 
+ // $fp/$s8 remains set to &psxRegs across all calls to blocks
+-"la    $fp, %[psxRegs]                        \n"
++"move  $fp, %[psxRegs]                        \n"
+ 
+ // Set up our own stack frame. Should have 8-byte alignment, and have 16 bytes
+ // empty at 0($sp) for use by functions called from within recompiled code.
+-".equ  frame_size,                  24        \n"
++".equ  frame_size,                  48        \n"
+ ".equ  f_off_temp_var1,             20        \n"
+ ".equ  f_off_block_ret_addr,        16        \n" // NOTE: blocks assume this is at 16($sp)!
++".equ  f_off_recRecompile,           24        \n"
++".equ  f_off_psxBranchTest,          28        \n"
++".equ  f_off_frame_complete,         32        \n"
++".equ  f_off_psxRecLUT,              36        \n"
+ "addiu $sp, $sp, -frame_size                  \n"
++"sw    %[recRecompile], f_off_recRecompile($sp) \n"
++"sw    %[psxBranchTest], f_off_psxBranchTest($sp) \n"
++"sw    %[emu_frame_complete], f_off_frame_complete($sp) \n"
++"sw    %[psxRecLUT], f_off_psxRecLUT($sp)     \n"
+ 
+-// Store const block return address at fixed location in stack frame
+-"la    $t0, loop%=                            \n"
++// Derive the local return address without an absolute text relocation.
++"bal   setup_return%=                         \n"
++"nop                                           \n"
++"setup_return%=:                              \n"
++"addiu $t0, $ra, loop%=-setup_return%=        \n"
+ "sw    $t0, f_off_block_ret_addr($sp)         \n"
+ 
+ // Load $v0 once with psxRegs.pc, blocks will assign new value when returning
+@@ -774,11 +786,11 @@ __asm__ __volatile__ (
+ // Infinite loop, blocks return here
+ "loop%=:                                      \n"
+ "lw    $t3, %[psxRegs_cycle_off]($fp)         \n" // $t3 = psxRegs.cycle
+-"lui   $t1, %%hi(%[psxRecLUT])                \n"
+ "srl   $t2, $v0, 16                           \n"
+ "sll   $t2, $t2, 2                            \n" // sizeof() psxRecLUT[] elements is 4
++"lw    $t1, f_off_psxRecLUT($sp)              \n"
+ "addu  $t1, $t1, $t2                          \n"
+-"lw    $t1, %%lo(%[psxRecLUT])($t1)           \n" // $t1 = psxRecLUT[psxRegs.pc >> 16]
++"lw    $t1, 0($t1)                            \n" // $t1 = psxRecLUT[psxRegs.pc >> 16]
+ "lw    $t4, %[psxRegs_io_cycle_ctr_off]($fp)  \n" // $t4 = psxRegs.io_cycle_counter
+ "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
+ "andi  $t0, $v0, 0xffff                       \n"
+@@ -810,12 +822,13 @@ __asm__ __volatile__ (
+ 
+ // Call psxBranchTest() and go back to top of loop
+ "call_psxBranchTest%=:                        \n"
+-"jal   %[psxBranchTest]                       \n"
++"lw    $t9, f_off_psxBranchTest($sp)          \n"
++"jalr  $t9                                    \n"
+ "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Use BD slot to store new psxRegs.pc val,
+                                                   //  as psxBranchTest() might issue an exception.
+ // QPSX_039: Check emu_frame_complete flag - exit if frame is done
+-"lui   $t5, %%hi(%[emu_frame_complete])       \n"
+-"lw    $t6, %%lo(%[emu_frame_complete])($t5)  \n"
++"lw    $t5, f_off_frame_complete($sp)         \n"
++"lw    $t6, 0($t5)                            \n"
+ "bnez  $t6, exit%=                            \n" // Exit loop if frame complete
+ "nop                                          \n"
+ "lw    $v0, %[psxRegs_pc_off]($fp)            \n" // After psxBranchTest() returns, load psxRegs.pc
+@@ -827,7 +840,8 @@ __asm__ __volatile__ (
+ 
+ // Recompile block and return to normal codepath.
+ "recompile_block%=:                           \n"
+-"jal   %[recRecompile]                        \n"
++"lw    $t9, f_off_recRecompile($sp)           \n"
++"jalr  $t9                                    \n"
+ "sw    $t2, f_off_temp_var1($sp)              \n" // <BD> Save block ptr across call
+ "lw    $t2, f_off_temp_var1($sp)              \n" // Restore block ptr upon return
+ "lw    $v0, %[psxRegs_pc_off]($fp)            \n" // Blocks expect $v0 to contain PC val on entry
+@@ -844,13 +858,13 @@ __asm__ __volatile__ (
+ : // Output
+ : // Input
+-  [psxRegs]                    "i" (&psxRegs),
++  [psxRegs]                    "d" (&psxRegs),
+   [psxRegs_pc_off]             "i" (off(pc)),
+   [psxRegs_cycle_off]          "i" (off(cycle)),
+   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
+-  [recRecompile]               "i" (&recRecompile),
+-  [psxBranchTest]              "i" (&psxBranchTest),
+-  [psxRecLUT]                  "i" (psxRecLUT),
+-  [emu_frame_complete]         "i" (&emu_frame_complete)
++  [recRecompile]               "d" (&recRecompile),
++  [psxBranchTest]              "d" (&psxBranchTest),
++  [psxRecLUT]                  "d" (psxRecLUT),
++  [emu_frame_complete]         "d" (&emu_frame_complete)
+ : // Clobber - No need to list anything but 'saved' regs
+   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
+ );

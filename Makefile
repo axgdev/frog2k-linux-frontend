@@ -283,11 +283,15 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
 	-DQPSX_ENABLE_MIPS_DIRECT_MEM=1 \
 	-DQPSX_ENABLE_MIPS_LSU_CACHING=1 \
+	-DQPSX_ENABLE_MIPS_CONST_MEM=1 \
+	-DQPSX_ENABLE_MIPS_PIC_ASM_DISPATCH=1 \
 	-DQPSX_LINUX_CACHEFLUSH=1 \
 	-DQPSX_LINUX_ALLOCATED_RAM=1 \
 	-DQPSX_DISABLE_MIPS32R2_GPU_ASM=1 \
-	-include$(abspath src/mufrog_qpsx_config.h) -O3 \
+	-include$(abspath src/mufrog_qpsx_config.h) -O2 -mtune=24kc \
 	-fno-semantic-interposition
+# QPSX allocates psxM once during init and releases it only during deinit, so
+# translated constant RAM addresses remain valid for the process lifetime.
 # QPSX is linked into a static PIE, so disabling shared-library semantic
 # interposition lets GCC bind internal hot-path calls directly and inline them.
 # This common flag intentionally reaches both C and C++; keep it QPSX-scoped
@@ -304,6 +308,7 @@ MUFROG_qpsx_EXTRA_CXXFLAGS := \
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-linux-memory.patch \
 	patches/mufrog/qpsx-linux-mips32r1.patch \
+	patches/mufrog/qpsx-gpu-fast-fallback.patch \
 	patches/mufrog/qpsx-automenu-gate.patch \
 	patches/mufrog/qpsx-linux-cdda-asm.patch \
 	patches/mufrog/qpsx-static-load-buffer.patch \
@@ -315,6 +320,7 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
 	patches/mufrog/qpsx-libretro-savestate.patch \
 	patches/mufrog/qpsx-savestate-resume.patch \
 	patches/mufrog/qpsx-libretro-resume-context.patch \
+	patches/mufrog/qpsx-pic-dispatch-loop.patch \
 	patches/mufrog/qpsx-progress-log.patch \
 	patches/mufrog/qpsx-diagnostic-menu.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
