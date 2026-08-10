@@ -2,8 +2,10 @@ CC ?= cc
 CXX ?= c++
 CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-linux-uclibc-
 JOBS ?= $(shell nproc 2>/dev/null || echo 2)
-SF2000_CC ?= $(CROSS_COMPILE)gcc
-SF2000_CXX ?= $(CROSS_COMPILE)g++
+CCACHE ?= $(shell command -v ccache 2>/dev/null)
+CCACHE_COMPILE := $(if $(strip $(CCACHE)),$(CCACHE) ,)
+SF2000_CC ?= $(CCACHE_COMPILE)$(CROSS_COMPILE)gcc
+SF2000_CXX ?= $(CCACHE_COMPILE)$(CROSS_COMPILE)g++
 SF2000_OBJCOPY ?= $(CROSS_COMPILE)objcopy
 SF2000_STRIP ?= $(CROSS_COMPILE)strip
 SF2000_NM ?= $(CROSS_COMPILE)nm
@@ -208,7 +210,7 @@ $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,
 MUFROG_CORE_CLONES := \
 	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
 	picodrive|picodrive|https://github.com/libretro/picodrive.git|f0d4a0118a9733a1f10bce5a4ac772c474f9300d \
-	qpsx|sf2000-qpsx-playstation-emulator|https://github.com/angree/sf2000-qpsx-playstation-emulator.git|368310aa1b94fe764b8fdf4ddbd7afd06d7bd2a1 \
+	qpsx|sf2000-qpsx-playstation-emulator|git@github.com:axgdev/qpsx_linux_private.git|482347a610b6c41b67b3fad593d2d6ba2c87d567 \
 	mame2000|libretro-mame2000|https://github.com/libretro/mame2000-libretro.git|905808fbcc3adf8c610c1c60f0e41ce4b35db1c5 \
 	fbalpha2012|fbalpha2012|https://github.com/libretro/fbalpha2012.git|b7ac554c53561d41640372f23dab15cd6fc4f0c4 \
 	a5200|a5200|https://github.com/libretro/a5200.git|0942c88d64cad6853b539f51b39060a9de0cbcab \
@@ -249,8 +251,13 @@ $(MUFROG_SOURCE_ROOT)/%.git: Makefile
 	mkdir -p '$(dir $@)'
 	test -d '$(@D)/.git' || \
 		git clone --filter=blob:none '$(call mufrog_clone_url,x,$(notdir $(@D)))' '$(@D)'
+	git -C '$(@D)' cat-file -e '$(call mufrog_clone_rev,x,$(notdir $(@D)))^{commit}' 2>/dev/null || \
+		git -C '$(@D)' fetch --depth 1 \
+			'$(call mufrog_clone_url,x,$(notdir $(@D)))' \
+			'$(call mufrog_clone_rev,x,$(notdir $(@D)))'
 	git -C '$(@D)' checkout --detach '$(call mufrog_clone_rev,x,$(notdir $(@D)))'
 	git -C '$(@D)' submodule update --init --depth 1 --filter=blob:none --jobs '$(JOBS)'
+	touch '$@'
 
 # Any file inside a mufrog core checkout implies the clone stamp, and becomes
 # buildable as soon as the clone materializes it.  The stamp rules above perform
@@ -276,6 +283,7 @@ MUFROG_picodrive_EXTRA_CFLAGS += -O3
 # the shared libretro-common libchdr module on the include path.
 MUFROG_picodrive_PATCHES := patches/mufrog/picodrive-no-chd.patch
 MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
+QPSX_OPTIMIZE ?= -O2
 MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
 	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
@@ -288,7 +296,7 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_LINUX_CACHEFLUSH=1 \
 	-DQPSX_LINUX_ALLOCATED_RAM=1 \
 	-DQPSX_DISABLE_MIPS32R2_GPU_ASM=1 \
-	-include$(abspath src/mufrog_qpsx_config.h) -O2 -mtune=24kc \
+	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
 # QPSX allocates psxM once during init and releases it only during deinit, so
 # translated constant RAM addresses remain valid for the process lifetime.
@@ -305,24 +313,6 @@ MUFROG_qpsx_EXTRA_CXXFLAGS := \
 # assembly. Its GPU object explicitly uses MIPS32r2 EXT instructions, while
 # HC15xx is MIPS32r1. The Linux build already supplies every required ABI and
 # core flag above; the MIPS dynarec remains enabled by -DPSXREC -Dmips.
-MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-linux-paths.patch \
-	patches/mufrog/qpsx-linux-memory.patch \
-	patches/mufrog/qpsx-linux-mips32r1.patch \
-	patches/mufrog/qpsx-gpu-fast-fallback.patch \
-	patches/mufrog/qpsx-automenu-gate.patch \
-	patches/mufrog/qpsx-linux-cdda-asm.patch \
-	patches/mufrog/qpsx-static-load-buffer.patch \
-	patches/mufrog/qpsx-cue-failure.patch \
-	patches/mufrog/qpsx-linux-dirent.patch \
-	patches/mufrog/qpsx-nommu-recompiler.patch \
-	patches/mufrog/qpsx-linux-cacheflush.patch \
-	patches/mufrog/qpsx-xa-time.patch \
-	patches/mufrog/qpsx-libretro-savestate.patch \
-	patches/mufrog/qpsx-savestate-resume.patch \
-	patches/mufrog/qpsx-libretro-resume-context.patch \
-	patches/mufrog/qpsx-pic-dispatch-loop.patch \
-	patches/mufrog/qpsx-progress-log.patch \
-	patches/mufrog/qpsx-diagnostic-menu.patch
 MUFROG_qpsx_ADAPTER_OBJECTS := build/mufrog/qpsx-adapter.o
 MUFROG_handy_EXTRA_CFLAGS := -I$(abspath build/mufrog/src/handy/lynx) -DWANT_CRC32
 MUFROG_fbalpha2012_EXTRA_CFLAGS := -include$(abspath src/mufrog_wchar_compat.h) \
@@ -394,6 +384,11 @@ MUFROG_gpsp_multicore_EXTRA_ARGS := HAVE_DYNAREC=1 CPU_ARCH=mips MMAP_JIT_CACHE=
 
 MUFROG_CORE_EXECUTABLES := $(foreach spec,$(MUFROG_CORE_SPECS),build/sf2000-$(word 1,$(subst :, ,$(spec))))
 MUFROG_MEMORY_STREAM := build/mufrog/libretro-memory-stream.a
+QPSX_DEV_SOURCE ?= $(abspath ../sf2000-qpsx-playstation-emulator)
+QPSX_DEV_RAW := build/qpsx-dev/pcsx4all_libretro_sf2000.a
+QPSX_DEV_ARCHIVE := build/qpsx-dev/qpsx_libretro_linux.a
+QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
+QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
 JS2300_RUNTIME := build/js2300/libjs2300.a
 JS2300_CORE_SOURCE := build/js2300/js2300_libretro_core.c
 JS2300_CORE_OBJECT := build/js2300/js2300_libretro_core.o
@@ -405,6 +400,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 # commit 5711f97): js2300-private main (pinned JS2300_REV) never shipped scripts/.
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
+	qpsx-dev qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated
@@ -460,15 +456,73 @@ elf-audit:
 	@if test -f build/sf2000-gpsp; then $(MAKE) gpsp-pic-audit; fi
 	@if test -f build/sf2000-qpsx; then $(MAKE) qpsx-mips32r1-audit; fi
 
-qpsx-mips32r1-audit: build/sf2000-qpsx
+QPSX_AUDIT_EXECUTABLE ?= build/sf2000-qpsx
+
+qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 	@set -e; \
 	body="$$(mktemp)"; \
 	trap 'rm -f "$$body"' EXIT HUP INT TERM; \
-	$(CROSS_COMPILE)objdump -d -m mips:isa32r2 '$<' > "$$body"; \
+	$(CROSS_COMPILE)objdump -d -m mips:isa32r2 '$(QPSX_AUDIT_EXECUTABLE)' > "$$body"; \
 	if grep -Eq '[[:space:]](ext|ins|rotr|rotrv|seb|seh|wsbh|rdhwr|synci|ehb|jr\.hb)[[:space:]]' "$$body"; then \
 		echo 'QPSX contains MIPS32r2 instructions forbidden on HC15xx MIPS32r1' >&2; \
 		exit 1; \
 	fi
+
+# Fast QPSX development path.  It compiles directly in the maintained fork,
+# preserving its object files between invocations, and deliberately bypasses
+# the disposable patched source tree and every unrelated core.  A compiler
+# flag change invalidates the QPSX objects; ordinary source edits remain fully
+# incremental.  ccache makes that required clean rebuild inexpensive.
+qpsx-dev: $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
+		$(MUFROG_MEMORY_STREAM) build/mufrog/adapter-qpsx.o \
+		build/mufrog/qpsx-adapter.o
+	@test -d '$(QPSX_DEV_SOURCE)/.git' || { \
+		echo 'QPSX_DEV_SOURCE must name the qpsx fork checkout' >&2; exit 2; }
+	mkdir -p '$(dir $(QPSX_DEV_RAW))'
+	@set -eu; \
+	flags='$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
+	if ! test -f '$(QPSX_DEV_FLAGS_STAMP)' || \
+		! grep -Fqx -- "$$flags" '$(QPSX_DEV_FLAGS_STAMP)'; then \
+		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
+			platform=unix STATIC_LINKING=1 RECOMPILER=mips \
+			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
+		printf '%s\n' "$$flags" > '$(QPSX_DEV_FLAGS_STAMP)'; \
+	fi
+	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
+		platform=unix STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		TARGET='$(abspath $(QPSX_DEV_RAW))' \
+		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
+		CFLAGS='$(MUFROG_CORE_CFLAGS) \
+			-I$(QPSX_DEV_SOURCE) -I$(QPSX_DEV_SOURCE)/src \
+			-I$(QPSX_DEV_SOURCE)/libretro \
+			$(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
+		CXXFLAGS='$(MUFROG_CORE_CFLAGS) \
+			-I$(QPSX_DEV_SOURCE) -I$(QPSX_DEV_SOURCE)/src \
+			-I$(QPSX_DEV_SOURCE)/libretro \
+			$(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) \
+			$(MUFROG_qpsx_EXTRA_CXXFLAGS)'
+	$(SF2000_OBJCOPY) $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=qpsx_$(symbol)) \
+		'$(QPSX_DEV_RAW)' '$(QPSX_DEV_ARCHIVE)'
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -o '$(QPSX_DEV_EXECUTABLE)' \
+		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
+		build/mufrog/adapter-qpsx.o '$(QPSX_DEV_ARCHIVE)' \
+		$(MUFROG_MEMORY_STREAM) build/mufrog/qpsx-adapter.o \
+		$(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
+	$(SF2000_STRIP) --strip-unneeded '$(QPSX_DEV_EXECUTABLE)'
+
+qpsx-dev-mips32r1-audit: qpsx-dev
+	$(MAKE) QPSX_AUDIT_EXECUTABLE='$(QPSX_DEV_EXECUTABLE)' qpsx-mips32r1-audit
+
+qpsx-dev-package: qpsx-dev-mips32r1-audit
+	mkdir -p build/core-packages/licenses
+	cp '$(QPSX_DEV_EXECUTABLE)' build/core-packages/sf2000-qpsx
+	cp '$(QPSX_DEV_SOURCE)/LICENSE' build/core-packages/licenses/qpsx-LICENSE
+
+qpsx-dev-clean:
+	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
+		platform=unix STATIC_LINKING=1 RECOMPILER=mips \
+		TARGET='$(abspath $(QPSX_DEV_RAW))'
+	rm -rf build/qpsx-dev '$(QPSX_DEV_EXECUTABLE)'
 
 gpsp-pic-audit: build/sf2000-gpsp
 	@set -e; \
