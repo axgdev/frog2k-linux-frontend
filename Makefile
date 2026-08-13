@@ -400,7 +400,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 # commit 5711f97): js2300-private main (pinned JS2300_REV) never shipped scripts/.
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
-	qpsx-dev qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
+	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated
@@ -470,23 +470,31 @@ qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 
 # Fast QPSX development path.  It compiles directly in the maintained fork,
 # preserving its object files between invocations, and deliberately bypasses
-# the disposable patched source tree and every unrelated core.  A compiler
-# flag change invalidates the QPSX objects; ordinary source edits remain fully
-# incremental.  ccache makes that required clean rebuild inexpensive.
-qpsx-dev: $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
-		$(MUFROG_MEMORY_STREAM) build/mufrog/adapter-qpsx.o \
-		build/mufrog/qpsx-adapter.o
+# the disposable patched source tree and every unrelated core.  The recursive
+# core make remains phony because it owns the fork's dependency graph.  Its
+# transformed archive is installed with compare-and-replace, though, so a
+# no-op recursive make does not force the much larger frontend PIE to relink.
+# A compiler or flag change invalidates the QPSX objects; ordinary source edits
+# remain fully incremental.  ccache makes that required clean rebuild cheap.
+qpsx-dev-core:
 	@test -d '$(QPSX_DEV_SOURCE)/.git' || { \
 		echo 'QPSX_DEV_SOURCE must name the qpsx fork checkout' >&2; exit 2; }
 	mkdir -p '$(dir $(QPSX_DEV_RAW))'
 	@set -eu; \
-	flags='$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
-	if ! test -f '$(QPSX_DEV_FLAGS_STAMP)' || \
-		! grep -Fqx -- "$$flags" '$(QPSX_DEV_FLAGS_STAMP)'; then \
+	{ printf '%s\n' \
+		'CC=$(SF2000_CC)' \
+		'CXX=$(SF2000_CXX)' \
+		'AR=$(CROSS_COMPILE)ar' \
+		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
+		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
+	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
+	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
 			platform=unix STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
-		printf '%s\n' "$$flags" > '$(QPSX_DEV_FLAGS_STAMP)'; \
+		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
+	else \
+		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
 		platform=unix STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
@@ -501,14 +509,29 @@ qpsx-dev: $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
 			-I$(QPSX_DEV_SOURCE)/libretro \
 			$(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) \
 			$(MUFROG_qpsx_EXTRA_CXXFLAGS)'
-	$(SF2000_OBJCOPY) $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=qpsx_$(symbol)) \
-		'$(QPSX_DEV_RAW)' '$(QPSX_DEV_ARCHIVE)'
+
+$(QPSX_DEV_ARCHIVE): qpsx-dev-core
+	@set -eu; \
+	tmp='$@.tmp'; \
+	$(SF2000_OBJCOPY) -D $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=qpsx_$(symbol)) \
+		'$(QPSX_DEV_RAW)' "$$tmp"; \
+	if cmp -s "$$tmp" '$@' 2>/dev/null; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" '$@'; \
+	fi
+
+$(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
+		$(MUFROG_MEMORY_STREAM) build/mufrog/adapter-qpsx.o \
+		build/mufrog/qpsx-adapter.o $(QPSX_DEV_ARCHIVE) Makefile
 	$(SF2000_CXX) $(SF2000_LDFLAGS) -o '$(QPSX_DEV_EXECUTABLE)' \
 		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
 		build/mufrog/adapter-qpsx.o '$(QPSX_DEV_ARCHIVE)' \
 		$(MUFROG_MEMORY_STREAM) build/mufrog/qpsx-adapter.o \
 		$(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
 	$(SF2000_STRIP) --strip-unneeded '$(QPSX_DEV_EXECUTABLE)'
+
+qpsx-dev: $(QPSX_DEV_EXECUTABLE)
 
 qpsx-dev-mips32r1-audit: qpsx-dev
 	$(MAKE) QPSX_AUDIT_EXECUTABLE='$(QPSX_DEV_EXECUTABLE)' qpsx-mips32r1-audit
