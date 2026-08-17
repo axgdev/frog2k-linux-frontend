@@ -127,6 +127,9 @@ static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
 static unsigned pause_ge_disabled;
 static unsigned pause_ge_presented;
+/* One-shot guard so a failed GE present resets and retries the engine at
+ * most once before the permanent CPU fallback. */
+static unsigned ge_reset_retried;
 static unsigned state_slot;
 static char pause_status[96];
 static char save_ram_path[SAVE_PATH_MAX];
@@ -884,6 +887,27 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	return 0;
 }
 
+/* Tear down the GE context after a present failure that a reset retry did
+ * not recover.  The engine may still hold a wedged node, so drain first
+ * (the reset already reinitialized the queue) and then release every
+ * managed source surface before closing the context. */
+static void ge_disable_cpu_fallback(void)
+{
+	unsigned i;
+
+	if (!host.ge)
+		return;
+	(void)hcge_engine_sync(host.ge);
+	for (i = 0; i < host.ge_buffers; i++) {
+		(void)hcge_linux_free_buffer(host.ge, host.ge_source_handle[i]);
+		host.ge_source[i] = NULL;
+	}
+	hcge_close_context(host.ge);
+	host.ge = NULL;
+	host.ge_buffers = 0;
+	host.ge_pending = 0;
+}
+
 static void video(const void *data, unsigned width, unsigned height,
 	size_t pitch)
 {
@@ -928,22 +952,36 @@ static void video(const void *data, unsigned width, unsigned height,
 	if (profile_present)
 		(void)clock_gettime(CLOCK_MONOTONIC, &present_start);
 	if (ge_present(data, width, height, pitch, out_w, out_h, left, top) < 0) {
-		if (host.ge) {
-			unsigned i;
-
-			log_kmsg("GE present failed; using CPU renderer\n");
-			(void)hcge_engine_sync(host.ge);
-			for (i = 0; i < host.ge_buffers; i++) {
-				(void)hcge_linux_free_buffer(host.ge,
-					host.ge_source_handle[i]);
-				host.ge_source[i] = NULL;
+		/*
+		 * The HC15xx GE can wedge with BUSY latched and the queue head
+		 * parked on the published node (sync timeout status=f3000000,
+		 * finish=0).  Reset the engine and retry once before permanently
+		 * falling back to the CPU: hcge_reset() clears the hardware and
+		 * reinitializes the command queue without invalidating the
+		 * allocated source surfaces, matching the recovery the screen
+		 * service already applies to its own failed presents.
+		 */
+		if (host.ge && !ge_reset_retried && hcge_reset(host.ge) == 0) {
+			ge_reset_retried = 1;
+			if (ge_present(data, width, height, pitch, out_w, out_h,
+					left, top) >= 0) {
+				ge_reset_retried = 0;
+				log_kmsg("GE present recovered after engine reset\n");
+			} else {
+				ge_reset_retried = 0;
+				log_kmsg("GE present failed after engine reset; using CPU renderer\n");
+				ge_disable_cpu_fallback();
+				cpu_present(data, width, height, pitch, out_w, out_h,
+					left, top);
 			}
-			hcge_close_context(host.ge);
-			host.ge = NULL;
-			host.ge_buffers = 0;
-			host.ge_pending = 0;
+		} else {
+			if (host.ge) {
+				log_kmsg("GE present failed; using CPU renderer\n");
+				ge_disable_cpu_fallback();
+			}
+			cpu_present(data, width, height, pitch, out_w, out_h,
+				left, top);
 		}
-		cpu_present(data, width, height, pitch, out_w, out_h, left, top);
 	}
 	if (profile_present) {
 		struct timespec present_end;
@@ -1084,10 +1122,11 @@ static void pcm_set_interval(struct snd_pcm_hw_params *parameters,
 static int open_audio(void)
 {
 	const unsigned channel_attempts[] = { 2, 1 };
+	const unsigned attempts = sizeof(channel_attempts) /
+		sizeof(channel_attempts[0]);
 	unsigned attempt;
 
-	for (attempt = 0; attempt < sizeof(channel_attempts) /
-			sizeof(channel_attempts[0]); ++attempt) {
+	for (attempt = 0; attempt < attempts; ++attempt) {
 		struct snd_pcm_hw_params hardware;
 		struct snd_pcm_sw_params software;
 		unsigned channels = channel_attempts[attempt];
@@ -1174,7 +1213,13 @@ static int open_audio(void)
 			close(host.pcm_fd);
 			host.pcm_fd = -1;
 		}
-		{
+		/*
+		 * The SF2000 DAC is physically mono, so the stereo probe is
+		 * expected to fail with EINVAL and the mono fallback succeeds.
+		 * Report only the final failed attempt so a healthy boot does not
+		 * spam the log with a by-design failure.
+		 */
+		if (attempt + 1u == attempts) {
 			char details[224];
 
 			snprintf(details, sizeof(details),
@@ -1998,6 +2043,13 @@ static int write_pause_frame(void)
 
 	pause_ge_presented = 0;
 	if (ge_present_pause_frame() == 0) {
+		pause_ge_presented = 1;
+		return 0;
+	}
+	/* The engine can wedge like the live present path; reset and retry the
+	 * single pause frame once before disabling GE for the pause screen. */
+	if (host.ge && !pause_ge_disabled && hcge_reset(host.ge) == 0 &&
+			ge_present_pause_frame() == 0) {
 		pause_ge_presented = 1;
 		return 0;
 	}

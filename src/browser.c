@@ -1225,10 +1225,27 @@ static int extract_archive(const char *archive,
 	};
 	char fallback[MAX_PATH] = { 0 };
 	int selected_priority = 0;
+	unsigned attempt;
 
-	if (run_busybox(remove_argv) != 0 || run_busybox(mkdir_argv) != 0 ||
-			run_busybox(unzip_argv) != 0) {
-		log_message("archive extraction failed");
+	/*
+	 * The SD card can deliver a transient short read (busybox unzip dies
+	 * with "short read" when a chunk ends before its declared size).  The
+	 * archive is removed and re-extracted on every attempt, so a retry is
+	 * safe; give the card a brief pause between tries.
+	 */
+	for (attempt = 0; attempt < 3; attempt++) {
+		if (attempt) {
+			struct timespec delay = { 0, 100 * 1000 * 1000 };
+
+			(void)nanosleep(&delay, NULL);
+		}
+		if (run_busybox(remove_argv) == 0 &&
+				run_busybox(mkdir_argv) == 0 &&
+				run_busybox(unzip_argv) == 0)
+			break;
+	}
+	if (attempt == 3) {
+		log_message("archive extraction failed after 3 attempts");
 		return -1;
 	}
 	scan_archive_directory(ZIP_WORK_DIR, route, 0, output, output_size,
