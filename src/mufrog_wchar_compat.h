@@ -3,10 +3,19 @@
 
 #include <stddef.h>
 
-/* Buildroot deliberately omits uClibc wide-character support.  FBAlpha only
- * uses these routines to turn its static ASCII driver names into log/menu
- * strings, so a small ASCII-compatible implementation keeps that feature
- * without pulling a locale or floating-point dependency into every core. */
+/* The Buildroot toolchain builds uClibc without wide-character support, while
+ * the frog-toolchain uClibc-ng builds it with __UCLIBC_HAS_WCHAR__ and
+ * declares wcslen()/wcstombs() itself.  Some cores (FBAlpha, fake08) are
+ * patched to call the sf2000_mufrog_* helpers by name, so those always exist;
+ * only the wcslen/wcstombs macro remaps are conditional, otherwise they
+ * collide with the libc (and libstdc++ <cstdlib>) declarations.  features.h
+ * is the sanctioned way to load bits/uClibc_config.h (direct inclusion is
+ * rejected with #error). */
+#include <features.h>
+
+/* ASCII-compatible implementations: the cores only use these routines to turn
+ * static ASCII strings into log/menu text, so they avoid pulling a locale or
+ * floating-point dependency into every core. */
 static inline size_t sf2000_mufrog_wcslen(const wchar_t *string)
 {
 	const wchar_t *end = string;
@@ -30,7 +39,9 @@ static inline size_t sf2000_mufrog_wcstombs(char *destination,
 	return index;
 }
 
+#if !defined(__UCLIBC_HAS_WCHAR__)
 #define wcslen sf2000_mufrog_wcslen
 #define wcstombs sf2000_mufrog_wcstombs
+#endif
 
 #endif

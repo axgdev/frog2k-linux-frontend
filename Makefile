@@ -9,6 +9,31 @@ SF2000_CXX ?= $(CCACHE_COMPILE)$(CROSS_COMPILE)g++
 SF2000_OBJCOPY ?= $(CROSS_COMPILE)objcopy
 SF2000_STRIP ?= $(CROSS_COMPILE)strip
 SF2000_NM ?= $(CROSS_COMPILE)nm
+
+# Compiler identity stamp.  Every cross-compiled artifact (host objects,
+# browser, js2300, cores) depends on it, so switching toolchains - e.g.
+# Buildroot's internal uClibc toolchain for the crosstool-ng frog-toolchain -
+# rebuilds everything instead of linking objects built by the old compiler
+# against the new toolchain's libraries.  This is a real failure mode:
+# libstdc++ mangles std::fpos<mbstate_t> differently between toolchain
+# builds, so a stale core silently fails to link (undefined reference).
+TOOLCHAIN_STAMP := build/.toolchain-stamp
+$(TOOLCHAIN_STAMP): FORCE
+	mkdir -p build
+	@set -eu; \
+	tmp='$@.tmp'; \
+	{ \
+		printf 'SF2000_CC=%s\n' '$(SF2000_CC)'; \
+		printf 'SF2000_CXX=%s\n' '$(SF2000_CXX)'; \
+		cc='$(word 2,$(SF2000_CC))'; \
+		[ -n "$$cc" ] || cc='$(word 1,$(SF2000_CC))'; \
+		stat -c 'compiler=%n|size=%s|mtime=%y' "$$cc"; \
+	} > "$$tmp"; \
+	if cmp -s "$$tmp" '$@'; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
+
+.PHONY: FORCE
+FORCE:
+
 CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
@@ -589,7 +614,7 @@ frogui: $(STB_DIR)/.git
 		$(FROGUI_CORE) -lm -Wl,--wrap=calloc -Wl,--wrap=free \
 		$(SF2000_ENDFILES)
 
-browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h \
+browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h  $(TOOLCHAIN_STAMP) \
 		src/browser.c src/sf2000_browser_ui.c src/sf2000_log.c \
 		include/sf2000_browser_ui.h include/sf2000_log.h
 	mkdir -p build
@@ -598,7 +623,7 @@ browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h 
 		src/sf2000_browser_ui.c src/sf2000_log.c $(GE_SOURCES) -lm \
 		$(SF2000_ENDFILES)
 
-$(JS2300_RUNTIME): $(JS2300_ROOT)/Makefile \
+$(JS2300_RUNTIME): $(JS2300_ROOT)/Makefile  $(TOOLCHAIN_STAMP) \
 		$(JS2300_ROOT)/src/js2300_runtime.c \
 		$(JS2300_ROOT)/js2300_stdlib_gen.c \
 		$(JS2300_ROOT)/include/js2300/js2300.h \
@@ -620,17 +645,17 @@ $(JS2300_CORE_SOURCE): src/js2300_libretro_core.c Makefile
 	mkdir -p '$(@D)'
 	cp '$<' '$@'
 
-$(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h \
+$(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h  $(TOOLCHAIN_STAMP) \
 		$(JS2300_ROOT)/include/js2300/js2300.h include/unifrog/abi.h Makefile
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
 		-I$(abspath $(JS2300_ROOT)/include) -Iinclude -c -o '$@' '$<'
 
-$(JS2300_CORE_FS_OBJECT): src/js2300_core_fs.c Makefile
+$(JS2300_CORE_FS_OBJECT): src/js2300_core_fs.c Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
-$(JS2300_CORE_EXECUTABLE): $(JS2300_RUNTIME) $(JS2300_CORE_OBJECT) \
+$(JS2300_CORE_EXECUTABLE): $(JS2300_RUNTIME) $(JS2300_CORE_OBJECT)  $(TOOLCHAIN_STAMP) \
 		$(JS2300_CORE_FS_OBJECT) $(SF2000_HOST_OBJECTS)
 	$(SF2000_CC) $(SF2000_LDFLAGS) -o '$@' \
 		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
@@ -638,7 +663,7 @@ $(JS2300_CORE_EXECUTABLE): $(JS2300_RUNTIME) $(JS2300_CORE_OBJECT) \
 		$(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
 	$(SF2000_STRIP) --strip-unneeded '$@'
 
-$(JS2300_UI_EXECUTABLE): $(JS2300_RUNTIME) src/js2300_runner.c \
+$(JS2300_UI_EXECUTABLE): $(JS2300_RUNTIME) src/js2300_runner.c  $(TOOLCHAIN_STAMP) \
 		$(JS2300_ROOT)/include/js2300/js2300.h $(SF2000_HOST_OBJECTS) $(GE_SOURCES) \
 		src/sf2000_input.c src/sf2000_browser_ui.c src/sf2000_log.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
@@ -767,49 +792,49 @@ core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 ste
 	cp $(MUFROG_SOURCE_ROOT)/QuickNES_Core-prosty/LICENSE build/core-packages/licenses/quicknes-prosty-LICENSE
 	cp $(MUFROG_SOURCE_ROOT)/libretro-fceumm-prosty/Copying build/core-packages/licenses/fceumm-prosty-Copying
 
-build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h \
+build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h  $(TOOLCHAIN_STAMP) \
 		include/sf2000_browser_ui.h include/sf2000_log.h
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
-build/host-input.o: src/sf2000_input.c include/sf2000_input.h include/libretro_min.h
+build/host-input.o: src/sf2000_input.c include/sf2000_input.h include/libretro_min.h $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
-build/host-pacer.o: src/sf2000_pacer.c include/sf2000_pacer.h
+build/host-pacer.o: src/sf2000_pacer.c include/sf2000_pacer.h $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
-build/host-ui.o: src/sf2000_browser_ui.c include/sf2000_browser_ui.h \
+build/host-ui.o: src/sf2000_browser_ui.c include/sf2000_browser_ui.h  $(TOOLCHAIN_STAMP) \
 		$(STB_DIR)/.git
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) -c -o $@ $<
 
-build/host-log.o: src/sf2000_log.c include/sf2000_log.h
+build/host-log.o: src/sf2000_log.c include/sf2000_log.h $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
-build/host-ge-linux.o: $(GE_DIR)/hcge_linux.c
+build/host-ge-linux.o: $(GE_DIR)/hcge_linux.c $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
-build/host-ge-node.o: $(GE_DIR)/hcge_node.c
+build/host-ge-node.o: $(GE_DIR)/hcge_node.c $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
-build/host-audio.o: $(AUDIO_SOURCES)
+build/host-audio.o: $(AUDIO_SOURCES) $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $(AUDIO_SOURCES)
 
-build/host-retained.o: $(PLATFORM_SOURCES)
+build/host-retained.o: $(PLATFORM_SOURCES) $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $(PLATFORM_SOURCES)
 
-build/host-nommu-new.o: src/nommu_new.cpp
+build/host-nommu-new.o: src/nommu_new.cpp $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CXX) $(filter-out -std=c11,$(SF2000_CFLAGS)) -c -o $@ $<
 
-build/host-content.o: src/content.c
+build/host-content.o: src/content.c $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
@@ -909,7 +934,7 @@ $(GPSP_PATCH_STAMP): $(GPSP_DIR)/.git $(GPSP_PATCHES)
 	done
 	touch '$@'
 
-$(GPSP_CORE): $(GPSP_PATCH_STAMP) Makefile
+$(GPSP_CORE): $(GPSP_PATCH_STAMP) Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(GPSP_DIR) clean-objs platform=rs90 STATIC_LINKING=1
 	$(MAKE) -C $(GPSP_DIR) cpu_threaded.o platform=rs90 STATIC_LINKING=1 \
@@ -938,7 +963,7 @@ $(GAMBATTE_DIR)/.sf2000-patched: $(GAMBATTE_DIR)/.git $(GAMBATTE_PATCHES)
 	done
 	touch '$@'
 
-$(GAMBATTE_CORE): $(GAMBATTE_DIR)/.sf2000-patched Makefile
+$(GAMBATTE_CORE): $(GAMBATTE_DIR)/.sf2000-patched Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(GAMBATTE_DIR) -f Makefile.libretro clean \
 		platform=unix STATIC_LINKING=1
@@ -956,7 +981,7 @@ $(FCEUMM_PATCH_STAMP): $(FCEUMM_DIR)/.git $(FCEUMM_PATCHES)
 	done
 	touch '$@'
 
-$(FCEUMM_CORE): $(FCEUMM_PATCH_STAMP) Makefile
+$(FCEUMM_CORE): $(FCEUMM_PATCH_STAMP) Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(FCEUMM_DIR) clean -f Makefile.libretro STATIC_LINKING=1 platform=unix
 	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -fno-strict-aliasing -ffunction-sections -fdata-sections -DFRONTEND_SUPPORTS_RGB565' \
@@ -973,7 +998,7 @@ $(QUICKNES_PATCH_STAMP): $(QUICKNES_SOURCE_STAMP) $(QUICKNES_PATCHES)
 	done
 	touch '$@'
 
-$(QUICKNES_CORE): $(QUICKNES_PATCH_STAMP) Makefile
+$(QUICKNES_CORE): $(QUICKNES_PATCH_STAMP) Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(QUICKNES_DIR) clean platform=unix STATIC_LINKING=1
 	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mabicalls -fPIC -ffast-math -fno-strict-aliasing -ffunction-sections -fdata-sections -DSF2000 -DNO_UNALIGNED_ACCESS -DFRONTEND_SUPPORTS_RGB565' \
@@ -989,7 +1014,7 @@ $(PROSYSTEM_PATCH_STAMP): $(PROSYSTEM_DIR)/.git $(PROSYSTEM_PATCHES)
 	done
 	touch '$@'
 
-$(PROSYSTEM_CORE): $(PROSYSTEM_PATCH_STAMP) $(COMMON_DIR)/.git Makefile
+$(PROSYSTEM_CORE): $(PROSYSTEM_PATCH_STAMP) $(COMMON_DIR)/.git Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(PROSYSTEM_DIR) clean platform=unix STATIC_LINKING=1
 	CFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -1010,7 +1035,7 @@ $(SNES9X2005_PATCH_STAMP): $(SNES9X2005_DIR)/.git $(SNES9X2005_PATCHES)
 	done
 	touch '$@'
 
-$(SNES9X2005_CORE): $(SNES9X2005_PATCH_STAMP) Makefile
+$(SNES9X2005_CORE): $(SNES9X2005_PATCH_STAMP) Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(SNES9X2005_DIR) clean platform=unix STATIC_LINKING=1
 	CFLAGS='-O2 -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -1025,7 +1050,7 @@ $(SNES9X2005_CORE): $(SNES9X2005_PATCH_STAMP) Makefile
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' fpic=-fPIC TARGET='$(abspath $@)'
 
-$(SNES9X2002_CORE): $(SNES9X2002_DIR)/.git Makefile
+$(SNES9X2002_CORE): $(SNES9X2002_DIR)/.git Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(SNES9X2002_DIR) clean platform=unix STATIC_LINKING=1
 	CFLAGS='-Os -EL -march=mips32 -mtune=mips32 -mabi=32 -msoft-float \
@@ -1046,7 +1071,7 @@ $(STELLA_PATCH_STAMP): $(STELLA_DIR)/.git $(STELLA_PATCHES)
 	done
 	touch '$@'
 
-$(STELLA_CORE): $(STELLA_PATCH_STAMP) $(COMMON_DIR)/.git Makefile
+$(STELLA_CORE): $(STELLA_PATCH_STAMP) $(COMMON_DIR)/.git Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(STELLA_DIR) clean platform=sf2000 STATIC_LINKING=1
 	$(MAKE) -C $(STELLA_DIR) platform=sf2000 STATIC_LINKING=1 \
@@ -1062,7 +1087,7 @@ $(STELLA_CORE): $(STELLA_PATCH_STAMP) $(COMMON_DIR)/.git Makefile
 		-DSF2000 -DHAVE_STRL -DFRONTEND_SUPPORTS_RGB565 \
 		$(STELLA_INCLUDES)'
 
-$(GEARBOY_CORE): $(GEARBOY_DIR)/.git Makefile
+$(GEARBOY_CORE): $(GEARBOY_DIR)/.git Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(GEARBOY_DIR)/platforms/libretro clean \
 		platform=unix STATIC_LINKING=1 CC='$(SF2000_CC)' \
@@ -1078,7 +1103,7 @@ $(GEARBOY_CORE): $(GEARBOY_DIR)/.git Makefile
 		STATIC_LINKING=1 CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' TARGET='$(abspath $@)'
 
-$(PCE_FAST_CORE): $(PCE_FAST_DIR)/.git Makefile
+$(PCE_FAST_CORE): $(PCE_FAST_DIR)/.git Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(MAKE) -C $(PCE_FAST_DIR) clean platform=unix STATIC_LINKING=1 \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar'
@@ -1100,7 +1125,7 @@ build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES
 	done
 	touch '$$@'
 
-build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile \
+build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile  $(TOOLCHAIN_STAMP) \
 		src/mufrog_picodrive_config.h
 	mkdir -p '$$(@D)'
 	find 'build/mufrog/src/$(1)' -type f -name '*.o' -delete
@@ -1148,11 +1173,11 @@ build/mufrog/$(1)_libretro_linux.a: build/mufrog/raw/$(1).a Makefile
 		fi; \
 	done
 
-build/mufrog/adapter-$(1).o: src/core_adapter.c include/libretro_min.h Makefile
+build/mufrog/adapter-$(1).o: src/core_adapter.c include/libretro_min.h Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p '$$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -DCORE_PREFIX=$(MUFROG_$(call mufrog_key,$(1))_PREFIX) -c -o '$$@' '$$<'
 
-build/sf2000-$(1): build/mufrog/$(1)_libretro_linux.a \
+build/sf2000-$(1): build/mufrog/$(1)_libretro_linux.a  $(TOOLCHAIN_STAMP) \
 		build/mufrog/adapter-$(1).o $(SF2000_HOST_OBJECTS) \
 		$(LIBRETRO_COMMON) $(MUFROG_MEMORY_STREAM) \
 		$(MUFROG_$(call mufrog_key,$(1))_ADAPTER_OBJECTS)
@@ -1166,40 +1191,40 @@ build/sf2000-$(1): build/mufrog/$(1)_libretro_linux.a \
 endef
 $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_RULE,$(word 1,$(subst :, ,$(spec))))))
 
-build/mufrog/qpsx-adapter.o: src/qpsx_adapter.c Makefile
+build/mufrog/qpsx-adapter.o: src/qpsx_adapter.c Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
-build/mufrog/fake08-log.o: src/fake08_log.c Makefile
+build/mufrog/fake08-log.o: src/fake08_log.c Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
-build/mufrog/mame2000-libco.o: build/mufrog/src/mame2000/.source Makefile
+build/mufrog/mame2000-libco.o: build/mufrog/src/mame2000/.source Makefile $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(MUFROG_CORE_CFLAGS) \
 		-I$(abspath build/mufrog/src/mame2000/src/libretro/libretro-common/include) \
 		-c -o '$@' \
 		'build/mufrog/src/mame2000/src/libretro/libretro-common/libco/ucontext.c'
 
-build/mufrog/libretro-memory-stream.o: \
+build/mufrog/libretro-memory-stream.o:  $(TOOLCHAIN_STAMP) \
 		$(MUFROG_SOURCE_ROOT)/libretro-common/streams/memory_stream.c Makefile
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) -c -o '$@' '$<'
 
-$(MUFROG_MEMORY_STREAM): build/mufrog/libretro-memory-stream.o
+$(MUFROG_MEMORY_STREAM): build/mufrog/libretro-memory-stream.o $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	$(CROSS_COMPILE)ar rcs '$@' '$<'
 
 mufrog-cores: $(MUFROG_CORE_EXECUTABLES)
 
-$(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git
+$(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git $(TOOLCHAIN_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(filter-out -Werror,$(SF2000_CFLAGS)) \
 		-I$(SNES9X2002_DIR)/libretro/libretro-common/include \
 		-c -o '$@' \
 		'$(SNES9X2002_DIR)/libretro/libretro-common/streams/memory_stream.c'
 
-build/common/%.o: $(COMMON_DIR)/.git $(MUFROG_SOURCE_ROOT)/picodrive/.git
+build/common/%.o: $(COMMON_DIR)/.git $(MUFROG_SOURCE_ROOT)/picodrive/.git $(TOOLCHAIN_STAMP)
 	mkdir -p '$(dir $@)'
 	$(SF2000_CC) $(filter-out -Werror,$(SF2000_CFLAGS)) -include stdlib.h \
 		-I$(COMMON_DIR)/include -I$(MUFROG_SOURCE_ROOT)/picodrive/zlib \
@@ -1209,7 +1234,7 @@ build/utf8_compat.o: src/utf8_compat.c
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
-$(LIBRETRO_COMMON): $(COMMON_OBJECTS)
+$(LIBRETRO_COMMON): $(COMMON_OBJECTS) $(TOOLCHAIN_STAMP)
 	$(CROSS_COMPILE)ar rcs '$@' $(COMMON_OBJECTS)
 
 integrated: browser gambatte gpsp fceumm

@@ -41,8 +41,36 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
-#define AUDIO_RECOVERY_RATE 32256u
-#define AUDIO_DRAIN_RATE 31744u
+
+/*
+ * Rates the HC15xx SND0 APLL/I2S can generate natively (vendor libauddrv
+ * rate table).  Cores reporting any other rate keep the 32 kHz sink and go
+ * through the linear resampler.
+ */
+static unsigned audio_native_rate(unsigned rate)
+{
+	switch (rate) {
+	case 8000:
+	case 11025:
+	case 12000:
+	case 16000:
+	case 22050:
+	case 24000:
+	case 32000:
+	case 44100:
+	case 48000:
+		return rate;
+	default:
+		return AUDIO_OUTPUT_RATE;
+	}
+}
+/*
+ * Audio rate-tracking step: the resampler output rate is nudged plus or
+ * minus ~0.8% around the PCM sink rate (host.audio_resample_rate) to push
+ * the DMA ring delay back toward its target.  The step scales with the
+ * sink rate so native-rate playback (44.1/48 kHz) perturbs proportionally.
+ */
+#define AUDIO_RATE_STEP(base) ((base) >> 7)
 #define AUDIO_DELAY_LOW 4096
 #define AUDIO_DELAY_TARGET 5632
 #define AUDIO_DELAY_HIGH 7168
@@ -127,6 +155,9 @@ static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
 static unsigned pause_ge_disabled;
 static unsigned pause_ge_presented;
+/* One-shot guard so a failed GE present resets and retries the engine at
+ * most once before the permanent CPU fallback. */
+static unsigned ge_reset_retried;
 static unsigned state_slot;
 static char pause_status[96];
 static char save_ram_path[SAVE_PATH_MAX];
@@ -884,6 +915,27 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	return 0;
 }
 
+/* Tear down the GE context after a present failure that a reset retry did
+ * not recover.  The engine may still hold a wedged node, so drain first
+ * (the reset already reinitialized the queue) and then release every
+ * managed source surface before closing the context. */
+static void ge_disable_cpu_fallback(void)
+{
+	unsigned i;
+
+	if (!host.ge)
+		return;
+	(void)hcge_engine_sync(host.ge);
+	for (i = 0; i < host.ge_buffers; i++) {
+		(void)hcge_linux_free_buffer(host.ge, host.ge_source_handle[i]);
+		host.ge_source[i] = NULL;
+	}
+	hcge_close_context(host.ge);
+	host.ge = NULL;
+	host.ge_buffers = 0;
+	host.ge_pending = 0;
+}
+
 static void video(const void *data, unsigned width, unsigned height,
 	size_t pitch)
 {
@@ -928,22 +980,36 @@ static void video(const void *data, unsigned width, unsigned height,
 	if (profile_present)
 		(void)clock_gettime(CLOCK_MONOTONIC, &present_start);
 	if (ge_present(data, width, height, pitch, out_w, out_h, left, top) < 0) {
-		if (host.ge) {
-			unsigned i;
-
-			log_kmsg("GE present failed; using CPU renderer\n");
-			(void)hcge_engine_sync(host.ge);
-			for (i = 0; i < host.ge_buffers; i++) {
-				(void)hcge_linux_free_buffer(host.ge,
-					host.ge_source_handle[i]);
-				host.ge_source[i] = NULL;
+		/*
+		 * The HC15xx GE can wedge with BUSY latched and the queue head
+		 * parked on the published node (sync timeout status=f3000000,
+		 * finish=0).  Reset the engine and retry once before permanently
+		 * falling back to the CPU: hcge_reset() clears the hardware and
+		 * reinitializes the command queue without invalidating the
+		 * allocated source surfaces, matching the recovery the screen
+		 * service already applies to its own failed presents.
+		 */
+		if (host.ge && !ge_reset_retried && hcge_reset(host.ge) == 0) {
+			ge_reset_retried = 1;
+			if (ge_present(data, width, height, pitch, out_w, out_h,
+					left, top) >= 0) {
+				ge_reset_retried = 0;
+				log_kmsg("GE present recovered after engine reset\n");
+			} else {
+				ge_reset_retried = 0;
+				log_kmsg("GE present failed after engine reset; using CPU renderer\n");
+				ge_disable_cpu_fallback();
+				cpu_present(data, width, height, pitch, out_w, out_h,
+					left, top);
 			}
-			hcge_close_context(host.ge);
-			host.ge = NULL;
-			host.ge_buffers = 0;
-			host.ge_pending = 0;
+		} else {
+			if (host.ge) {
+				log_kmsg("GE present failed; using CPU renderer\n");
+				ge_disable_cpu_fallback();
+			}
+			cpu_present(data, width, height, pitch, out_w, out_h,
+				left, top);
 		}
-		cpu_present(data, width, height, pitch, out_w, out_h, left, top);
 	}
 	if (profile_present) {
 		struct timespec present_end;
@@ -1084,106 +1150,155 @@ static void pcm_set_interval(struct snd_pcm_hw_params *parameters,
 static int open_audio(void)
 {
 	const unsigned channel_attempts[] = { 2, 1 };
-	unsigned attempt;
+	const unsigned attempts = sizeof(channel_attempts) /
+		sizeof(channel_attempts[0]);
+	const unsigned rate_attempts[] = {
+		audio_native_rate(host.audio_rate),
+		AUDIO_OUTPUT_RATE,
+	};
+	unsigned rate_attempt;
+	int last_errno = 0;
+	const char *last_stage = "open";
+	unsigned last_channels = 1;
 
-	for (attempt = 0; attempt < sizeof(channel_attempts) /
-			sizeof(channel_attempts[0]); ++attempt) {
-		struct snd_pcm_hw_params hardware;
-		struct snd_pcm_sw_params software;
-		unsigned channels = channel_attempts[attempt];
-		unsigned i;
-		const char *failure_stage = "open";
-		int failure_errno;
+	/*
+	 * Try the core's native rate first so 44.1/48 kHz content plays
+	 * without resampling; fall back to the 32 kHz sink when the native
+	 * open fails (e.g. a rate the hardware cannot produce).  The SF2000
+	 * DAC is physically mono, so the stereo probe fails with EINVAL by
+	 * design and the mono fallback succeeds.
+	 */
+	for (rate_attempt = 0; rate_attempt <
+			sizeof(rate_attempts) / sizeof(rate_attempts[0]);
+			++rate_attempt) {
+		unsigned output_rate = rate_attempts[rate_attempt];
+		unsigned attempt;
 
-		host.pcm_fd = open("/dev/snd/pcmC0D0p",
-			O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-		if (host.pcm_fd < 0)
-			failure_errno = errno;
-		else {
-			memset(&hardware, 0, sizeof(hardware));
-			for (i = 0; i < sizeof(hardware.masks) /
-					sizeof(hardware.masks[0]); i++)
-				memset(&hardware.masks[i], 0xff,
-					sizeof(hardware.masks[i]));
-			for (i = 0; i < sizeof(hardware.intervals) /
-					sizeof(hardware.intervals[0]); i++) {
-				hardware.intervals[i].max = UINT_MAX;
-				hardware.intervals[i].integer = 1;
-			}
-			hardware.rmask = ~0u;
-			pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_ACCESS,
-				SNDRV_PCM_ACCESS_RW_INTERLEAVED);
-			pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_FORMAT,
-				SNDRV_PCM_FORMAT_S16_LE);
-			pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_SUBFORMAT,
-				SNDRV_PCM_SUBFORMAT_STD);
-			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS,
-				channels);
-			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE,
-				AUDIO_OUTPUT_RATE);
-			/* The HC15xx ALSA driver has an 8-period hardware ring. */
-			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
-				1024);
-			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
-			pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
-				8192);
-			failure_stage = "hw_params";
-			if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS,
-					&hardware) >= 0) {
-				memset(&software, 0, sizeof(software));
-				software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
-				software.period_step = 1;
-				software.avail_min = 1024;
-				/* Prime most of the small DMA ring. */
-				software.start_threshold = AUDIO_DELAY_TARGET;
-				software.stop_threshold = 8192;
-				software.boundary = 0x40000000u;
-				software.proto = SNDRV_PCM_VERSION;
-				failure_stage = "sw_params";
-				if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS,
-						&software) >= 0) {
-					failure_stage = "prepare";
-					if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) >= 0) {
-						failure_stage = "resampler";
-						if (hc15xx_resampler_init(&host.resampler,
-								host.audio_rate,
-								AUDIO_OUTPUT_RATE) == 0) {
-							host.audio_channels = channels;
-							host.audio_resample_rate =
-								AUDIO_OUTPUT_RATE;
-							host.audio_delay = 0;
-							host.audio_feedback_counter = 0;
-							{
-								char details[128];
+		if (rate_attempt &&
+				output_rate == rate_attempts[0])
+			break;
+		for (attempt = 0; attempt < attempts; ++attempt) {
+			struct snd_pcm_hw_params hardware;
+			struct snd_pcm_sw_params software;
+			unsigned channels = channel_attempts[attempt];
+			unsigned i;
+			const char *failure_stage = "open";
+			int failure_errno;
 
-								snprintf(details, sizeof(details),
-									"ALSA %s DMA presenter ready "
-									"linear-resampler\n",
-									channels == 2 ? "stereo" : "mono");
-								log_kmsg(details);
+			host.pcm_fd = open("/dev/snd/pcmC0D0p",
+				O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+			if (host.pcm_fd < 0)
+				failure_errno = errno;
+			else {
+				memset(&hardware, 0, sizeof(hardware));
+				for (i = 0; i < sizeof(hardware.masks) /
+						sizeof(hardware.masks[0]); i++)
+					memset(&hardware.masks[i], 0xff,
+						sizeof(hardware.masks[i]));
+				for (i = 0; i < sizeof(hardware.intervals) /
+						sizeof(hardware.intervals[0]); i++) {
+					hardware.intervals[i].max = UINT_MAX;
+					/*
+					 * Leave integer clear: forcing it on
+					 * PERIOD_TIME makes 44.1 kHz fail (1024
+					 * frames at 44100 Hz is 23219.95 us, not an
+					 * integer).  The kernel forces integer where
+					 * it matters.
+					 */
+				}
+				/*
+				 * Request only the parameters we fix.  Including the derived
+				 * time parameters (PERIOD_TIME/BUFFER_TIME) makes ALSA reject
+				 * 44.1 kHz: 1024 frames at 44100 Hz is 23219.95 us, which the
+				 * integer-microsecond conversion cannot represent.
+				 */
+				hardware.rmask =
+					(1u << SNDRV_PCM_HW_PARAM_ACCESS) |
+					(1u << SNDRV_PCM_HW_PARAM_FORMAT) |
+					(1u << SNDRV_PCM_HW_PARAM_SUBFORMAT) |
+					(1u << SNDRV_PCM_HW_PARAM_CHANNELS) |
+					(1u << SNDRV_PCM_HW_PARAM_RATE) |
+					(1u << SNDRV_PCM_HW_PARAM_PERIOD_SIZE) |
+					(1u << SNDRV_PCM_HW_PARAM_PERIODS) |
+					(1u << SNDRV_PCM_HW_PARAM_BUFFER_SIZE);
+				pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_ACCESS,
+					SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+				pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_FORMAT,
+					SNDRV_PCM_FORMAT_S16_LE);
+				pcm_set_mask(&hardware, SNDRV_PCM_HW_PARAM_SUBFORMAT,
+					SNDRV_PCM_SUBFORMAT_STD);
+				pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_CHANNELS,
+					channels);
+				pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_RATE,
+					output_rate);
+				/* The HC15xx ALSA driver has an 8-period ring. */
+				pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+					1024);
+				pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_PERIODS, 8);
+				pcm_set_interval(&hardware, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+					8192);
+				failure_stage = "hw_params";
+				if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS,
+						&hardware) >= 0) {
+					memset(&software, 0, sizeof(software));
+					software.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
+					software.period_step = 1;
+					software.avail_min = 1024;
+					/* Prime most of the small DMA ring. */
+					software.start_threshold = AUDIO_DELAY_TARGET;
+					software.stop_threshold = 8192;
+					software.boundary = 0x40000000u;
+					software.proto = SNDRV_PCM_VERSION;
+					failure_stage = "sw_params";
+					if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_SW_PARAMS,
+							&software) >= 0) {
+						failure_stage = "prepare";
+						if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_PREPARE) >= 0) {
+							failure_stage = "resampler";
+							if (hc15xx_resampler_init(&host.resampler,
+									host.audio_rate,
+									output_rate) == 0) {
+								host.audio_channels = channels;
+								host.audio_resample_rate =
+									output_rate;
+								host.audio_delay = 0;
+								host.audio_feedback_counter = 0;
+								{
+									char details[128];
+
+									snprintf(details, sizeof(details),
+										"ALSA %s DMA presenter ready "
+										"linear-resampler rate=%u\n",
+										channels == 2 ? "stereo" : "mono",
+										output_rate);
+									log_kmsg(details);
+								}
+								return 0;
 							}
-							return 0;
 						}
 					}
 				}
+				failure_errno = errno;
 			}
-			failure_errno = errno;
-		}
 
-		if (host.pcm_fd >= 0) {
-			close(host.pcm_fd);
-			host.pcm_fd = -1;
+			if (host.pcm_fd >= 0) {
+				close(host.pcm_fd);
+				host.pcm_fd = -1;
+			}
+			last_errno = failure_errno;
+			last_stage = failure_stage;
+			last_channels = channels;
 		}
-		{
-			char details[224];
+	}
+	{
+		char details[224];
 
-			snprintf(details, sizeof(details),
-				"ALSA %s open failed stage=%s errno=%d "
-				"period=1024 periods=8 buffer=8192\n",
-				channels == 2 ? "stereo" : "mono", failure_stage,
-				failure_errno);
-			log_kmsg(details);
-		}
+		snprintf(details, sizeof(details),
+			"ALSA %s open failed stage=%s errno=%d "
+			"rate=%u period=1024 periods=8 buffer=8192\n",
+			last_channels == 2 ? "stereo" : "mono", last_stage,
+			last_errno, rate_attempts[0]);
+		log_kmsg(details);
 	}
 	return -1;
 }
@@ -1229,9 +1344,12 @@ static void audio_flush(void)
 				audio_metrics.xruns++;
 				if (hc15xx_resampler_set_output_rate(
 						&host.resampler,
-						AUDIO_RECOVERY_RATE) == 0)
-					host.audio_resample_rate =
-						AUDIO_RECOVERY_RATE;
+						host.audio_resample_rate +
+						AUDIO_RATE_STEP(
+							host.audio_resample_rate)) == 0)
+					host.audio_resample_rate +=
+						AUDIO_RATE_STEP(
+							host.audio_resample_rate);
 				host.audio_feedback_counter = 0;
 			} else if (errno == EAGAIN)
 				audio_metrics.eagain++;
@@ -1259,16 +1377,20 @@ static void audio_update_feedback(void)
 	if (ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DELAY, &delay) < 0)
 		return;
 	host.audio_delay = delay;
-	rate = host.audio_resample_rate;
-	if (delay < AUDIO_DELAY_LOW)
-		rate = AUDIO_RECOVERY_RATE;
-	else if (delay >= AUDIO_DELAY_HIGH)
-		rate = AUDIO_DRAIN_RATE;
-	else if ((rate == AUDIO_RECOVERY_RATE &&
-			delay >= AUDIO_DELAY_TARGET) ||
-			(rate == AUDIO_DRAIN_RATE &&
-			 delay <= AUDIO_DELAY_TARGET))
-		rate = AUDIO_OUTPUT_RATE;
+	{
+		unsigned step = AUDIO_RATE_STEP(host.audio_resample_rate);
+		unsigned recovery = host.audio_resample_rate + step;
+		unsigned drain = host.audio_resample_rate - step;
+
+		rate = host.audio_resample_rate;
+		if (delay < AUDIO_DELAY_LOW)
+			rate = recovery;
+		else if (delay >= AUDIO_DELAY_HIGH)
+			rate = drain;
+		else if ((rate == recovery && delay >= AUDIO_DELAY_TARGET) ||
+				(rate == drain && delay <= AUDIO_DELAY_TARGET))
+			rate = host.audio_resample_rate;
+	}
 	if (rate > host.audio_rate)
 		rate = host.audio_rate;
 	if (rate != host.audio_resample_rate &&
@@ -1439,9 +1561,9 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 
 		if (input_frames > AUDIO_CONVERT_SAMPLES)
 			input_frames = AUDIO_CONVERT_SAMPLES;
-		if (host.audio_rate < AUDIO_OUTPUT_RATE) {
+		if (host.audio_rate < host.audio_resample_rate) {
 			maximum_input = ((size_t)(AUDIO_CONVERT_CAPACITY - 1u) *
-				host.audio_rate) / AUDIO_OUTPUT_RATE;
+				host.audio_rate) / host.audio_resample_rate;
 			if (!maximum_input)
 				maximum_input = 1;
 			if (input_frames > maximum_input)
@@ -1478,8 +1600,7 @@ static void set_uncapped_mode(unsigned enable)
 	if (host.pcm_fd >= 0) {
 		(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
 		(void)hc15xx_resampler_init(&host.resampler, host.audio_rate,
-			AUDIO_OUTPUT_RATE);
-		host.audio_resample_rate = AUDIO_OUTPUT_RATE;
+			host.audio_resample_rate);
 		host.audio_delay = 0;
 		host.audio_feedback_counter = 0;
 		if (!enable)
@@ -1512,8 +1633,7 @@ static void pause_audio(unsigned resume)
 		return;
 	(void)ioctl(host.pcm_fd, SNDRV_PCM_IOCTL_DROP);
 	(void)hc15xx_resampler_init(&host.resampler, host.audio_rate,
-		AUDIO_OUTPUT_RATE);
-	host.audio_resample_rate = AUDIO_OUTPUT_RATE;
+		host.audio_resample_rate);
 	host.audio_delay = 0;
 	host.audio_feedback_counter = 0;
 	if (resume)
@@ -1998,6 +2118,13 @@ static int write_pause_frame(void)
 
 	pause_ge_presented = 0;
 	if (ge_present_pause_frame() == 0) {
+		pause_ge_presented = 1;
+		return 0;
+	}
+	/* The engine can wedge like the live present path; reset and retry the
+	 * single pause frame once before disabling GE for the pause screen. */
+	if (host.ge && !pause_ge_disabled && hcge_reset(host.ge) == 0 &&
+			ge_present_pause_frame() == 0) {
 		pause_ge_presented = 1;
 		return 0;
 	}
@@ -2497,7 +2624,7 @@ int main(int argc, char **argv)
 
 		snprintf(details, sizeof(details),
 			"timing frame_ns=%ld audio_core_hz=%u audio_output_hz=%u\n",
-			frame_ns, host.audio_rate, AUDIO_OUTPUT_RATE);
+			frame_ns, host.audio_rate, host.audio_resample_rate);
 		log_kmsg(details);
 	}
 	log_kmsg("frontend running START+SELECT pauses; START+RIGHT saves logs\n");
