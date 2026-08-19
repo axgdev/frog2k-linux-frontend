@@ -137,6 +137,9 @@ SF2000_LINUX_DIR ?= ../sf2000_linux
 # mufrog-commandc checkout.  Override MUFROG_ROOT to reuse an existing tree.
 MUFROG_ROOT ?= $(abspath .deps/mufrog-commandc)
 MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
+BLUEMSX_SYSTEM_SOURCE := $(MUFROG_SOURCE_ROOT)/libretro-blueMSX-prosty/system/bluemsx
+BLUEMSX_SYSTEM_PACKAGE := build/sdcard/bios
+BLUEMSX_SYSTEM_STAMP := $(BLUEMSX_SYSTEM_PACKAGE)/.bluemsx-system.stamp
 JS2300_URL ?= git@github.com:axgdev/frog2k-javascript-private.git
 JS2300_REV ?= 0f22b45c679ef116c9f1c8d04812c19c10cfb645
 JS2300_ROOT ?= $(abspath .deps/frog2k-javascript)
@@ -502,7 +505,8 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
-	stella2014 gearboy pce-fast mufrog-cores core-packages integrated
+	stella2014 gearboy pce-fast mufrog-cores core-packages integrated \
+	bluemsx-system
 
 all: check
 
@@ -829,7 +833,7 @@ pce-fast: $(PCE_FAST_CORE) $(LIBRETRO_COMMON) $(SF2000_HOST_OBJECTS)
 		$(LIBRETRO_COMMON) -lm -Wl,--wrap=malloc -Wl,--wrap=calloc \
 		-Wl,--wrap=realloc -Wl,--wrap=free $(SF2000_ENDFILES)
 
-core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores \
+core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 stella2014 gearboy pce-fast mufrog-cores bluemsx-system \
 	$(JS2300_CORE_EXECUTABLE) $(JS2300_UI_EXECUTABLE)
 	mkdir -p build/core-packages/licenses
 	cp build/sf2000-gambatte build/core-packages/
@@ -1296,6 +1300,19 @@ $(MUFROG_MEMORY_STREAM): build/mufrog/libretro-memory-stream.o $(TOOLCHAIN_STAMP
 	$(CROSS_COMPILE)ar rcs '$@' '$<'
 
 mufrog-cores: $(MUFROG_CORE_EXECUTABLES)
+
+bluemsx-system: $(BLUEMSX_SYSTEM_STAMP)
+
+$(BLUEMSX_SYSTEM_STAMP): Makefile \
+		$(MUFROG_SOURCE_ROOT)/libretro-blueMSX-prosty/.git
+	@test -d "$(BLUEMSX_SYSTEM_SOURCE)/Machines"
+	@test -d "$(BLUEMSX_SYSTEM_SOURCE)/Databases"
+	@mkdir -p "$(BLUEMSX_SYSTEM_PACKAGE)"
+	@rm -rf "$(BLUEMSX_SYSTEM_PACKAGE)/Machines" \
+		"$(BLUEMSX_SYSTEM_PACKAGE)/Databases"
+	@cp -R "$(BLUEMSX_SYSTEM_SOURCE)/Machines" "$(BLUEMSX_SYSTEM_PACKAGE)/"
+	@cp -R "$(BLUEMSX_SYSTEM_SOURCE)/Databases" "$(BLUEMSX_SYSTEM_PACKAGE)/"
+	@touch "$@"
 
 $(SNES9X2002_MEMORY): $(SNES9X2002_DIR)/.git $(TOOLCHAIN_STAMP)
 	mkdir -p build

@@ -49,6 +49,11 @@ chooser; Atari 7800 directories route to ProSystem. Each archive is rebuilt from
 revision using MIPS o32 PIC objects; HCRTOS archives are never relinked into
 Linux static PIE executables.
 
+The package also stages blueMSX's required `Machines/` and `Databases/` runtime
+data under `build/sdcard/bios`. Copy those directories into `/mnt/sd/bios`
+alongside the firmware; the blueMSX executable alone cannot initialize its
+machine and media databases.
+
 While a core is running, START+SELECT opens the pause menu. It exposes Resume,
 Exit, a 1x/2x/3x/4x/unlimited fast-forward rate, frontend frameskip, and the
 options registered by the active libretro core. Unlimited mode still presents
