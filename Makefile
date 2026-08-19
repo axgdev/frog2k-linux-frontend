@@ -319,7 +319,7 @@ $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,
 MUFROG_CORE_CLONES := \
 	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
 	picodrive|picodrive|https://github.com/libretro/picodrive.git|f0d4a0118a9733a1f10bce5a4ac772c474f9300d \
-	qpsx|sf2000-qpsx-playstation-emulator|git@github.com:axgdev/frog2k-qpsx.git|c2ab1553e6105d879f058a01536a191ee97e053d \
+	qpsx|sf2000-qpsx-playstation-emulator|git@github.com:axgdev/frog2k-qpsx.git|b8be0031abf8ea41710dd8c306084b8a2b9145f7 \
 	mame2000|libretro-mame2000|https://github.com/libretro/mame2000-libretro.git|905808fbcc3adf8c610c1c60f0e41ce4b35db1c5 \
 	fbalpha2012|fbalpha2012|https://github.com/libretro/fbalpha2012.git|b7ac554c53561d41640372f23dab15cd6fc4f0c4 \
 	a5200|a5200|https://github.com/libretro/a5200.git|0942c88d64cad6853b539f51b39060a9de0cbcab \
