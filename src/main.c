@@ -150,6 +150,7 @@ static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
 static unsigned audio_suppressed;
 static unsigned audio_sustain_factor = 256u;
+static int audio_last_sample;
 static unsigned loading_game;
 static int core_watchdog_kmsg_fd = -1;
 static volatile sig_atomic_t core_watchdog_stage;
@@ -196,7 +197,7 @@ extern uint32_t reg[] __attribute__((weak));
 extern uint16_t *gba_screen_pixels __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped, sustained;
-	unsigned peak, eagain, xruns;
+	unsigned peak, clicks, nearclip, eagain, xruns;
 } audio_metrics;
 
 static void log_kmsg(const char *message)
@@ -464,7 +465,7 @@ static void register_core_options(const struct retro_variable *variables)
 			else if (!strcmp(option->key, "fceumm_sndvolume"))
 				preferred = "100";
 			else if (!strcmp(option->key, "fceumm_sndrate_hint"))
-				preferred = "32KHz";
+				preferred = "44KHz";
 			for (i = 0; preferred && i < option->value_count; i++)
 				if (!strcmp(option->values[i], preferred))
 					option->selected = i;
@@ -515,7 +516,15 @@ static bool environment(unsigned command, void *data)
 		}
 		if (variable && variable->key &&
 				strcmp(variable->key, "fceumm_sndrate_hint") == 0) {
-			variable->value = "32KHz";
+			/*
+			 * The NES APU is synthesized, so the output rate sets the
+			 * aliasing ceiling: at 32 kHz the square-wave harmonics fold
+			 * back audibly (the crunchy/harsh character), and the core's
+			 * own low-pass to hide that also smears the sound.  The
+			 * hardware now plays 44.1 kHz natively (multirate patch), so
+			 * synthesize at 44.1 kHz instead.
+			 */
+			variable->value = "44KHz";
 			return true;
 		}
 		return false;
@@ -1084,7 +1093,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u mode=%s presenter=%s gba_pc=%08x sustained=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u mode=%s presenter=%s gba_pc=%08x sustained=%u clicks=%u nearclip=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -1100,7 +1109,8 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.input.interval_max_latency_us,
 			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
-			reg ? reg[15] : 0, audio_metrics.sustained);
+			reg ? reg[15] : 0, audio_metrics.sustained,
+			audio_metrics.clicks, audio_metrics.nearclip);
 		if (metrics_fd >= 0 &&
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
@@ -1451,11 +1461,23 @@ static void audio_queue(const int16_t *samples, unsigned count,
 	if (generated)
 		audio_sustain_factor = 256u;
 	for (i = 0; i < count; ++i) {
-		unsigned magnitude = samples[i] < 0 ?
-			(unsigned)-(int)samples[i] : (unsigned)samples[i];
+		int sample = samples[i];
+		unsigned magnitude = sample < 0 ?
+			(unsigned)-sample : (unsigned)sample;
 
 		if (magnitude > audio_metrics.peak)
 			audio_metrics.peak = magnitude;
+		if (generated) {
+			int delta = sample - audio_last_sample;
+
+			if (magnitude >= 32000u)
+				audio_metrics.nearclip++;
+			if (delta < 0)
+				delta = -delta;
+			if ((unsigned)delta > 24000u)
+				audio_metrics.clicks++;
+			audio_last_sample = sample;
+		}
 	}
 	if (count > capacity - host.audio_count)
 		audio_flush();
