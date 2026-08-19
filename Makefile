@@ -316,10 +316,12 @@ $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,
 # Keep the source pins local so this frontend has no dependency on another
 # project checkout.
 # Format: id|checkout-directory|upstream-url|pinned-commit
+QPSX_DEP_REF ?= public_main
+QPSX_DEP_REV ?= 50abf3452b86b7dec4f4788ce06ec55c601b9884
 MUFROG_CORE_CLONES := \
 	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
 	picodrive|picodrive|https://github.com/libretro/picodrive.git|f0d4a0118a9733a1f10bce5a4ac772c474f9300d \
-	qpsx|sf2000-qpsx-playstation-emulator|git@github.com:axgdev/frog2k-qpsx.git|b8be0031abf8ea41710dd8c306084b8a2b9145f7 \
+	qpsx|sf2000-qpsx-playstation-emulator|git@github.com:axgdev/frog2k-qpsx.git|$(QPSX_DEP_REV) \
 	mame2000|libretro-mame2000|https://github.com/libretro/mame2000-libretro.git|905808fbcc3adf8c610c1c60f0e41ce4b35db1c5 \
 	fbalpha2012|fbalpha2012|https://github.com/libretro/fbalpha2012.git|b7ac554c53561d41640372f23dab15cd6fc4f0c4 \
 	a5200|a5200|https://github.com/libretro/a5200.git|0942c88d64cad6853b539f51b39060a9de0cbcab \
@@ -347,6 +349,7 @@ mufrog_clone_dir = $(word 2,$(subst |, ,$(filter $(1)|%,$(MUFROG_CORE_CLONES))))
 mufrog_clone_entry = $(strip $(foreach w,$(MUFROG_CORE_CLONES),$(if $(findstring |$(2)|,$(w)),$(w))))
 mufrog_clone_url = $(word 3,$(subst |, ,$(call mufrog_clone_entry,x,$(2))))
 mufrog_clone_rev = $(word 4,$(subst |, ,$(call mufrog_clone_entry,x,$(2))))
+mufrog_clone_ref = $(if $(filter sf2000-qpsx-playstation-emulator,$(2)),$(QPSX_DEP_REF),)
 
 $(MUFROG_SOURCE_ROOT)/libretro-common/.git:
 	mkdir -p '$(dir $@)'
@@ -358,6 +361,12 @@ $(MUFROG_SOURCE_ROOT)/libretro-common/include: $(MUFROG_SOURCE_ROOT)/libretro-co
 
 $(MUFROG_SOURCE_ROOT)/%.git: Makefile
 	mkdir -p '$(dir $@)'
+	if test -n '$(call mufrog_clone_ref,x,$(notdir $(@D)))'; then \
+		git ls-remote --exit-code '$(call mufrog_clone_url,x,$(notdir $(@D)))' \
+			'refs/heads/$(call mufrog_clone_ref,x,$(notdir $(@D)))' >/dev/null || { \
+			echo "QPSX branch not found: $(call mufrog_clone_ref,x,$(notdir $(@D)))" >&2; exit 2; \
+		}; \
+	fi
 	test -d '$(@D)/.git' || \
 		git clone --filter=blob:none '$(call mufrog_clone_url,x,$(notdir $(@D)))' '$(@D)'
 	git -C '$(@D)' cat-file -e '$(call mufrog_clone_rev,x,$(notdir $(@D)))^{commit}' 2>/dev/null || \
@@ -392,19 +401,16 @@ MUFROG_picodrive_EXTRA_CFLAGS += -O3
 # the shared libretro-common libchdr module on the include path.
 MUFROG_picodrive_PATCHES := patches/mufrog/picodrive-no-chd.patch
 MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
+QPSX_PLATFORM ?= linux
+ifneq ($(QPSX_PLATFORM),linux)
+$(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
+endif
 QPSX_OPTIMIZE ?= -O2
 MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
 	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
 	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
-	-DQPSX_ENABLE_MIPS_DIRECT_MEM=1 \
-	-DQPSX_ENABLE_MIPS_LSU_CACHING=1 \
-	-DQPSX_ENABLE_MIPS_CONST_MEM=1 \
-	-DQPSX_ENABLE_MIPS_PIC_ASM_DISPATCH=1 \
-	-DQPSX_LINUX_CACHEFLUSH=1 \
-	-DQPSX_LINUX_ALLOCATED_RAM=1 \
-	-DQPSX_DISABLE_MIPS32R2_GPU_ASM=1 \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
 # QPSX allocates psxM once during init and releases it only during deinit, so
@@ -601,19 +607,20 @@ qpsx-dev-core:
 		'CC=$(SF2000_CC)' \
 		'CXX=$(SF2000_CXX)' \
 		'AR=$(CROSS_COMPILE)ar' \
+		'QPSX_PLATFORM=$(QPSX_PLATFORM)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -1238,7 +1245,8 @@ build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile  $(TOOLCHAIN_STA
 	rm -f '$$@'
 	$(MAKE) -C 'build/mufrog/src/$(1)/$(MUFROG_$(call mufrog_key,$(1))_WORKDIR)' \
 		-f '$(MUFROG_$(call mufrog_key,$(1))_MAKEFILE)' \
-		platform=unix STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix $(if $(filter qpsx,$(1)),QPSX_PLATFORM=$(QPSX_PLATFORM),) \
+		STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $$@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
