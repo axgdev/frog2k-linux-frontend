@@ -204,6 +204,13 @@ extern uint16_t *gba_screen_pixels __attribute__((weak));
 static struct {
 	unsigned generated, submitted, dropped, sustained, sustain_events;
 	unsigned peak, clicks, nearclip, eagain, xruns;
+	/* Per-window crackle telemetry on the DAC-bound stream.  enq_* covers
+	 * every sample actually queued (sustain, declick, decay and resample
+	 * included); gen_* covers the core's generated stream alone, so
+	 * enq_hf_ratio vs gen_hf_ratio shows how much high-frequency energy
+	 * the frontend adds.  Ratios are first-difference energy / L1 energy
+	 * scaled x1000; enq_clicks counts hard jumps in the output stream. */
+	unsigned gen_hf, gen_l1, enq_hf, enq_l1, enq_clicks;
 } audio_metrics;
 
 static void log_kmsg(const char *message)
@@ -1084,7 +1091,10 @@ static void video(const void *data, unsigned width, unsigned height,
 		struct timespec now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
-		char details[512];
+		/* Must fit the whole metric line including the trailing newline:
+		 * a truncated write swallows the '\n', gluing the next record
+		 * (e.g. a mode event) onto this line so sf2000-logd drops it. */
+		char details[768];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1099,7 +1109,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -1117,7 +1127,14 @@ static void video(const void *data, unsigned width, unsigned height,
 			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0, audio_metrics.sustained,
 			audio_metrics.sustain_events, audio_metrics.clicks,
-			audio_metrics.nearclip);
+			audio_metrics.nearclip,
+			audio_metrics.gen_l1 ?
+				(audio_metrics.gen_hf * 1000u) /
+					audio_metrics.gen_l1 : 0u,
+			audio_metrics.enq_l1 ?
+				(audio_metrics.enq_hf * 1000u) /
+					audio_metrics.enq_l1 : 0u,
+			audio_metrics.enq_clicks);
 		if (metrics_fd >= 0 &&
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
@@ -1131,6 +1148,9 @@ static void video(const void *data, unsigned width, unsigned height,
 				audio_metrics.xruns) << 16) |
 			(pacer.resets > 0xffffu ? 0xffffu : pacer.resets));
 #endif
+		audio_metrics.gen_hf = audio_metrics.gen_l1 =
+			audio_metrics.enq_hf = audio_metrics.enq_l1 =
+			audio_metrics.enq_clicks = 0;
 		previous_xruns = audio_metrics.xruns;
 		sf2000_pacer_reset_interval(&pacer);
 		interval_max_run_us = 0;
@@ -1508,8 +1528,36 @@ static void audio_queue(const int16_t *samples, unsigned count,
 	}
 	if (generated)
 		audio_tail_push(samples, count);
-	if (count)
+	if (count) {
+		int enq_prev = audio_last_output;
+		int gen_prev = audio_last_sample;
+		unsigned i;
+
+		for (i = 0; i < count; ++i) {
+			int sample = samples[i];
+			int d_enq = sample - enq_prev;
+			unsigned magnitude = sample < 0 ?
+				(unsigned)-sample : (unsigned)sample;
+
+			if (d_enq < 0)
+				d_enq = -d_enq;
+			audio_metrics.enq_hf += (unsigned)d_enq;
+			audio_metrics.enq_l1 += magnitude;
+			if ((unsigned)d_enq > 24000u)
+				audio_metrics.enq_clicks++;
+			if (generated) {
+				int d_gen = sample - gen_prev;
+
+				if (d_gen < 0)
+					d_gen = -d_gen;
+				audio_metrics.gen_hf += (unsigned)d_gen;
+				audio_metrics.gen_l1 += magnitude;
+				gen_prev = sample;
+			}
+			enq_prev = sample;
+		}
 		audio_last_output = samples[count - 1];
+	}
 	tail = (host.audio_head + host.audio_count) % capacity;
 	first = capacity - tail;
 	if (first > count)
