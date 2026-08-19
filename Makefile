@@ -317,7 +317,7 @@ $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,
 # project checkout.
 # Format: id|checkout-directory|upstream-url|pinned-commit
 QPSX_DEP_REF ?= public_main
-QPSX_DEP_REV ?= 50abf3452b86b7dec4f4788ce06ec55c601b9884
+QPSX_DEP_REV ?= f1f4d6add9dcfb36eaed7aae198ddbc44b12b9c1
 MUFROG_CORE_CLONES := \
 	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
 	picodrive|picodrive|https://github.com/libretro/picodrive.git|f0d4a0118a9733a1f10bce5a4ac772c474f9300d \
