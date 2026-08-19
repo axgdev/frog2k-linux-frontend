@@ -1206,8 +1206,9 @@ build/mufrog/mame2000-libco.o: build/mufrog/src/mame2000/.source Makefile $(TOOL
 		-c -o '$@' \
 		'build/mufrog/src/mame2000/src/libretro/libretro-common/libco/ucontext.c'
 
-build/mufrog/libretro-memory-stream.o:  $(TOOLCHAIN_STAMP) \
-		$(MUFROG_SOURCE_ROOT)/libretro-common/streams/memory_stream.c Makefile
+build/mufrog/libretro-memory-stream.o: \
+		$(MUFROG_SOURCE_ROOT)/libretro-common/streams/memory_stream.c \
+		$(TOOLCHAIN_STAMP) Makefile
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) -c -o '$@' '$<'
 
