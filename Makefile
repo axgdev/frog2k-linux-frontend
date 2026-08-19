@@ -26,7 +26,10 @@ FROG_TOOLCHAIN_SHA256 ?= 8d4599a27ec2493ba56cc3940025973f86947569eeaed7e95836957
 else
 FROG_TOOLCHAIN_SHA256 ?= ff7e9742a9b6fbbfcf58394b92c0805c4a0a7bdf21592a546fb665e24ee60fc4
 endif
-FROG_TOOLCHAIN_READY := $(TOOLCHAIN_DIR)/.frog-toolchain-v$(FROG_TOOLCHAIN_VERSION)
+# Keep the readiness marker in this project rather than inside the toolchain.
+# The released toolchain is often intentionally read-only, and the Linux
+# parent project can provide it through an externally managed TOOLCHAIN_DIR.
+FROG_TOOLCHAIN_READY := build/.frog-toolchain-v$(FROG_TOOLCHAIN_VERSION)-$(FROG_TOOLCHAIN_ARCH)
 JOBS ?= $(shell nproc 2>/dev/null || echo 2)
 CCACHE ?= $(shell command -v ccache 2>/dev/null)
 CCACHE_COMPILE := $(if $(strip $(CCACHE)),$(CCACHE) ,)
@@ -72,6 +75,10 @@ $(FROG_TOOLCHAIN_READY): FORCE
 	@set -eu; \
 	if test -x '$(TOOLCHAIN_DIR)/bin/$(FROG_TOOLCHAIN_TUPLE)-gcc'; then \
 		mkdir -p '$(@D)'; touch '$@'; exit 0; \
+	fi; \
+	if test '$(TOOLCHAIN_DIR_USER_SET)' = 1; then \
+		echo 'external TOOLCHAIN_DIR does not contain the frog-toolchain compiler: $(TOOLCHAIN_DIR)' >&2; \
+		exit 1; \
 	fi; \
 	command -v curl >/dev/null 2>&1 || { echo 'missing host command: curl' >&2; exit 1; }; \
 	command -v sha256sum >/dev/null 2>&1 || { echo 'missing host command: sha256sum' >&2; exit 1; }; \
