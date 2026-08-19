@@ -138,7 +138,7 @@ SF2000_LINUX_DIR ?= ../sf2000_linux
 MUFROG_ROOT ?= $(abspath .deps/mufrog-commandc)
 MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
 JS2300_URL ?= git@github.com:axgdev/frog2k-javascript-private.git
-JS2300_REV ?= c08d4124f4e2c8437ddf3daaacc0c595886b7198
+JS2300_REV ?= 124170281bafaafee64522d40d2175803b09c091
 JS2300_ROOT ?= $(abspath .deps/frog2k-javascript)
 JS2300_FETCH_STAMP := $(JS2300_ROOT)/.frog2k-$(JS2300_REV).stamp
 GE_DIR := $(SF2000_LINUX_DIR)/ge
@@ -941,7 +941,7 @@ $(JS2300_FETCH_STAMP):
 		git -C '$(JS2300_ROOT)' remote set-url origin '$(JS2300_URL)'; \
 	else \
 		echo '  CLONE   $(JS2300_URL)'; \
-		git clone --no-checkout --depth 1 '$(JS2300_URL)' '$(JS2300_ROOT)'; \
+		git clone --depth 1 '$(JS2300_URL)' '$(JS2300_ROOT)'; \
 	fi
 	@if ! git -C '$(JS2300_ROOT)' cat-file -e '$(JS2300_REV)^{commit}' 2>/dev/null; then \
 		git -C '$(JS2300_ROOT)' fetch --depth 1 origin '$(JS2300_REV)'; \
