@@ -86,6 +86,13 @@ static void runner_host_log(void *opaque, const char *message)
 	runner_log(message);
 }
 
+static const char *runner_execution_mode(void *opaque)
+{
+   const struct js2300_runner *runner = opaque;
+
+   return runner && runner->background ? "background" : "extension";
+}
+
 static int runner_flush_log(void *opaque)
 {
 	(void)opaque;
@@ -427,6 +434,7 @@ static void runner_configure_host(struct js2300_runner *runner,
 	host->fs_write_text = runner_fs_write_text;
 	host->file_size = runner_file_size;
 	host->file_read = runner_file_read;
+	host->execution_mode = runner_execution_mode;
 }
 
 static int runner_open_ui(struct js2300_runner *runner)

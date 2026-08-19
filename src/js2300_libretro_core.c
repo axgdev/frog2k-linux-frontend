@@ -63,6 +63,12 @@ static void core_host_log(void *opaque, const char *message)
 	(void)message;
 }
 
+static const char *core_execution_mode(void *opaque)
+{
+	(void)opaque;
+	return "core";
+}
+
 static int core_flush_log(void *opaque)
 {
 	(void)opaque;
@@ -351,6 +357,7 @@ static void core_configure_host(struct js2300_host *host, void *opaque)
 	host->font_load = core_font_load;
 	host->file_size = core_file_size;
 	host->file_read = core_file_read;
+	host->execution_mode = core_execution_mode;
 }
 
 void retro_set_environment(retro_environment_t cb)
