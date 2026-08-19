@@ -41,6 +41,15 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
+/*
+ * When a slow core cannot keep the DMA ring at its target delay, the
+ * frontend sustains by repeating the most recent audio.  Repeat those
+ * samples with a decaying level (x160/256 per repeat chunk, floor x32/256)
+ * so a starved session fades to a quiet tail instead of buzzing the last
+ * ~23 ms of audio back at full volume.
+ */
+#define AUDIO_SUSTAIN_DECAY 160u
+#define AUDIO_SUSTAIN_FLOOR 32u
 
 /*
  * Rates the HC15xx SND0 APLL/I2S can generate natively (vendor libauddrv
@@ -140,6 +149,7 @@ static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
 static unsigned audio_suppressed;
+static unsigned audio_sustain_factor = 256u;
 static unsigned loading_game;
 static int core_watchdog_kmsg_fd = -1;
 static volatile sig_atomic_t core_watchdog_stage;
@@ -1438,6 +1448,8 @@ static void audio_queue(const int16_t *samples, unsigned count,
 		audio_metrics.generated += count;
 	else
 		audio_metrics.sustained += count;
+	if (generated)
+		audio_sustain_factor = 256u;
 	for (i = 0; i < count; ++i) {
 		unsigned magnitude = samples[i] < 0 ?
 			(unsigned)-(int)samples[i] : (unsigned)samples[i];
@@ -1505,6 +1517,15 @@ static void audio_enqueue_repeat(unsigned count)
 			host.audio_tail_play = (host.audio_tail_play + chunk) %
 				host.audio_tail_count;
 		}
+		if (audio_sustain_factor < 256u) {
+			for (i = 0; i < chunk; ++i)
+				samples[i] = (int16_t)((int32_t)samples[i] *
+					audio_sustain_factor / 256u);
+		}
+		audio_sustain_factor = audio_sustain_factor *
+			AUDIO_SUSTAIN_DECAY / 256u;
+		if (audio_sustain_factor < AUDIO_SUSTAIN_FLOOR)
+			audio_sustain_factor = AUDIO_SUSTAIN_FLOOR;
 		audio_queue(samples, chunk, 0);
 		count -= chunk;
 	}
@@ -1515,6 +1536,7 @@ static void audio_tail_reset(void)
 	host.audio_tail_write = 0;
 	host.audio_tail_count = 0;
 	host.audio_tail_play = 0;
+	audio_sustain_factor = 256u;
 }
 
 static void audio_refill_sustain(void)
