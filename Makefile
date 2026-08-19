@@ -1,9 +1,22 @@
 CC ?= cc
 CXX ?= c++
-CROSS_COMPILE ?= /tmp/sf2000-linux-next-buildroot/buildroot-sf2000/host/bin/mipsel-buildroot-linux-uclibc-
+FROG_TOOLCHAIN_VERSION ?= 1.3.2
+FROG_TOOLCHAIN_TUPLE := mipsel-unknown-linux-uclibc
+FROG_TOOLCHAIN_HOST_ARCH ?= $(shell uname -m)
+FROG_TOOLCHAIN_ARCH := $(if $(filter x86_64 amd64,$(FROG_TOOLCHAIN_HOST_ARCH)),x86_64,$(if $(filter aarch64 arm64,$(FROG_TOOLCHAIN_HOST_ARCH)),arm64,))
+ifeq ($(strip $(FROG_TOOLCHAIN_ARCH)),)
+$(error unsupported host architecture '$(FROG_TOOLCHAIN_HOST_ARCH)'; set FROG_TOOLCHAIN_HOST_ARCH to x86_64 or arm64)
+endif
+FROG_TOOLCHAIN_WORK ?= /tmp/sf2000-linux-frog-toolchain-v$(FROG_TOOLCHAIN_VERSION)-$(FROG_TOOLCHAIN_ARCH)
+FROG_TOOLCHAIN_PREFIX ?= $(FROG_TOOLCHAIN_WORK)/$(FROG_TOOLCHAIN_TUPLE)
+TOOLCHAIN_DIR ?= $(FROG_TOOLCHAIN_PREFIX)
+CROSS_COMPILE ?= $(TOOLCHAIN_DIR)/bin/$(FROG_TOOLCHAIN_TUPLE)-
 JOBS ?= $(shell nproc 2>/dev/null || echo 2)
 CCACHE ?= $(shell command -v ccache 2>/dev/null)
 CCACHE_COMPILE := $(if $(strip $(CCACHE)),$(CCACHE) ,)
+CCACHE_DIR ?= $(abspath .cache/ccache)
+CCACHE_COMPILERCHECK ?= content
+export CCACHE_DIR CCACHE_COMPILERCHECK
 SF2000_CC ?= $(CCACHE_COMPILE)$(CROSS_COMPILE)gcc
 SF2000_CXX ?= $(CCACHE_COMPILE)$(CROSS_COMPILE)g++
 SF2000_OBJCOPY ?= $(CROSS_COMPILE)objcopy
@@ -33,6 +46,15 @@ $(TOOLCHAIN_STAMP): FORCE
 
 .PHONY: FORCE
 FORCE:
+
+# The package graph has one target per core and is safe to run in parallel.
+# Keep ordinary make goals unsurprising, but honor JOBS for the expensive
+# package entry points when the caller did not explicitly choose a job mode.
+ifneq ($(filter core-packages mufrog-cores,$(MAKECMDGOALS)),)
+ifeq ($(strip $(filter j% -j% --jobs%,$(MAKEFLAGS))),)
+MAKEFLAGS += -j$(JOBS)
+endif
+endif
 
 CORE ?=
 FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a

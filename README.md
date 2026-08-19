@@ -37,9 +37,10 @@ are routed by directory and extension to independent static-PIE packages below
 `/sf2000/cores` on the card. A missing package produces a localized error
 instead of a frozen selection. This keeps new cores independently deployable
 and prevents the full core catalog from increasing every boot image.
-`make core-packages` currently produces independently licensed QuickNES,
-Snes9x 2005, Snes9x 2002, ProSystem, Stella 2014, Gearboy, and PCE Fast
-executables. Put them below
+`make core-packages` produces independently licensed regular cores
+(QuickNES, Snes9x 2005, Snes9x 2002, ProSystem, Stella 2014, Gearboy, PCE
+Fast, Gambatte, gpSP, and FCEUmm), the pinned Mufrog-family cores, and the
+JS2300 core/UI pair. Put the packaged executables below
 `/sf2000/cores` using
 their existing `sf2000-*` names. Opening a `.nes` file presents a FCEUmm /
 QuickNES chooser; `/NES` initially selects FCEUmm and `/QUICKNES` initially
@@ -102,6 +103,20 @@ Build checks:
 ```
 make check
 ```
+
+The Linux repository owns the pinned Frog-toolchain download and extraction.
+For a direct frontend build, prepare that toolchain once and then build the
+core package graph from this checkout:
+
+```
+make -C ../sf2000_linux toolchain
+make SF2000_LINUX_DIR=../sf2000_linux core-packages
+```
+
+`core-packages` uses the host job budget automatically when no `-j` option is
+given; set `JOBS=` or pass an explicit `-j` on constrained hosts. ccache is
+enabled when installed and is kept in `.cache/ccache` by default, outside
+`build/`, so `make clean` preserves the warm compiler cache.
 
 Cross-build a statically linked core:
 
