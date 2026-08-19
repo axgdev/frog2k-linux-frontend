@@ -7,10 +7,26 @@ FROG_TOOLCHAIN_ARCH := $(if $(filter x86_64 amd64,$(FROG_TOOLCHAIN_HOST_ARCH)),x
 ifeq ($(strip $(FROG_TOOLCHAIN_ARCH)),)
 $(error unsupported host architecture '$(FROG_TOOLCHAIN_HOST_ARCH)'; set FROG_TOOLCHAIN_HOST_ARCH to x86_64 or arm64)
 endif
-FROG_TOOLCHAIN_WORK ?= /tmp/sf2000-linux-frog-toolchain-v$(FROG_TOOLCHAIN_VERSION)-$(FROG_TOOLCHAIN_ARCH)
-FROG_TOOLCHAIN_PREFIX ?= $(FROG_TOOLCHAIN_WORK)/$(FROG_TOOLCHAIN_TUPLE)
+FROG_TOOLCHAIN_ROOT_USER_SET := $(if $(filter undefined,$(origin FROG_TOOLCHAIN_ROOT)),0,1)
+TOOLCHAIN_DIR_USER_SET := $(if $(filter undefined,$(origin TOOLCHAIN_DIR)),0,1)
+FROG_TOOLCHAIN_ROOT ?= $(abspath .toolchains/frog-toolchain-v$(FROG_TOOLCHAIN_VERSION)-uclibc-$(FROG_TOOLCHAIN_ARCH))
+FROG_TOOLCHAIN_PREFIX ?= $(FROG_TOOLCHAIN_ROOT)/$(FROG_TOOLCHAIN_TUPLE)
 TOOLCHAIN_DIR ?= $(FROG_TOOLCHAIN_PREFIX)
 CROSS_COMPILE ?= $(TOOLCHAIN_DIR)/bin/$(FROG_TOOLCHAIN_TUPLE)-
+ifeq ($(TOOLCHAIN_DIR_USER_SET),1)
+ifeq ($(FROG_TOOLCHAIN_ROOT_USER_SET),0)
+FROG_TOOLCHAIN_ROOT := $(abspath $(TOOLCHAIN_DIR)/..)
+endif
+endif
+FROG_TOOLCHAIN_ARCHIVE_DIR ?= .cache/toolchains
+FROG_TOOLCHAIN_ARCHIVE := $(FROG_TOOLCHAIN_ARCHIVE_DIR)/toolchain-uclibc-static-$(FROG_TOOLCHAIN_ARCH)-gcc16.2.0-binutils2.47-uclibc-ng1.0.59.tar.xz
+FROG_TOOLCHAIN_URL ?= https://github.com/axgdev/frog-toolchain/releases/download/v$(FROG_TOOLCHAIN_VERSION)/toolchain-uclibc-static-$(FROG_TOOLCHAIN_ARCH)-gcc16.2.0-binutils2.47-uclibc-ng1.0.59.tar.xz
+ifeq ($(FROG_TOOLCHAIN_ARCH),x86_64)
+FROG_TOOLCHAIN_SHA256 ?= 8d4599a27ec2493ba56cc3940025973f86947569eeaed7e95836957649f4d88b
+else
+FROG_TOOLCHAIN_SHA256 ?= ff7e9742a9b6fbbfcf58394b92c0805c4a0a7bdf21592a546fb665e24ee60fc4
+endif
+FROG_TOOLCHAIN_READY := $(TOOLCHAIN_DIR)/.frog-toolchain-v$(FROG_TOOLCHAIN_VERSION)
 JOBS ?= $(shell nproc 2>/dev/null || echo 2)
 CCACHE ?= $(shell command -v ccache 2>/dev/null)
 CCACHE_COMPILE := $(if $(strip $(CCACHE)),$(CCACHE) ,)
@@ -25,13 +41,13 @@ SF2000_NM ?= $(CROSS_COMPILE)nm
 
 # Compiler identity stamp.  Every cross-compiled artifact (host objects,
 # browser, js2300, cores) depends on it, so switching toolchains - e.g.
-# Buildroot's internal uClibc toolchain for the crosstool-ng frog-toolchain -
-# rebuilds everything instead of linking objects built by the old compiler
+# switching between toolchain releases - rebuilds everything instead of
+# linking objects built by the old compiler
 # against the new toolchain's libraries.  This is a real failure mode:
 # libstdc++ mangles std::fpos<mbstate_t> differently between toolchain
 # builds, so a stale core silently fails to link (undefined reference).
 TOOLCHAIN_STAMP := build/.toolchain-stamp
-$(TOOLCHAIN_STAMP): FORCE
+$(TOOLCHAIN_STAMP): toolchain FORCE
 	mkdir -p build
 	@set -eu; \
 	tmp='$@.tmp'; \
@@ -46,6 +62,38 @@ $(TOOLCHAIN_STAMP): FORCE
 
 .PHONY: FORCE
 FORCE:
+
+.PHONY: setup toolchain deps-js2300
+setup: toolchain deps-js2300
+
+toolchain: $(FROG_TOOLCHAIN_READY)
+
+$(FROG_TOOLCHAIN_READY): FORCE
+	@set -eu; \
+	if test -x '$(TOOLCHAIN_DIR)/bin/$(FROG_TOOLCHAIN_TUPLE)-gcc'; then \
+		mkdir -p '$(@D)'; touch '$@'; exit 0; \
+	fi; \
+	command -v curl >/dev/null 2>&1 || { echo 'missing host command: curl' >&2; exit 1; }; \
+	command -v sha256sum >/dev/null 2>&1 || { echo 'missing host command: sha256sum' >&2; exit 1; }; \
+	command -v tar >/dev/null 2>&1 || { echo 'missing host command: tar' >&2; exit 1; }; \
+	mkdir -p '$(FROG_TOOLCHAIN_ARCHIVE_DIR)'; \
+	if test -e '$(FROG_TOOLCHAIN_ARCHIVE)'; then \
+		echo '  VERIFY  $(FROG_TOOLCHAIN_ARCHIVE)'; \
+	else \
+		echo '  FETCH   $(FROG_TOOLCHAIN_URL)'; \
+		curl -fL --retry 3 --retry-delay 2 '$(FROG_TOOLCHAIN_URL)' -o '$(FROG_TOOLCHAIN_ARCHIVE)'; \
+	fi; \
+	actual=$$(sha256sum '$(FROG_TOOLCHAIN_ARCHIVE)' | awk '{print $$1}'); \
+	test "$$actual" = '$(FROG_TOOLCHAIN_SHA256)' || { \
+		echo "toolchain checksum mismatch: $$actual" >&2; exit 1; }; \
+	stage='$(FROG_TOOLCHAIN_ROOT).tmp.'$$$$; \
+	test ! -e '$(FROG_TOOLCHAIN_ROOT)' || { \
+		echo 'toolchain path exists but is incomplete: $(FROG_TOOLCHAIN_ROOT)' >&2; exit 1; }; \
+	mkdir -p "$$stage"; \
+	tar -C "$$stage" -xf '$(FROG_TOOLCHAIN_ARCHIVE)'; \
+	test -x "$$stage/$(FROG_TOOLCHAIN_TUPLE)/bin/$(FROG_TOOLCHAIN_TUPLE)-gcc"; \
+	mv "$$stage" '$(FROG_TOOLCHAIN_ROOT)'; \
+	touch '$@'
 
 # The package graph has one target per core and is safe to run in parallel.
 # Keep ordinary make goals unsurprising, but honor JOBS for the expensive
@@ -89,8 +137,10 @@ SF2000_LINUX_DIR ?= ../sf2000_linux
 # mufrog-commandc checkout.  Override MUFROG_ROOT to reuse an existing tree.
 MUFROG_ROOT ?= $(abspath .deps/mufrog-commandc)
 MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
-JS2300_ROOT ?= $(MUFROG_ROOT)/js2300
-JS2300_MQUICKJS_DIR ?= $(MUFROG_ROOT)/.deps/mquickjs
+JS2300_URL ?= git@github.com:axgdev/frog2k-javascript-private.git
+JS2300_REV ?= c08d4124f4e2c8437ddf3daaacc0c595886b7198
+JS2300_ROOT ?= $(abspath .deps/frog2k-javascript)
+JS2300_FETCH_STAMP := $(JS2300_ROOT)/.frog2k-$(JS2300_REV).stamp
 GE_DIR := $(SF2000_LINUX_DIR)/ge
 GE_SOURCES := $(GE_DIR)/hcge_linux.c $(GE_DIR)/hcge_node.c
 AUDIO_DIR := $(SF2000_LINUX_DIR)/audio
@@ -172,7 +222,8 @@ CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
 SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float \
 	-fPIC -mabicalls \
 	-I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include
-SF2000_SYSROOT ?= $(shell $(SF2000_CC) -print-sysroot)
+FROG_TOOLCHAIN_GCC_VERSION ?= 16.2.0
+SF2000_SYSROOT ?= $(TOOLCHAIN_DIR)/$(FROG_TOOLCHAIN_TUPLE)/sysroot
 SF2000_CRT_DIR ?= $(SF2000_SYSROOT)/usr/lib
 STELLA_INCLUDES := -I$(abspath $(STELLA_DIR)) \
 	-I$(abspath $(STELLA_DIR)/stella) -I$(abspath $(STELLA_DIR)/stella/src) \
@@ -181,8 +232,8 @@ STELLA_INCLUDES := -I$(abspath $(STELLA_DIR)) \
 	-I$(abspath $(STELLA_DIR)/stella/src/common) \
 	-I$(abspath $(STELLA_DIR)/stella/src/gui) -I$(abspath $(COMMON_DIR)/include)
 SF2000_STARTFILES = $(SF2000_CRT_DIR)/rcrt1.o $(SF2000_CRT_DIR)/crti.o \
-	$(shell $(SF2000_CC) -print-file-name=crtbeginS.o)
-SF2000_ENDFILES = $(shell $(SF2000_CC) -print-file-name=crtendS.o) \
+	$(TOOLCHAIN_DIR)/lib/gcc/$(FROG_TOOLCHAIN_TUPLE)/$(FROG_TOOLCHAIN_GCC_VERSION)/crtbeginS.o
+SF2000_ENDFILES = $(TOOLCHAIN_DIR)/lib/gcc/$(FROG_TOOLCHAIN_TUPLE)/$(FROG_TOOLCHAIN_GCC_VERSION)/crtendS.o \
 	$(SF2000_CRT_DIR)/crtn.o
 SF2000_LDFLAGS := -nostartfiles -static -Wl,-pie \
 	-Wl,--no-dynamic-linker -Wl,-z,text \
@@ -437,14 +488,15 @@ QPSX_DEV_ARCHIVE := build/qpsx-dev/qpsx_libretro_linux.a
 QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
 QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
 JS2300_RUNTIME := build/js2300/libjs2300.a
+JS2300_BUILD_STAMP := build/.js2300-$(JS2300_REV).stamp
 JS2300_CORE_SOURCE := build/js2300/js2300_libretro_core.c
 JS2300_CORE_OBJECT := build/js2300/js2300_libretro_core.o
 JS2300_CORE_FS_OBJECT := build/js2300/js2300_core_fs.o
 JS2300_CORE_EXECUTABLE := build/sf2000-js2300-core
 JS2300_UI_EXECUTABLE := build/sf2000-js2300-ui
 JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
-# chip8.js is vendored into resources/ (from mufrog js2300 branch v0.5.3-develop1-rebased,
-# commit 5711f97): js2300-private main (pinned JS2300_REV) never shipped scripts/.
+# chip8.js is a frontend resource, separate from the standalone JS2300 runtime;
+# the runtime repository intentionally ships no platform-specific scripts.
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
 	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
@@ -645,35 +697,45 @@ browser: $(STB_DIR)/.git $(GE_SOURCES) $(GE_DIR)/ge_api.h $(GE_DIR)/hcge_node.h 
 		src/sf2000_browser_ui.c src/sf2000_log.c $(GE_SOURCES) -lm \
 		$(SF2000_ENDFILES)
 
-$(JS2300_RUNTIME): $(JS2300_ROOT)/Makefile  $(TOOLCHAIN_STAMP) \
+
+$(JS2300_BUILD_STAMP): $(JS2300_FETCH_STAMP) Makefile
+	mkdir -p '$(@D)'
+	$(MAKE) -C '$(JS2300_ROOT)' clean \
+		BUILD='$(abspath build/js2300)' OUT='$(abspath build/js2300-out)'
+	touch '$@'
+
+$(JS2300_RUNTIME): $(JS2300_BUILD_STAMP) $(TOOLCHAIN_STAMP) \
 		$(JS2300_ROOT)/src/js2300_runtime.c \
 		$(JS2300_ROOT)/js2300_stdlib_gen.c \
 		$(JS2300_ROOT)/include/js2300/js2300.h \
-		$(JS2300_ROOT)/.git \
-		$(JS2300_MQUICKJS_DIR)/mquickjs.c \
-		$(JS2300_MQUICKJS_DIR)/.git Makefile
+		$(JS2300_ROOT)/vendor/mquickjs/mquickjs.c Makefile
 	mkdir -p '$(@D)'
 	$(MAKE) -C '$(JS2300_ROOT)' \
 		BUILD='$(abspath build/js2300)' OUT='$(abspath build/js2300-out)' \
-		MQUICKJS_DIR='$(JS2300_MQUICKJS_DIR)' \
-		CC='$(SF2000_CC)' AR='$(CROSS_COMPILE)ar' \
+		CC='$(CCACHE_COMPILE)$(abspath $(CROSS_COMPILE))gcc' \
+		AR='$(abspath $(CROSS_COMPILE))ar' \
+		HOSTCC='$(CC)' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) -I$(abspath $(JS2300_ROOT)/include) \
 			-I$(abspath build/js2300) -I$(abspath build/js2300/mquickjs)' \
 		all
 	cp '$(abspath build/js2300-out/libjs2300.a)' '$@'
 	test -s '$@'
 
-$(JS2300_CORE_SOURCE): src/js2300_libretro_core.c Makefile
+$(JS2300_CORE_SOURCE): src/js2300_libretro_core.c Makefile $(JS2300_BUILD_STAMP)
 	mkdir -p '$(@D)'
 	cp '$<' '$@'
 
-$(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h  $(TOOLCHAIN_STAMP) \
+
+
+$(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h \
+		$(JS2300_BUILD_STAMP) $(TOOLCHAIN_STAMP) \
 		$(JS2300_ROOT)/include/js2300/js2300.h include/unifrog/abi.h Makefile
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
 		-I$(abspath $(JS2300_ROOT)/include) -Iinclude -c -o '$@' '$<'
 
-$(JS2300_CORE_FS_OBJECT): src/js2300_core_fs.c Makefile $(TOOLCHAIN_STAMP)
+$(JS2300_CORE_FS_OBJECT): src/js2300_core_fs.c Makefile \
+		$(JS2300_BUILD_STAMP) $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o '$@' '$<'
 
@@ -865,32 +927,27 @@ $(GAMBATTE_DIR)/.git:
 	git clone --filter=blob:none https://github.com/libretro/gambatte-libretro.git $(GAMBATTE_DIR)
 	git -C $(GAMBATTE_DIR) checkout --detach $(GAMBATTE_REV)
 
-JS2300_REV := 18c4718143ece724321165615019be65347a1466
-MQUICKJS_REV := 203d5bb79789bc47b74855d9207415dab71661a0
+## JS2300 is an independent checkout with MQuickJS vendored inside it.  The
+## stamp is keyed by the pinned commit, so changing JS2300_REV creates a new
+## prerequisite without resetting a checkout that has local work.
+deps-js2300: $(JS2300_FETCH_STAMP)
 
-# JS2300 and its embedded MQuickJS runtime are private repositories.  They are
-# cloned here so the js2300-ui/js2300-core builds work from a fresh checkout
-# without a separate mufrog-commandc bootstrap step.  The stamp rules below
-# produce the exact files the build rules reference; make needs a rule for each
-# missing prerequisite before it will run any recipe.
-$(JS2300_ROOT)/.git:
-	mkdir -p '$(MUFROG_ROOT)'
-	test -d '$(JS2300_ROOT)/.git' || \
-		git clone git@github.com:axgdev/js2300-private.git '$(JS2300_ROOT)'
+$(JS2300_FETCH_STAMP):
+	@mkdir -p '$(dir $(JS2300_ROOT))'
+	@if test -e '$(JS2300_ROOT)' && test ! -d '$(JS2300_ROOT)/.git'; then \
+		echo 'JS2300 path exists but is not a git checkout: $(JS2300_ROOT)' >&2; exit 1; \
+	fi
+	@if test -d '$(JS2300_ROOT)/.git'; then \
+		git -C '$(JS2300_ROOT)' remote set-url origin '$(JS2300_URL)'; \
+	else \
+		echo '  CLONE   $(JS2300_URL)'; \
+		git clone --no-checkout --depth 1 '$(JS2300_URL)' '$(JS2300_ROOT)'; \
+	fi
+	@if ! git -C '$(JS2300_ROOT)' cat-file -e '$(JS2300_REV)^{commit}' 2>/dev/null; then \
+		git -C '$(JS2300_ROOT)' fetch --depth 1 origin '$(JS2300_REV)'; \
+	fi
 	git -C '$(JS2300_ROOT)' checkout --detach '$(JS2300_REV)'
-	patch -d '$(JS2300_ROOT)' -p1 < patches/mufrog/js2300-mquickjs-objects.patch
-
-$(JS2300_ROOT)/Makefile $(JS2300_ROOT)/src/js2300_runtime.c \
-$(JS2300_ROOT)/js2300_stdlib_gen.c $(JS2300_ROOT)/include/js2300/js2300.h: $(JS2300_ROOT)/.git
-
-$(JS2300_MQUICKJS_DIR)/.git:
-	mkdir -p '$(dir $(JS2300_MQUICKJS_DIR))'
-	test -d '$(JS2300_MQUICKJS_DIR)/.git' || \
-		git clone git@github.com:bellard/mquickjs.git '$(JS2300_MQUICKJS_DIR)'
-	git -C '$(JS2300_MQUICKJS_DIR)' checkout --detach '$(MQUICKJS_REV)'
-	patch -d '$(JS2300_MQUICKJS_DIR)' -p1 < patches/mufrog/mquickjs-date-constructor.patch
-
-$(JS2300_MQUICKJS_DIR)/mquickjs.c: $(JS2300_MQUICKJS_DIR)/.git
+	touch '$@'
 
 $(COMMON_DIR)/.git:
 	mkdir -p .deps

@@ -237,6 +237,40 @@ static int core_fs_read_text(void *opaque, const char *path,
 	return (int)got;
 }
 
+static int core_file_size(void *opaque, const char *path, size_t *out_size)
+{
+	FILE *file;
+	long end;
+
+	(void)opaque;
+	if (!path || !out_size || (file = fopen(path, "rb")) == NULL)
+		return -1;
+	if (fseek(file, 0, SEEK_END) != 0 || (end = ftell(file)) < 0 ||
+		fclose(file) != 0)
+		return -1;
+	*out_size = (size_t)end;
+	return 0;
+}
+
+static int core_file_read(void *opaque, const char *path, void *out,
+	size_t capacity, size_t *out_size)
+{
+	FILE *file;
+	size_t size;
+	size_t got;
+
+	(void)opaque;
+	if (!out_size || core_file_size(NULL, path, &size) != 0 ||
+		size > capacity || (size != 0 && !out) ||
+		(file = fopen(path, "rb")) == NULL)
+		return -1;
+	got = fread(out, 1, size, file);
+	if (got != size || ferror(file) || fclose(file) != 0)
+		return -1;
+	*out_size = got;
+	return 0;
+}
+
 static int core_fs_write_text(void *opaque, const char *path,
 	const char *text, size_t size)
 {
@@ -315,6 +349,8 @@ static void core_configure_host(struct js2300_host *host, void *opaque)
 	host->fs_read_text = core_fs_read_text;
 	host->fs_write_text = core_fs_write_text;
 	host->font_load = core_font_load;
+	host->file_size = core_file_size;
+	host->file_read = core_file_read;
 }
 
 void retro_set_environment(retro_environment_t cb)
@@ -375,7 +411,7 @@ void retro_get_system_info(struct retro_system_info *info)
 {
 	memset(info, 0, sizeof(*info));
 	info->library_name = "JS2300";
-	info->library_version = "0.5.0";
+	info->library_version = "0.7.0";
 	info->valid_extensions = "js|mjs|ch8|chip8|zip";
 	info->need_fullpath = true;
 	info->block_extract = false;

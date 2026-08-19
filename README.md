@@ -104,12 +104,14 @@ Build checks:
 make check
 ```
 
-The Linux repository owns the pinned Frog-toolchain download and extraction.
-For a direct frontend build, prepare that toolchain once and then build the
-core package graph from this checkout:
+The frontend owns its pinned Frog uClibc toolchain download and extraction;
+the JS2300 runtime is fetched from its standalone repository. Both are kept
+below this checkout's ignored `.toolchains/` and `.deps/` directories, so a
+fresh build does not require `/opt`, Buildroot, or a `mufrog-commandc` JS tree.
+Prepare them once and then build the core package graph:
 
 ```
-make -C ../sf2000_linux toolchain
+make setup
 make SF2000_LINUX_DIR=../sf2000_linux core-packages
 ```
 
@@ -117,6 +119,11 @@ make SF2000_LINUX_DIR=../sf2000_linux core-packages
 given; set `JOBS=` or pass an explicit `-j` on constrained hosts. ccache is
 enabled when installed and is kept in `.cache/ccache` by default, outside
 `build/`, so `make clean` preserves the warm compiler cache.
+
+The JS2300 pin can be inspected with `make -n deps-js2300` and overridden for
+development with `JS2300_ROOT=/path/to/checkout JS2300_REV=<commit>`. The
+standalone runtime's own README documents the host callback contract used by
+the JS2300 core and UI adapters.
 
 Cross-build a statically linked core:
 

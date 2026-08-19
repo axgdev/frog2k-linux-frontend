@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 
-/* The Buildroot toolchain builds uClibc without wide-character support, while
- * the frog-toolchain uClibc-ng builds it with __UCLIBC_HAS_WCHAR__ and
+/* Older uClibc toolchains built without wide-character support, while the
+ * Frog uClibc-ng toolchain builds it with __UCLIBC_HAS_WCHAR__ and
  * declares wcslen()/wcstombs() itself.  Some cores (FBAlpha, fake08) are
  * patched to call the sf2000_mufrog_* helpers by name, so those always exist;
  * only the wcslen/wcstombs macro remaps are conditional, otherwise they

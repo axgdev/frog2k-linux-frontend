@@ -304,6 +304,39 @@ static int runner_fs_read_bytes(void *opaque, const char *path, uint8_t *out,
 	return error ? -1 : (int)got;
 }
 
+static int runner_file_size(void *opaque, const char *path, size_t *out_size)
+{
+	char checked_path[JS2300_MAX_PATH];
+	struct stat st;
+
+	(void)opaque;
+	if (runner_path(path, checked_path, sizeof(checked_path)) != 0 ||
+		!out_size || stat(checked_path, &st) != 0 || st.st_size < 0)
+		return -1;
+	*out_size = (size_t)st.st_size;
+	return 0;
+}
+
+static int runner_file_read(void *opaque, const char *path, void *out,
+	size_t capacity, size_t *out_size)
+{
+	char checked_path[JS2300_MAX_PATH];
+	FILE *file;
+	size_t size;
+	size_t got;
+
+	if (!out_size || runner_file_size(opaque, path, &size) != 0 ||
+		size > capacity || (size != 0 && !out) ||
+		runner_path(path, checked_path, sizeof(checked_path)) != 0 ||
+		(file = fopen(checked_path, "rb")) == NULL)
+		return -1;
+	got = fread(out, 1, size, file);
+	if (got != size || ferror(file) || fclose(file) != 0)
+		return -1;
+	*out_size = got;
+	return 0;
+}
+
 static int runner_fs_read_text(void *opaque, const char *path, char *out,
 	size_t out_size)
 {
@@ -392,6 +425,8 @@ static void runner_configure_host(struct js2300_runner *runner,
 	host->av_output = runner_av_output;
 	host->fs_read_text = runner_fs_read_text;
 	host->fs_write_text = runner_fs_write_text;
+	host->file_size = runner_file_size;
+	host->file_read = runner_file_read;
 }
 
 static int runner_open_ui(struct js2300_runner *runner)
