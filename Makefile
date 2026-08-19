@@ -500,6 +500,11 @@ QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
 QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
 JS2300_RUNTIME := build/js2300/libjs2300.a
 JS2300_BUILD_STAMP := build/.js2300-$(JS2300_REV).stamp
+JS2300_SOURCE_STAMP := build/.js2300-sources-$(JS2300_REV).stamp
+JS2300_SOURCE_FILES := $(JS2300_ROOT)/src/js2300_runtime.c \
+	$(JS2300_ROOT)/js2300_stdlib_gen.c \
+	$(JS2300_ROOT)/include/js2300/js2300.h \
+	$(JS2300_ROOT)/vendor/mquickjs/mquickjs.c
 JS2300_CORE_SOURCE := build/js2300/js2300_libretro_core.c
 JS2300_CORE_OBJECT := build/js2300/js2300_libretro_core.o
 JS2300_CORE_FS_OBJECT := build/js2300/js2300_core_fs.o
@@ -717,11 +722,18 @@ $(JS2300_BUILD_STAMP): $(JS2300_FETCH_STAMP) Makefile
 		BUILD='$(abspath build/js2300)' OUT='$(abspath build/js2300-out)'
 	touch '$@'
 
-$(JS2300_RUNTIME): $(JS2300_BUILD_STAMP) $(TOOLCHAIN_STAMP) \
-		$(JS2300_ROOT)/src/js2300_runtime.c \
-		$(JS2300_ROOT)/js2300_stdlib_gen.c \
-		$(JS2300_ROOT)/include/js2300/js2300.h \
-		$(JS2300_ROOT)/vendor/mquickjs/mquickjs.c Makefile
+$(JS2300_SOURCE_STAMP): $(JS2300_FETCH_STAMP)
+	@set -eu; \
+	for source in $(JS2300_SOURCE_FILES); do \
+		test -f "$$source" || { \
+			echo "JS2300 checkout is missing $$source" >&2; exit 1; \
+		}; \
+	done
+	mkdir -p '$(@D)'
+	touch '$@'
+
+$(JS2300_RUNTIME): $(JS2300_BUILD_STAMP) $(JS2300_SOURCE_STAMP) \
+		$(TOOLCHAIN_STAMP) Makefile
 	mkdir -p '$(@D)'
 	$(MAKE) -C '$(JS2300_ROOT)' \
 		BUILD='$(abspath build/js2300)' OUT='$(abspath build/js2300-out)' \
@@ -742,7 +754,7 @@ $(JS2300_CORE_SOURCE): src/js2300_libretro_core.c Makefile $(JS2300_BUILD_STAMP)
 
 $(JS2300_CORE_OBJECT): $(JS2300_CORE_SOURCE) include/libretro_min.h \
 		$(JS2300_BUILD_STAMP) $(TOOLCHAIN_STAMP) \
-		$(JS2300_ROOT)/include/js2300/js2300.h include/unifrog/abi.h Makefile
+		$(JS2300_SOURCE_STAMP) include/unifrog/abi.h Makefile
 	mkdir -p '$(@D)'
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
 		-I$(abspath $(JS2300_ROOT)/include) -Iinclude -c -o '$@' '$<'
@@ -761,7 +773,7 @@ $(JS2300_CORE_EXECUTABLE): $(JS2300_RUNTIME) $(JS2300_CORE_OBJECT)  $(TOOLCHAIN_
 	$(SF2000_STRIP) --strip-unneeded '$@'
 
 $(JS2300_UI_EXECUTABLE): $(JS2300_RUNTIME) src/js2300_runner.c  $(TOOLCHAIN_STAMP) \
-		$(JS2300_ROOT)/include/js2300/js2300.h $(SF2000_HOST_OBJECTS) $(GE_SOURCES) \
+		$(JS2300_SOURCE_STAMP) $(SF2000_HOST_OBJECTS) $(GE_SOURCES) \
 		src/sf2000_input.c src/sf2000_browser_ui.c src/sf2000_log.c
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(COMMON_DIR)/include \
 		-I$(abspath $(JS2300_ROOT)/include) -I$(STB_DIR) \
@@ -947,10 +959,10 @@ deps-js2300: $(JS2300_FETCH_STAMP)
 
 $(JS2300_FETCH_STAMP):
 	@mkdir -p '$(dir $(JS2300_ROOT))'
-	@if test -e '$(JS2300_ROOT)' && test ! -d '$(JS2300_ROOT)/.git'; then \
+	@if test -e '$(JS2300_ROOT)' && ! git -C '$(JS2300_ROOT)' rev-parse --git-dir >/dev/null 2>&1; then \
 		echo 'JS2300 path exists but is not a git checkout: $(JS2300_ROOT)' >&2; exit 1; \
 	fi
-	@if test -d '$(JS2300_ROOT)/.git'; then \
+	@if git -C '$(JS2300_ROOT)' rev-parse --git-dir >/dev/null 2>&1; then \
 		git -C '$(JS2300_ROOT)' remote set-url origin '$(JS2300_URL)'; \
 	else \
 		echo '  CLONE   $(JS2300_URL)'; \
