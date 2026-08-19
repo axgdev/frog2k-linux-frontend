@@ -7,9 +7,8 @@ A small Linux/NOMMU frontend for statically linked libretro cores on the
 SF2000. Hardware support belongs in `sf2000_linux`; this repository contains
 only application policy, libretro hosting, and the future game menu.
 
-The design borrows the clean host/core separation from the MIT-licensed
-`mufrog-commandc` Linux frontend, but does not import its HCRTOS platform code.
-Linux/NOMMU cannot rely on `dlopen`, so each deployable static PIE ELF is
+The design uses a clean host/core separation. Linux/NOMMU cannot rely on
+`dlopen`, so each deployable static PIE ELF is
 linked to one core archive at build time. The browser selects the appropriate
 executable while sharing ROM/menu metadata.
 
@@ -112,7 +111,7 @@ make check
 The frontend owns its pinned Frog uClibc toolchain download and extraction;
 the JS2300 runtime is fetched from its standalone repository. Both are kept
 below this checkout's ignored `.toolchains/` and `.deps/` directories, so a
-fresh build does not require `/opt`, Buildroot, or a `mufrog-commandc` JS tree.
+fresh build does not require `/opt`, Buildroot, or an external JS/core bundle.
 Prepare them once and then build the core package graph:
 
 ```
@@ -144,12 +143,9 @@ builds both `build/sf2000-browser` and `build/sf2000-gambatte`. The Linux image
 embeds both, so no frontend executable belongs on the SD card. Put a ROM at,
 for example, `/GB/game.gb` or `/GBC/game.gbc` on its FAT partition.
 
-`make frogui` remains a developer compatibility target for the symbol-prefixed FrogUI core produced by the read-only
-`mufrog-commandc` tree through a small Linux adapter. It provides the actual
-themeable ROM browser rather than the synthetic pattern. The SF2000 Linux
-image. It is not the integrated menu because the imported core does not expose
-a complete Linux game-launch contract. The old diagnostic input shortcuts are
-not part of the normal UI.
+`make frogui` remains an optional developer compatibility target for an
+externally supplied symbol-prefixed FrogUI archive. Set `FROGUI_CORE` to the
+archive before invoking it; the target is not part of the integrated image.
 
 ## Boundaries and next checkpoints
 

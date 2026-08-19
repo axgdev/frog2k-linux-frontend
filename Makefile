@@ -105,7 +105,7 @@ endif
 endif
 
 CORE ?=
-FROGUI_CORE ?= ../mufrog-commandc/cores/output/frogui_libretro_sf2000.a
+FROGUI_CORE ?=
 GAMBATTE_REV := 9b3b5e3cc18ec92f460d37dd551eaf90c55bfcea
 GPSP_REV := 5b6e751f4abf368509146cd143c949c1946ac1ae
 FCEUMM_REV := b5e3566515c27dc66c9c20572171673126532e06
@@ -132,10 +132,10 @@ QUICKNES_SOURCE_STAMP := $(QUICKNES_DIR)/.sf2000-source
 COMMON_DIR := .deps/libretro-common
 STB_DIR := .deps/stb
 SF2000_LINUX_DIR ?= ../sf2000_linux
-# Mufrog-family core sources are cloned from their own upstream repositories
-# (see MUFROG_CORE_CLONES below) so the frontend builds without any external
-# mufrog-commandc checkout.  Override MUFROG_ROOT to reuse an existing tree.
-MUFROG_ROOT ?= $(abspath .deps/mufrog-commandc)
+# Mufrog-family core sources are cloned from their own pinned upstream
+# repositories (see MUFROG_CORE_CLONES below).  Override MUFROG_ROOT to reuse
+# an existing source cache.
+MUFROG_ROOT ?= $(abspath .deps/core-sources)
 MUFROG_SOURCE_ROOT ?= $(MUFROG_ROOT)/.deps/cores
 BLUEMSX_SYSTEM_SOURCE := $(MUFROG_SOURCE_ROOT)/libretro-blueMSX-prosty/system/bluemsx
 BLUEMSX_SYSTEM_PACKAGE := build/sdcard/bios
@@ -306,7 +306,8 @@ endef
 $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,$(subst :, ,$(spec))),$(word 2,$(subst :, ,$(spec))),$(word 3,$(subst :, ,$(spec))),$(word 4,$(subst :, ,$(spec))),$(word 5,$(subst :, ,$(spec))),$(word 6,$(subst :, ,$(spec))))))
 # Mufrog-family core sources are cloned from their own upstream repositories at
 # the exact commits the frontend patches were written against.  This mirrors the
-# mufrog-commandc cores/manifest.mk pins without depending on that checkout.
+# Keep the source pins local so this frontend has no dependency on another
+# project checkout.
 # Format: id|checkout-directory|upstream-url|pinned-commit
 MUFROG_CORE_CLONES := \
 	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
@@ -683,6 +684,7 @@ demo: $(STB_DIR)/.git
 		$(SF2000_ENDFILES)
 
 frogui: $(STB_DIR)/.git
+	test -n "$(FROGUI_CORE)" || { echo 'set FROGUI_CORE=/path/to/frogui_libretro_sf2000.a' >&2; exit 2; }
 	test -f "$(FROGUI_CORE)"
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -I$(STB_DIR) $(SF2000_LDFLAGS) \
