@@ -43,13 +43,17 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_OUTPUT_RATE 32000u
 /*
  * When a slow core cannot keep the DMA ring at its target delay, the
- * frontend sustains by repeating the most recent audio.  Repeat those
- * samples with a decaying level (x160/256 per repeat chunk, floor x32/256)
- * so a starved session fades to a quiet tail instead of buzzing the last
- * ~23 ms of audio back at full volume.
+ * frontend sustains by repeating the most recent audio.  Sustains fire
+ * only when the ring drains below the low water mark (one larger block
+ * instead of a per-frame trickle), and every repeat boundary - fresh to
+ * repeat, repeat loop wrap, and repeat back to fresh - is declicked with
+ * a short linear ramp, so a starved session sounds like the music briefly
+ * fluttering rather than a per-frame click train.  Repeat blocks also
+ * decay (x160/256 per chunk, floor x32/256) toward a quiet tail.
  */
 #define AUDIO_SUSTAIN_DECAY 160u
 #define AUDIO_SUSTAIN_FLOOR 32u
+#define AUDIO_DECLICK_SAMPLES 64u
 
 /*
  * Rates the HC15xx SND0 APLL/I2S can generate natively (vendor libauddrv
@@ -150,6 +154,8 @@ static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
 static unsigned audio_suppressed;
 static unsigned audio_sustain_factor = 256u;
+static int audio_last_output;
+static unsigned audio_sustaining;
 static int audio_last_sample;
 static unsigned loading_game;
 static int core_watchdog_kmsg_fd = -1;
@@ -196,7 +202,7 @@ static unsigned core_option_count;
 extern uint32_t reg[] __attribute__((weak));
 extern uint16_t *gba_screen_pixels __attribute__((weak));
 static struct {
-	unsigned generated, submitted, dropped, sustained;
+	unsigned generated, submitted, dropped, sustained, sustain_events;
 	unsigned peak, clicks, nearclip, eagain, xruns;
 } audio_metrics;
 
@@ -1093,7 +1099,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u mode=%s presenter=%s gba_pc=%08x sustained=%u clicks=%u nearclip=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -1110,7 +1116,8 @@ static void video(const void *data, unsigned width, unsigned height,
 			uncapped_mode ? "uncapped" : "normal",
 			host.ge ? "GE" : "CPU",
 			reg ? reg[15] : 0, audio_metrics.sustained,
-			audio_metrics.clicks, audio_metrics.nearclip);
+			audio_metrics.sustain_events, audio_metrics.clicks,
+			audio_metrics.nearclip);
 		if (metrics_fd >= 0 &&
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
@@ -1501,6 +1508,8 @@ static void audio_queue(const int16_t *samples, unsigned count,
 	}
 	if (generated)
 		audio_tail_push(samples, count);
+	if (count)
+		audio_last_output = samples[count - 1];
 	tail = (host.audio_head + host.audio_count) % capacity;
 	first = capacity - tail;
 	if (first > count)
@@ -1517,10 +1526,43 @@ static void audio_enqueue(const int16_t *samples, unsigned count)
 	audio_queue(samples, count, 1);
 }
 
+/*
+ * Ramp the first `ramp` samples starting at `at` from the level of the
+ * previous output (the raw sample before `at`, or the last enqueued
+ * sample when `at` is the start of the buffer) toward the real samples,
+ * so a hard repeat or resume boundary becomes a ~1.5 ms linear crossfade
+ * instead of a click.  `limit` bounds the usable length of `samples`.
+ * Integer-only math: no FPU on this part.
+ */
+static void audio_declick_into(int16_t *samples, unsigned at,
+	unsigned ramp, unsigned limit)
+{
+	unsigned end = at + ramp;
+	int from = at ? samples[at - 1] : audio_last_output;
+	unsigned i;
+
+	if (end > limit)
+		end = limit;
+	if (end <= at)
+		return;
+	for (i = at; i < end; ++i) {
+		int target = samples[i];
+		int delta = target - from;
+
+		samples[i] = (int16_t)(from +
+			(int32_t)delta * (int32_t)(i - at + 1) / (int32_t)ramp);
+	}
+	audio_last_output = samples[end - 1];
+}
+
 static void audio_enqueue_repeat(unsigned count)
 {
 	int16_t samples[AUDIO_SUSTAIN_SAMPLES];
 
+	if (!count)
+		return;
+	audio_metrics.sustain_events++;
+	audio_sustaining = 1;
 	while (count) {
 		unsigned chunk = count > AUDIO_SUSTAIN_SAMPLES ?
 			AUDIO_SUSTAIN_SAMPLES : count;
@@ -1532,12 +1574,27 @@ static void audio_enqueue_repeat(unsigned count)
 			unsigned start = (host.audio_tail_write +
 				AUDIO_SUSTAIN_SAMPLES - host.audio_tail_count) %
 				AUDIO_SUSTAIN_SAMPLES;
+			unsigned old_play = host.audio_tail_play;
 
 			for (i = 0; i < chunk; ++i)
 				samples[i] = host.audio_tail[(start +
 					host.audio_tail_play + i) % AUDIO_SUSTAIN_SAMPLES];
 			host.audio_tail_play = (host.audio_tail_play + chunk) %
 				host.audio_tail_count;
+			/* Declick every repeat-loop wrap inside this chunk
+			 * (position 0 is the fresh-to-repeat boundary and is
+			 * declicked separately below). */
+			{
+				unsigned wrap = (host.audio_tail_count - old_play) %
+					host.audio_tail_count;
+
+				while (wrap < chunk) {
+					if (wrap)
+						audio_declick_into(samples, wrap,
+							AUDIO_DECLICK_SAMPLES, chunk);
+					wrap += host.audio_tail_count;
+				}
+			}
 		}
 		if (audio_sustain_factor < 256u) {
 			for (i = 0; i < chunk; ++i)
@@ -1548,6 +1605,7 @@ static void audio_enqueue_repeat(unsigned count)
 			AUDIO_SUSTAIN_DECAY / 256u;
 		if (audio_sustain_factor < AUDIO_SUSTAIN_FLOOR)
 			audio_sustain_factor = AUDIO_SUSTAIN_FLOOR;
+		audio_declick_into(samples, 0, AUDIO_DECLICK_SAMPLES, chunk);
 		audio_queue(samples, chunk, 0);
 		count -= chunk;
 	}
@@ -1559,6 +1617,8 @@ static void audio_tail_reset(void)
 	host.audio_tail_count = 0;
 	host.audio_tail_play = 0;
 	audio_sustain_factor = 256u;
+	audio_last_output = 0;
+	audio_sustaining = 0;
 }
 
 static void audio_refill_sustain(void)
@@ -1578,7 +1638,10 @@ static void audio_refill_sustain(void)
 	if (delay < 0)
 		delay = 0;
 	host.audio_delay = delay;
-	if ((unsigned)delay >= AUDIO_DELAY_TARGET)
+	/* Refill only below the low water mark so a slow core triggers one
+	 * larger, declicked sustain block instead of a full-volume trickle
+	 * of repeats glued into every frame. */
+	if ((unsigned)delay >= AUDIO_DELAY_LOW)
 		return;
 	missing = AUDIO_DELAY_TARGET - (unsigned)delay;
 	audio_enqueue_repeat(missing);
@@ -1617,6 +1680,11 @@ static size_t audio_batch(const int16_t *samples, size_t frames)
 			samples + offset * 2, input_frames, converted,
 			AUDIO_CONVERT_CAPACITY);
 		offset += input_frames;
+		if (audio_sustaining && produced) {
+			audio_declick_into(converted, 0, AUDIO_DECLICK_SAMPLES,
+				(unsigned)produced);
+			audio_sustaining = 0;
+		}
 		audio_enqueue(converted, (unsigned)produced);
 	}
 	if (host.audio_count >= 1024u)
