@@ -406,6 +406,11 @@ MUFROG_picodrive_EXTRA_CFLAGS += -O3
 # the shared libretro-common libchdr module on the include path.
 MUFROG_picodrive_PATCHES := patches/mufrog/picodrive-no-chd.patch
 MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
+# The qpsx fork commit pinned in QPSX_DEP_REV predates the SF2000 EXT/INS
+# codegen and profiler work; the working-tree changes were never committed to
+# the private fork.  Carry them as a patch so a fresh checkout builds the
+# same optimized core.  Fold into QPSX_DEP_REV once the fork is public.
+MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)

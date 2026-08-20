@@ -1,0 +1,299 @@
+diff --git a/Makefile.libretro b/Makefile.libretro
+index 83f7c49..8169ae3 100644
+--- a/Makefile.libretro
++++ b/Makefile.libretro
+@@ -180,16 +180,20 @@ OBJS += \
+ 	src/gpu/gpulib/gpu.o \
+ 	src/gpu/gpulib/vout_port.o
+ 
+-# QPSX v091: MIPS32 Assembly optimizations (SF2000 only)
++# QPSX v091: MIPS32 Assembly optimizations (SF2000 bare-metal only)
+ # QPSX v099: Added psxmem_asm.o for memory write optimization
+ ifeq ($(platform), sf2000)
+ OBJS += \
+ 	src/gte_asm.o \
+ 	src/psxmem_asm.o
++endif
++# HC15xx-safe MIPS32r2 GPU inner loops (EXT/INS/MOVZ/PREF only, see
++# gpu_inner_mips32.h): built for every MIPS frontend that licenses the safe
++# subset.  These ops are confirmed working on the physical HC15xx while the
++# buggy r2 encodings (ROTR/SEB/SEH/WSBH/SYNCI/JR.HB) are never emitted.
+ ifeq ($(QPSX_ENABLE_MIPS32R2), 1)
+ OBJS += src/gpu/$(GPU)/gpu_inner_mips32.o
+ endif
+-endif
+ 
+ # SPU - pcsxrearmed with libretro audio backend
+ OBJS += \
+diff --git a/libretro/core/libretro-core.cpp b/libretro/core/libretro-core.cpp
+index dc82544..58963d6 100644
+--- a/libretro/core/libretro-core.cpp
++++ b/libretro/core/libretro-core.cpp
+@@ -3622,6 +3622,9 @@ void retro_init(void)
+     /* v377b: Reset average FPS tracking */
+     fps_history_idx = 0;
+     fps_history_count = 0;
++
++    profiler_init();
++    profiler_set_enabled(1);
+     fps_avg_x100 = 0;
+     for (int i = 0; i < FPS_AVG_SAMPLES; i++) fps_history[i] = 0;
+ 
+@@ -3854,13 +3857,17 @@ void retro_run(void)
+ 
+     if (g_target_speed >= 100) {
+         /* Normal speed - no throttling, just execute */
++        profiler_frame_start();
+         psxCpu->Execute();
++        profiler_frame_end();
+     } else {
+         frame_throttle_acc += g_target_speed;
+         if (frame_throttle_acc >= 100) {
+             frame_throttle_acc -= 100;
+             /* Emulate this frame */
++            profiler_frame_start();
+             psxCpu->Execute();
++            profiler_frame_end();
+         } else {
+             /* Skip emulation - frame dupe (output previous frame buffer) */
+             if (SCREEN && real_video_cb) {
+@@ -3868,6 +3875,23 @@ void retro_run(void)
+             }
+         }
+     }
++
++    /* v<prof>: dump the emulated-cycle breakdown every 60 frames */
++    if ((run_frame_count % 60) == 0) {
++        const ProfilerData *pd = profiler_get_data();
++        if (pd && pd->enabled && pd->frame_count > 0) {
++            XLOG("PROF total=%.2fms cpu=%.1f%% gte=%.1f%% gpu=%.1f%% spu=%.1f%% cd=%.1f%% video=%.1f%%",
++                pd->avg_ms[PROF_FRAME_TOTAL],
++                pd->pct[PROF_CPU_TOTAL], pd->pct[PROF_GTE_TOTAL],
++                pd->pct[PROF_GPU_TOTAL], pd->pct[PROF_SPU_TOTAL],
++                pd->pct[PROF_CDROM_TOTAL], pd->pct[PROF_VIDEO_OUTPUT]);
++            XLOG("PROF rtp=%u rtps=%u mvmva=%u nclip=%u",
++                pd->cycles[PROF_GTE_RTPT] / pd->frame_count,
++                pd->cycles[PROF_GTE_RTPS] / pd->frame_count,
++                pd->cycles[PROF_GTE_MVMVA] / pd->frame_count,
++                pd->cycles[PROF_GTE_NCLIP] / pd->frame_count);
++        }
++    }
+ }
+ 
+ bool retro_load_game(const struct retro_game_info *info)
+diff --git a/src/gte.cpp b/src/gte.cpp
+index 75295aa..497d215 100644
+--- a/src/gte.cpp
++++ b/src/gte.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "gte.h"
+ #include "psxmem.h"
++#include "profiler.h"
+ 
+ // MIPS platforms have hardware divider, faster than 64KB LUT + UNR algo
+ #if defined(__mips__)
+@@ -402,6 +403,7 @@ void gteRTPS(void) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE RTPS\n");
+ #endif
++	PROFILE_START(PROF_GTE_RTPS);
+ 	gteFLAG = 0;
+ 
+ 	gteMAC1 = A1((((s64)gteTRX << 12) + (gteR11 * gteVX0) + (gteR12 * gteVY0) + (gteR13 * gteVZ0)) >> 12);
+@@ -427,6 +429,7 @@ void gteRTPS(void) {
+ 	s64 tmp = (s64)gteDQB + ((s64)gteDQA * quotient);
+ 	gteMAC0 = F(tmp);
+ 	gteIR0 = limH(tmp >> 12);
++	PROFILE_END(PROF_GTE_RTPS);
+ }
+ 
+ void gteRTPT(void) {
+@@ -437,6 +440,7 @@ void gteRTPT(void) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE RTPT\n");
+ #endif
++	PROFILE_START(PROF_GTE_RTPT);
+ 	gteFLAG = 0;
+ 
+ 	gteSZ0 = gteSZ3;
+@@ -460,6 +464,7 @@ void gteRTPT(void) {
+ 	s64 tmp = (s64)gteDQB + ((s64)gteDQA * quotient);
+ 	gteMAC0 = F(tmp);
+ 	gteIR0 = limH(tmp >> 12);
++	PROFILE_END(PROF_GTE_RTPT);
+ }
+ 
+ // NOTE: 'gteop' parameter is instruction opcode shifted right 10 places.
+@@ -476,6 +481,7 @@ void gteMVMVA(u32 gteop) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE MVMVA\n");
+ #endif
++	PROFILE_START(PROF_GTE_MVMVA);
+ 	gteFLAG = 0;
+ 
+ 	gteMAC1 = A1((((s64)CV1(cv) << 12) + (MX11(mx) * vx) + (MX12(mx) * vy) + (MX13(mx) * vz)) >> shift);
+@@ -485,17 +491,20 @@ void gteMVMVA(u32 gteop) {
+ 	gteIR1 = limB1(gteMAC1, lm);
+ 	gteIR2 = limB2(gteMAC2, lm);
+ 	gteIR3 = limB3(gteMAC3, lm);
++	PROFILE_END(PROF_GTE_MVMVA);
+ }
+ 
+ void gteNCLIP(void) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE NCLIP\n");
+ #endif
++	PROFILE_START(PROF_GTE_NCLIP);
+ 	gteFLAG = 0;
+ 
+ 	gteMAC0 = F((s64)gteSX0 * (gteSY1 - gteSY2) +
+ 				gteSX1 * (gteSY2 - gteSY0) +
+ 				gteSX2 * (gteSY0 - gteSY1));
++	PROFILE_END(PROF_GTE_NCLIP);
+ }
+ 
+ void gteAVSZ3(void) {
+diff --git a/src/profiler.h b/src/profiler.h
+index 1d4cfc5..e23286e 100644
+--- a/src/profiler.h
++++ b/src/profiler.h
+@@ -29,7 +29,9 @@
+  * Set to 1 to enable profiling (adds overhead to every mem access)
+  * Set to 0 for production builds (zero overhead)
+  */
++#ifndef QPSX_PROFILER_ENABLED
+ #define QPSX_PROFILER_ENABLED 0
++#endif
+ 
+ #include <stdint.h>
+ 
+diff --git a/src/recompiler/mips/host_asm.S b/src/recompiler/mips/host_asm.S
+index e0e2166..2354ca6 100644
+--- a/src/recompiler/mips/host_asm.S
++++ b/src/recompiler/mips/host_asm.S
+@@ -22,8 +22,16 @@
+  * along with it.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
+-// Mips32r2 introduced useful instructions:
+-#if (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
++// Mips32r2 introduced useful instructions.
++//
++// HC15xx (SF2000/GB300) is MIPS32r1 with only a subset of r2 working
++// (EXT/INS/CLZ/CLO/MOVN/MOVZ/madd; NOT rotr/seb/seh/wsbh/synci/jr.hb).
++// The host build uses -march=mips32, so __mips_isa_rev is 1 below and no
++// CACHE_OPS (synci) code is emitted.  QPSX_MIPS32R2_SAFE licenses the
++// proven-good EXT/INS encodings only; CACHE_OPS must stay off.
++#if defined(QPSX_MIPS32R2_SAFE)
++#define HAVE_MIPS32R2_EXT_INS
++#elif (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
+     (defined(_MIPS_ARCH_MIPS32R2) || defined(_MIPS_ARCH_MIPS32R3) || \
+      defined(_MIPS_ARCH_MIPS32R5) || defined(_MIPS_ARCH_MIPS32R6))
+ #define HAVE_MIPS32R2_EXT_INS
+diff --git a/src/recompiler/mips/mips_codegen.h b/src/recompiler/mips/mips_codegen.h
+index 4432c05..2d901e3 100644
+--- a/src/recompiler/mips/mips_codegen.h
++++ b/src/recompiler/mips/mips_codegen.h
+@@ -112,8 +112,18 @@ typedef enum {
+ /* XXX: encoding of 3-op MUL changed in MIPS32r6, but hasn't been updated here. */
+ #define HAVE_MIPS32_3OP_MUL
+ 
+-// MIPS32r2 introduced useful instructions:
+-#if (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
++// MIPS32r2 introduced useful instructions.
++//
++// The HC15xx (SF2000/GB300) CPU implements MIPS32r1 and only a subset of
++// r2.  Field report from physical hardware (frog-toolchain PR #3): EXT, INS,
++// CLZ, CLO, MOVN, MOVZ and the multiply-accumulate ops work, while ROTR/
++// ROTRV, SEB/SEH, WSBH, SYNCI and JR.HB/JALR.HB raise exceptions.  The host
++// is always compiled with -march=mips32 (r1) so GCC never emits a buggy op;
++// QPSX_MIPS32R2_SAFE additionally licenses the proven-good EXT/INS encodings
++// emitted by this code generator (EXT/INS macros write raw words).
++#if defined(QPSX_MIPS32R2_SAFE)
++ #define HAVE_MIPS32R2_EXT_INS
++#elif (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
+     (defined(_MIPS_ARCH_MIPS32R2) || defined(_MIPS_ARCH_MIPS32R3) || \
+      defined(_MIPS_ARCH_MIPS32R5) || defined(_MIPS_ARCH_MIPS32R6))
+  #define HAVE_MIPS32R2_EXT_INS
+diff --git a/src/recompiler/mips/rec_alu.cpp.h b/src/recompiler/mips/rec_alu.cpp.h
+index 2f62c49..3bb473a 100644
+--- a/src/recompiler/mips/rec_alu.cpp.h
++++ b/src/recompiler/mips/rec_alu.cpp.h
+@@ -8,10 +8,16 @@
+  * Options that can be disabled for debugging: *
+  ***********************************************/
+ 
+-/* Convert various MIPS I opcode sequences to a modern opcode */
++/* Convert various MIPS I opcode sequences to a modern opcode.  The
++ * SEB/SEH sign-extension conversions require HAVE_MIPS32R2_SEB_SEH, which
++ * is buggy on the HC15xx r1 core; the EXT/INS conversions only need the
++ * working EXT/INS pair, so they are gated separately. */
+ #if defined(HAVE_MIPS32R2_EXT_INS) && defined(HAVE_MIPS32R2_SEB_SEH)
+ #define USE_MIPS32R2_ALU_OPCODE_CONVERSION
+ #endif
++#if defined(HAVE_MIPS32R2_EXT_INS)
++#define USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
++#endif
+ 
+ 
+ /* NOTE: There's no need to do zero register optimizations since we have
+@@ -416,6 +422,13 @@ static void recSLL()
+ 			// Success.. we're done
+ 			return;
+ 		}
++	}
++#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION (SEB/SEH conversion needs buggy SEB/SEH)
++
++#ifdef USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
++	if (!branch)
++	{
++		const u32 next_opcode = OPCODE_AT(pc);
+ 
+ 		// If next opcode is SRL, see if we can convert this SLL,SRL sequence
+ 		//  into a newer MIPS32r2 'INS' instruction instead (inserting 0s).
+@@ -461,7 +474,7 @@ static void recSLL()
+ 			return;
+ 		}
+ 	}
+-#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#endif // USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 
+ 	REC_RTYPE_RD_RT_SA(SLL, _Rd_, _Rt_, _Sa_);
+ 
+@@ -475,7 +488,7 @@ static void recSRL()
+ 
+ 	const bool set_const = IsConst(_Rt_);
+ 
+-#ifdef USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#ifdef USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 	if (!branch)
+ 	{
+ 		const u32 next_opcode = OPCODE_AT(pc);
+@@ -579,7 +592,7 @@ static void recSRL()
+ 			return;
+ 		}
+ 	}
+-#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#endif // USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 
+ 	REC_RTYPE_RD_RT_SA(SRL, _Rd_, _Rt_, _Sa_);
+ 
+@@ -594,7 +607,7 @@ static void recSRA()
+ 
+ 	const bool set_const = IsConst(_Rt_);
+ 
+-#ifdef USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#ifdef USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 	if (!branch)
+ 	{
+ 		const u32 next_opcode = OPCODE_AT(pc);
+@@ -643,7 +656,7 @@ static void recSRA()
+ 			return;
+ 		}
+ 	}
+-#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#endif // USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 
+ 	REC_RTYPE_RD_RT_SA(SRA, _Rd_, _Rt_, _Sa_);
+ 
