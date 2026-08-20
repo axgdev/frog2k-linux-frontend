@@ -1746,6 +1746,32 @@ static void audio_sample(int16_t left, int16_t right)
 	(void)audio_batch(pair, 1);
 }
 
+/* Benchmark runs pass SF2000_UNCAPPED=1 on the kernel command line.  The
+ * flag bypasses the pause-menu fast-forward path so the core's own 1.5-sec
+ * START-hold menu is never triggered and the attract sequence runs
+ * unthrottled from the first frame.  Production boots never set it. */
+static int cmdline_has_uncapped(void)
+{
+	char line[512];
+	char *needle;
+	int fd;
+	ssize_t n;
+
+	fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, line, sizeof(line) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	line[n] = '\0';
+	needle = strstr(line, "SF2000_UNCAPPED=1");
+	if (!needle)
+		return 0;
+	return (needle == line || needle[-1] == ' ') &&
+		(needle[17] == '\0' || needle[17] == ' ' || needle[17] == '\n');
+}
+
 static void set_uncapped_mode(unsigned enable)
 {
 	char details[128];
@@ -2792,6 +2818,10 @@ int main(int argc, char **argv)
 	if (sf2000_performance_begin() != 0)
 		log_kmsg("performance journal acknowledgement timeout\n");
 	start_metrics_logging();
+	if (cmdline_has_uncapped()) {
+		log_kmsg("cmdline uncapped=1 enabling benchmark mode\n");
+		set_uncapped_mode(1);
+	}
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {

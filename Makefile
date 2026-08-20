@@ -361,18 +361,23 @@ $(MUFROG_SOURCE_ROOT)/libretro-common/include: $(MUFROG_SOURCE_ROOT)/libretro-co
 
 $(MUFROG_SOURCE_ROOT)/%.git: Makefile
 	mkdir -p '$(dir $@)'
-	if test -n '$(call mufrog_clone_ref,x,$(notdir $(@D)))'; then \
-		git ls-remote --exit-code '$(call mufrog_clone_url,x,$(notdir $(@D)))' \
-			'refs/heads/$(call mufrog_clone_ref,x,$(notdir $(@D)))' >/dev/null || { \
-			echo "QPSX branch not found: $(call mufrog_clone_ref,x,$(notdir $(@D)))" >&2; exit 2; \
-		}; \
-	fi
+	# Offline-first: when the requested rev is already present locally, do
+	# not touch the network at all (builds in containers/CI without github
+	# access must still work once sources are vendored).  The branch
+	# existence check only guards a genuine fetch.
 	test -d '$(@D)/.git' || \
 		git clone --filter=blob:none '$(call mufrog_clone_url,x,$(notdir $(@D)))' '$(@D)'
-	git -C '$(@D)' cat-file -e '$(call mufrog_clone_rev,x,$(notdir $(@D)))^{commit}' 2>/dev/null || \
+	git -C '$(@D)' cat-file -e '$(call mufrog_clone_rev,x,$(notdir $(@D)))^{commit}' 2>/dev/null || { \
+		if test -n '$(call mufrog_clone_ref,x,$(notdir $(@D)))'; then \
+			git ls-remote --exit-code '$(call mufrog_clone_url,x,$(notdir $(@D)))' \
+				'refs/heads/$(call mufrog_clone_ref,x,$(notdir $(@D)))' >/dev/null || { \
+				echo "QPSX branch not found: $(call mufrog_clone_ref,x,$(notdir $(@D)))" >&2; exit 2; \
+			}; \
+		fi; \
 		git -C '$(@D)' fetch --depth 1 \
 			'$(call mufrog_clone_url,x,$(notdir $(@D)))' \
-			'$(call mufrog_clone_rev,x,$(notdir $(@D)))'
+			'$(call mufrog_clone_rev,x,$(notdir $(@D)))'; \
+	}
 	git -C '$(@D)' checkout --detach '$(call mufrog_clone_rev,x,$(notdir $(@D)))'
 	git -C '$(@D)' submodule update --init --depth 1 --filter=blob:none --jobs '$(JOBS)'
 	touch '$@'
@@ -411,8 +416,21 @@ MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
 	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
+	-DQPSX_MIPS32R2_SAFE=1 \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
+# The HC15xx is MIPS32r1 with a known-working subset of r2 (frog-toolchain
+# PR #3): EXT, INS, CLZ, CLO, MOVN, MOVZ and multiply-accumulate work;
+# ROTR/ROTRV, SEB/SEH, WSBH, SYNCI and JR.HB/JALR.HB fault.  The dynarec's
+# EXT/INS codegen is gated on QPSX_MIPS32R2_SAFE (safe encodings only); the
+# compiler itself stays -march=mips32 so it cannot emit a buggy r2 opcode.
+# The GPU asm inner loops (QPSX_ENABLE_MIPS32R2, gpu_inner_mips32.S) are
+# off by default: a QEMU A/B in the Ridge Racer race scene showed the
+# per-pixel asm calls regress vs the inlined C fast path (87.5 vs 91.5 fps,
+# GPU 27% vs 20% of guest cycles).  QPSX_DEV_R2 keeps the knob for future
+# experiments; when enabled, only the dev core build compiles the asm object
+# (the pinned production Makefile.libretro gates it behind platform sf2000,
+# so enabling it for the production build would give undefined references).
 # QPSX allocates psxM once during init and releases it only during deinit, so
 # translated constant RAM addresses remain valid for the process lifetime.
 # QPSX is linked into a static PIE, so disabling shared-library semantic
@@ -585,8 +603,12 @@ qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 	body="$$(mktemp)"; \
 	trap 'rm -f "$$body"' EXIT HUP INT TERM; \
 	$(CROSS_COMPILE)objdump -d -m mips:isa32r2 '$(QPSX_AUDIT_EXECUTABLE)' > "$$body"; \
-	if grep -Eq '[[:space:]](ext|ins|rotr|rotrv|seb|seh|wsbh|rdhwr|synci|ehb|jr\.hb)[[:space:]]' "$$body"; then \
-		echo 'QPSX contains MIPS32r2 instructions forbidden on HC15xx MIPS32r1' >&2; \
+	# HC15xx is MIPS32r1 but a proven-working r2 subset (frog-toolchain
+	# PR #3) is licensed: EXT, INS, CLZ, CLO, MOVN, MOVZ, multiply-accumulate.
+	# The genuinely buggy encodings ROTR/ROTRV, SEB/SEH, WSBH, RDHWR, SYNCI,
+	# EHB and JR.HB/JALR.HB must never appear in the shipped core.
+	if grep -Eq '[[:space:]](rotr|rotrv|seb|seh|wsbh|rdhwr|synci|ehb|jr\.hb|jalr\.hb)[[:space:]]' "$$body"; then \
+		echo 'QPSX contains MIPS32r2 instructions that fault on HC15xx' >&2; \
 		exit 1; \
 	fi
 
@@ -598,6 +620,8 @@ qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 # no-op recursive make does not force the much larger frontend PIE to relink.
 # A compiler or flag change invalidates the QPSX objects; ordinary source edits
 # remain fully incremental.  ccache makes that required clean rebuild cheap.
+QPSX_DEV_R2 ?= 0
+
 qpsx-dev-core:
 	@test -d '$(QPSX_DEV_SOURCE)/.git' || { \
 		echo 'QPSX_DEV_SOURCE must name the qpsx fork checkout' >&2; exit 2; }
@@ -608,19 +632,20 @@ qpsx-dev-core:
 		'CXX=$(SF2000_CXX)' \
 		'AR=$(CROSS_COMPILE)ar' \
 		'QPSX_PLATFORM=$(QPSX_PLATFORM)' \
+		'QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
