@@ -1,7 +1,25 @@
+diff --git a/.gitignore b/.gitignore
+index c049a00..b7f215c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -17,3 +17,4 @@ Thumbs.db
+ 
+ # Logs
+ *.log
++.qpsx-build-config
 diff --git a/Makefile.libretro b/Makefile.libretro
-index 83f7c49..8169ae3 100644
+index 83f7c49..0ba0f85 100644
 --- a/Makefile.libretro
 +++ b/Makefile.libretro
+@@ -83,7 +83,7 @@ MORE_CFLAGS = -Os -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
+ 	-D$(shell echo $(GPU) | tr a-z A-Z) \
+ 	-D$(shell echo $(SPU) | tr a-z A-Z)
+ else
+-MORE_CFLAGS = -g -O2 -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
++MORE_CFLAGS = -O2 -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
+ 	-Isrc/plugin_lib \
+ 	-Isrc/port/$(PORT) \
+ 	-Ilibretro/core -Ilibretro/include \
 @@ -180,16 +180,20 @@ OBJS += \
  	src/gpu/gpulib/gpu.o \
  	src/gpu/gpulib/vout_port.o
@@ -26,10 +44,18 @@ index 83f7c49..8169ae3 100644
  # SPU - pcsxrearmed with libretro audio backend
  OBJS += \
 diff --git a/libretro/core/libretro-core.cpp b/libretro/core/libretro-core.cpp
-index dc82544..58963d6 100644
+index dc82544..07e5489 100644
 --- a/libretro/core/libretro-core.cpp
 +++ b/libretro/core/libretro-core.cpp
-@@ -3622,6 +3622,9 @@ void retro_init(void)
+@@ -38,6 +38,7 @@
+ 
+ #include "libretro.h"
+ #include "port.h"
++
+ #include "profiler.h"
+ #include "cdriso.h"  /* v258: CDDA conversion functions */
+ #include "plugin_lib/plugin_lib.h"  /* QPSX_280: For pl_init() */
+@@ -3622,6 +3623,9 @@ void retro_init(void)
      /* v377b: Reset average FPS tracking */
      fps_history_idx = 0;
      fps_history_count = 0;
@@ -39,7 +65,7 @@ index dc82544..58963d6 100644
      fps_avg_x100 = 0;
      for (int i = 0; i < FPS_AVG_SAMPLES; i++) fps_history[i] = 0;
  
-@@ -3854,13 +3857,17 @@ void retro_run(void)
+@@ -3854,13 +3858,17 @@ void retro_run(void)
  
      if (g_target_speed >= 100) {
          /* Normal speed - no throttling, just execute */
@@ -57,7 +83,7 @@ index dc82544..58963d6 100644
          } else {
              /* Skip emulation - frame dupe (output previous frame buffer) */
              if (SCREEN && real_video_cb) {
-@@ -3868,6 +3875,23 @@ void retro_run(void)
+@@ -3868,6 +3876,30 @@ void retro_run(void)
              }
          }
      }
@@ -66,21 +92,358 @@ index dc82544..58963d6 100644
 +    if ((run_frame_count % 60) == 0) {
 +        const ProfilerData *pd = profiler_get_data();
 +        if (pd && pd->enabled && pd->frame_count > 0) {
-+            XLOG("PROF total=%.2fms cpu=%.1f%% gte=%.1f%% gpu=%.1f%% spu=%.1f%% cd=%.1f%% video=%.1f%%",
++            XLOG("PROF f=%d total=%.2fms cpu=%.1f%% gte=%.1f%% gpu=%.1f%% (poly=%.1f%% spr=%.1f%% vram=%.1f%%) spu=%.1f%% cd=%.1f%% video=%.1f%%",
++                run_frame_count,
 +                pd->avg_ms[PROF_FRAME_TOTAL],
 +                pd->pct[PROF_CPU_TOTAL], pd->pct[PROF_GTE_TOTAL],
-+                pd->pct[PROF_GPU_TOTAL], pd->pct[PROF_SPU_TOTAL],
++                pd->pct[PROF_GPU_TOTAL],
++                pd->pct[PROF_GPU_POLY], pd->pct[PROF_GPU_SPRITE], pd->pct[PROF_GPU_VRAM],
++                pd->pct[PROF_SPU_TOTAL],
 +                pd->pct[PROF_CDROM_TOTAL], pd->pct[PROF_VIDEO_OUTPUT]);
 +            XLOG("PROF rtp=%u rtps=%u mvmva=%u nclip=%u",
 +                pd->cycles[PROF_GTE_RTPT] / pd->frame_count,
 +                pd->cycles[PROF_GTE_RTPS] / pd->frame_count,
 +                pd->cycles[PROF_GTE_MVMVA] / pd->frame_count,
 +                pd->cycles[PROF_GTE_NCLIP] / pd->frame_count);
++            XLOG("PROF cpu comp=%.1f%% memr=%.1f%% memw=%.1f%% exc=%.1f%% bios=%.1f%% icache=%.1f%%",
++                pd->pct[PROF_CPU_COMPILE], pd->pct[PROF_CPU_MEM_READ],
++                pd->pct[PROF_CPU_MEM_WRITE], pd->pct[PROF_CPU_EXCEPTION],
++                pd->pct[PROF_CPU_BIOS], pd->pct[PROF_CPU_ICACHE]);
 +        }
 +    }
  }
  
  bool retro_load_game(const struct retro_game_info *info)
+diff --git a/src/gpu/gpu_unai/gpu.cpp b/src/gpu/gpu_unai/gpu.cpp
+index b4ce7bc..03411f8 100644
+--- a/src/gpu/gpu_unai/gpu.cpp
++++ b/src/gpu/gpu_unai/gpu.cpp
+@@ -108,7 +108,7 @@ static void gpuReset(void)
+ 
+ 	// Configuration options
+ 	gpu_unai.config = gpu_unai_config_ext;
+-	gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
++	gpu_unai.ilace_mask = GpuEffectiveIlaceMask();
+ 	gpu_unai.frameskip.skipCount = gpu_unai.config.frameskip_count;
+ 
+ 	SetupLightLUT();
+@@ -601,14 +601,19 @@ void  GPU_writeStatus(u32 data)
+ 					//  480 vertical mode, or, optionally, force it for all video modes)
+ 
+ 					if (gpu_unai.DisplayArea[3] == 480) {
+-						if (gpu_unai.config.ilace_force) {
++						if (gpu_unai.config.half_res)
++							gpu_unai.ilace_mask = 1; // Every other field
++						else if (gpu_unai.config.ilace_force) {
+ 							gpu_unai.ilace_mask = 3; // Only need 1/4 of lines
+ 						} else {
+ 							gpu_unai.ilace_mask = 1; // Only need 1/2 of lines
+ 						}
+ 					} else {
+ 						// Vert resolution changed from 480 to lower one
+-						gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
++						if (gpu_unai.config.half_res)
++							gpu_unai.ilace_mask = 1; // 240p: skip every other line
++						else
++							gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
+ 					}
+ 				} else {
+ 					gpu_unai.ilace_mask = 0;
+diff --git a/src/gpu/gpu_unai/gpu.h b/src/gpu/gpu_unai/gpu.h
+index 624f4e2..0b25237 100644
+--- a/src/gpu/gpu_unai/gpu.h
++++ b/src/gpu/gpu_unai/gpu.h
+@@ -38,6 +38,12 @@ struct gpu_unai_config_t {
+ 	                          //  Normally 0. Value '1' will skip rendering
+ 	                          //  odd lines.
+ 
++	uint8_t half_res:1;       // QPSX: Render only every other line in 240p
++	                          //  (and every other field in 480i), halving
++	                          //  rasterizer fill rate. The host upscaler
++	                          //  doubles the compacted framebuffer back to
++	                          //  full screen, so output stays 320x240-ish.
++
+ 	uint8_t pixel_size:2;     // v346: Pixel doubling mode for vout_port ONLY
+ 	                          //  0=1x1 (normal), 1=2x1 (line double),
+ 	                          //  2=2x2 (pixel double). Separate from ilace_force
+diff --git a/src/gpu/gpu_unai/gpu_raster_polygon.h b/src/gpu/gpu_unai/gpu_raster_polygon.h
+index 1a6e71c..726d857 100644
+--- a/src/gpu/gpu_unai/gpu_raster_polygon.h
++++ b/src/gpu/gpu_unai/gpu_raster_polygon.h
+@@ -18,6 +18,8 @@
+ *   51 Franklin Street, Fifth Floor, Boston, MA 02111-1307 USA.           *
+ ***************************************************************************/
+ 
++#include "profiler.h"
++
+ //senquack - NOTE: GPU Unai poly routines have been rewritten/adapted
+ // from DrHell routines to fix multiple issues. See README_senquack.txt
+ 
+@@ -214,6 +216,7 @@ gpuDrawPolyF - Flat-shaded, untextured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyF(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	// Set up bgr555 color to be used across calls in inner driver
+ 	gpu_unai.PixelData = GPU_RGB16(packet.U4[0]);
+ 
+@@ -358,6 +361,7 @@ void gpuDrawPolyF(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -365,6 +369,7 @@ gpuDrawPolyFT - Flat-shaded, textured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyFT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	// r8/g8/b8 used if texture-blending & dithering is applied (24-bit light)
+ 	gpu_unai.r8 = packet.U1[0];
+ 	gpu_unai.g8 = packet.U1[1];
+@@ -691,6 +696,7 @@ void gpuDrawPolyFT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_qua
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -698,6 +704,7 @@ gpuDrawPolyG - Gouraud-shaded, untextured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyG(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	PolyVertex vbuf[4];
+ 	polyInitVertexBuffer(vbuf, packet, POLYTYPE_G, is_quad);
+ 
+@@ -1039,6 +1046,7 @@ void gpuDrawPolyG(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -1046,6 +1054,7 @@ gpuDrawPolyGT - Gouraud-shaded, textured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyGT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	PolyVertex vbuf[4];
+ 	polyInitVertexBuffer(vbuf, packet, POLYTYPE_GT, is_quad);
+ 
+@@ -1445,4 +1454,5 @@ void gpuDrawPolyGT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_qua
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+diff --git a/src/gpu/gpu_unai/gpu_unai.h b/src/gpu/gpu_unai/gpu_unai.h
+index 8eeff37..6711d9b 100644
+--- a/src/gpu/gpu_unai/gpu_unai.h
++++ b/src/gpu/gpu_unai/gpu_unai.h
+@@ -388,4 +388,16 @@ static inline bool LineSkipEnabled()
+ 	return true;
+ }
+ 
++/*
++ * QPSX half-res: the effective line-skip mask for the current config.
++ * half_res skips every other line/field; ilace_force is the stock
++ * every-other-line knob. do_cmd_list re-applies this per command list
++ * (resolution-change events are not reliable on their own), so half_res
++ * must be folded in here or the rasterizers never see it.
++ */
++static inline int GpuEffectiveIlaceMask(void)
++{
++	return (gpu_unai.config.half_res || gpu_unai.config.ilace_force) ? 1 : 0;
++}
++
+ #endif // GPU_UNAI_H
+diff --git a/src/gpu/gpu_unai/gpulib_if.cpp b/src/gpu/gpu_unai/gpulib_if.cpp
+index 162aabf..ea9392a 100644
+--- a/src/gpu/gpu_unai/gpulib_if.cpp
++++ b/src/gpu/gpu_unai/gpulib_if.cpp
+@@ -92,11 +92,17 @@ int renderer_init(void)
+   // Configuration options
+   GPUIF_LOG("Setting config from gpu_unai_config_ext...");
+   gpu_unai.config = gpu_unai_config_ext;
++#ifdef GPU_UNAI_HALF_RES
++  // QPSX: half-res rasterization by default on the SF2000 - the host GE
++  // upscaler doubles the compacted framebuffer back to full screen, so
++  // this is a pure fill-rate win. Toggle by dropping the define.
++  gpu_unai.config.half_res = 1;
++#endif
+   //senquack - disabled, not sure this is needed and would require modifying
+   // sprite-span functions, perhaps unnecessarily. No Abe Oddysey hack was
+   // present in latest PCSX4ALL sources we were using.
+   //gpu_unai.config.enableAbbeyHack = gpu_unai_config_ext.abe_hack;
+-  gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
++  gpu_unai.ilace_mask = GpuEffectiveIlaceMask();
+   GPUIF_LOG("Config set OK");
+ 
+ #ifdef GPU_UNAI_USE_INT_DIV_MULTINV
+@@ -153,19 +159,27 @@ void renderer_notify_res_change(void)
+     //  480 vertical mode, or, optionally, force it for all video modes)
+ 
+     if (gpu.screen.vres == 480) {
+-      if (gpu_unai.config.ilace_force) {
++      if (gpu_unai.config.half_res) {
++        gpu_unai.ilace_mask = 1; // Every other field (half the lines)
++      } else if (gpu_unai.config.ilace_force) {
+         gpu_unai.ilace_mask = 3; // Only need 1/4 of lines
+       } else {
+         gpu_unai.ilace_mask = 1; // Only need 1/2 of lines
+       }
+     } else {
+       // Vert resolution changed from 480 to lower one
+-      gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
++      if (gpu_unai.config.half_res)
++        gpu_unai.ilace_mask = 1; // 240p: skip every other line
++      else
++        gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
+     }
+   } else {
+     gpu_unai.ilace_mask = 0;
+   }
+ 
++  /* Let vout_update() compact the same lines the rasterizers skipped. */
++  gpu_out_ilace_mask = gpu_unai.ilace_mask;
++
+   /*
+   printf("res change hres: %d   vres: %d   depth: %d   ilace_mask: %d\n",
+       gpu.screen.hres, gpu.screen.vres, gpu.status.rgb24 ? 24 : 15,
+@@ -249,8 +263,9 @@ int do_cmd_list(uint32_t *list, int list_len, int *last_cmd)
+   uint32_t *list_end = list + list_len;
+ 
+   //TODO: set ilace_mask when resolution changes instead of every time,
+-  // eliminate #ifdef below.
+-  gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
++  // eliminate #ifdef below. QPSX: fold half_res in here too, otherwise
++  // this per-list reset clobbers the res-change mask before rasterization.
++  gpu_unai.ilace_mask = GpuEffectiveIlaceMask();
+ 
+ #ifdef HAVE_PRE_ARMV7 /* XXX */
+   gpu_unai.ilace_mask |= gpu.status.interlace;
+diff --git a/src/gpu/gpulib/vout_port.cpp b/src/gpu/gpulib/vout_port.cpp
+index 5897ad3..efc8c11 100644
+--- a/src/gpu/gpulib/vout_port.cpp
++++ b/src/gpu/gpulib/vout_port.cpp
+@@ -19,6 +19,12 @@
+ #include "port.h"
+ #include "gpu.h"
+ 
++/* Set by vout_update(): the line-skip mask the rasterizers used and the
++ * number of compacted output rows written. The port layer presents only
++ * those rows and the host upscaler doubles them back to full screen. */
++extern volatile int gpu_out_ilace_mask;
++extern volatile int gpu_out_height;
++
+ ///////////////////////////////////////////////////////////////////////////////
+ // BLITTERS TAKEN FROM gpu_unai/gpu_blit.h
+ // GPU Blitting code with rescale and interlace support.
+@@ -444,20 +450,33 @@ void vout_update(void)
+ 	int incY = (h0 == 480) ? 2 : 1;
+ 	h0 = ((h0 == 480) ? 2048 : 1024);
+ 
++	/* QPSX half-res: the rasterizers skip every other line (ilace_mask),
++	 * so compact the output rows and let the host upscaler double them.
++	 * In 480i, incY=2 already yields the full even field, so every row
++	 * is written and the output stays full height. */
++	const int li = gpu_out_ilace_mask;
++	int out_lines = 0;
++
+ 	switch ( w0 )
+ 	{
+ 		case 256: {
+ 			for (int y1=y0+h1; y0<y1; y0+=incY) {
+-				GPU_BlitWWDWW(src16 + src16_offs, dst16, isRGB24);
+-				dst16 += VIDEO_WIDTH;
++				if ((y0 & li) == 0) {
++					GPU_BlitWWDWW(src16 + src16_offs, dst16, isRGB24);
++					dst16 += VIDEO_WIDTH;
++					out_lines++;
++				}
+ 				src16_offs = (src16_offs + h0) & src16_offs_msk;
+ 			}
+ 		} break;
+ 
+ 		case 368: {
+ 			for (int y1=y0+h1; y0<y1; y0+=incY) {
+-				GPU_BlitWWWWWWWWS(src16 + src16_offs, dst16, isRGB24, 4);
+-				dst16 += VIDEO_WIDTH;
++				if ((y0 & li) == 0) {
++					GPU_BlitWWWWWWWWS(src16 + src16_offs, dst16, isRGB24, 4);
++					dst16 += VIDEO_WIDTH;
++					out_lines++;
++				}
+ 				src16_offs = (src16_offs + h0) & src16_offs_msk;
+ 			}
+ 		} break;
+@@ -465,37 +484,53 @@ void vout_update(void)
+ 		case 320: {
+ 			src16_offs &= ~1;
+ 			for (int y1=y0+h1; y0<y1; y0+=incY) {
+-				GPU_BlitWW(src16 + src16_offs, dst16, isRGB24);
+-				dst16 += VIDEO_WIDTH;
++				if ((y0 & li) == 0) {
++					GPU_BlitWW(src16 + src16_offs, dst16, isRGB24);
++					dst16 += VIDEO_WIDTH;
++					out_lines++;
++				}
+ 				src16_offs = (src16_offs + h0) & src16_offs_msk;
+ 			}
+ 		} break;
+ 
+ 		case 384: {
+ 			for (int y1=y0+h1; y0<y1; y0+=incY) {
+-				GPU_BlitWWWWWS(src16 + src16_offs, dst16, isRGB24);
+-				dst16 += VIDEO_WIDTH;
++				if ((y0 & li) == 0) {
++					GPU_BlitWWWWWS(src16 + src16_offs, dst16, isRGB24);
++					dst16 += VIDEO_WIDTH;
++					out_lines++;
++				}
+ 				src16_offs = (src16_offs + h0) & src16_offs_msk;
+ 			}
+ 		} break;
+ 
+ 		case 512: {
+ 			for (int y1=y0+h1; y0<y1; y0+=incY) {
+-				GPU_BlitWWSWWSWS(src16 + src16_offs, dst16, isRGB24);
+-				dst16 += VIDEO_WIDTH;
++				if ((y0 & li) == 0) {
++					GPU_BlitWWSWWSWS(src16 + src16_offs, dst16, isRGB24);
++					dst16 += VIDEO_WIDTH;
++					out_lines++;
++				}
+ 				src16_offs = (src16_offs + h0) & src16_offs_msk;
+ 			}
+ 		} break;
+ 
+ 		case 640: {
+ 			for (int y1=y0+h1; y0<y1; y0+=incY) {
+-				GPU_BlitWS(src16 + src16_offs, dst16, isRGB24);
+-				dst16 += VIDEO_WIDTH;
++				if ((y0 & li) == 0) {
++					GPU_BlitWS(src16 + src16_offs, dst16, isRGB24);
++					dst16 += VIDEO_WIDTH;
++					out_lines++;
++				}
+ 				src16_offs = (src16_offs + h0) & src16_offs_msk;
+ 			}
+ 		} break;
+ 	}
+ 
++	/* With line-skipping the output rows are compacted; without it the
++	 * port presents its full fixed-height buffer exactly as before. */
++	gpu_out_height = li ? out_lines : 0;
++
+ 	video_flip();
+ }
+ 
 diff --git a/src/gte.cpp b/src/gte.cpp
 index 75295aa..497d215 100644
 --- a/src/gte.cpp
@@ -154,16 +517,73 @@ index 75295aa..497d215 100644
  }
  
  void gteAVSZ3(void) {
+diff --git a/src/port/libretro/port.cpp b/src/port/libretro/port.cpp
+index 401c4b1..a8c78e2 100644
+--- a/src/port/libretro/port.cpp
++++ b/src/port/libretro/port.cpp
+@@ -36,6 +36,12 @@ extern volatile int skip_video_output;
+ /* v295: GPU frame counter - counts ACTUAL rendered frames (not skipped/duped) */
+ volatile int gpu_frame_count = 0;
+ 
++/* QPSX half-res: line-skip mask applied by vout_update() and the height of
++ * the compacted output rows it produced. video_flip() presents only the
++ * compacted rows; the host upscaler restores full screen size. */
++volatile int gpu_out_ilace_mask = 0;
++volatile int gpu_out_height = SCREEN_HEIGHT;
++
+ static unsigned tick_counter = 0;
+ 
+ unsigned get_ticks(void) { return tick_counter++; }
+@@ -97,12 +103,15 @@ void video_flip(void)
+      * to reuse previous frame. This is faster than sending same data again.
+      * IMPORTANT: We must still call video_cb for profiler timing to work!
+      */
++    int out_height = gpu_out_height;
++    if (out_height <= 0 || out_height > SCREEN_HEIGHT)
++        out_height = SCREEN_HEIGHT;
+     if (skip_video_output) {
+-        video_cb(NULL, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
++        video_cb(NULL, SCREEN_WIDTH, out_height, SCREEN_WIDTH * 2);
+     } else if (SCREEN) {
+         /* v295: Count ACTUAL rendered frames (not skipped) */
+         gpu_frame_count++;
+-        video_cb(SCREEN, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
++        video_cb(SCREEN, SCREEN_WIDTH, out_height, SCREEN_WIDTH * 2);
+     }
+ }
+ 
+diff --git a/src/port/libretro/port.h b/src/port/libretro/port.h
+index af50db8..913220f 100644
+--- a/src/port/libretro/port.h
++++ b/src/port/libretro/port.h
+@@ -39,6 +39,12 @@ static inline int usleep(unsigned usec) {
+ unsigned get_ticks(void);
+ void wait_ticks(unsigned s);
+ 
++/* QPSX half-res: line-skip mask the rasterizers used, and the compacted
++ * output height vout_update() produced. video_flip() presents only the
++ * compacted rows; the host upscaler restores full screen size. */
++extern volatile int gpu_out_ilace_mask;
++extern volatile int gpu_out_height;
++
+ /* Input */
+ void pad_update(void);
+ unsigned short pad_read(int num);
 diff --git a/src/profiler.h b/src/profiler.h
-index 1d4cfc5..e23286e 100644
+index 1d4cfc5..e84826c 100644
 --- a/src/profiler.h
 +++ b/src/profiler.h
-@@ -29,7 +29,9 @@
+@@ -27,9 +27,12 @@
+ /*
+  * v368: PROFILER MASTER SWITCH
   * Set to 1 to enable profiling (adds overhead to every mem access)
-  * Set to 0 for production builds (zero overhead)
+- * Set to 0 for production builds (zero overhead)
++ * Set to 0 for production builds (zero overhead). The frontend build
++ * overrides this with -DQPSX_PROFILER_ENABLED=0 for the production core.
   */
+-#define QPSX_PROFILER_ENABLED 0
 +#ifndef QPSX_PROFILER_ENABLED
- #define QPSX_PROFILER_ENABLED 0
++#define QPSX_PROFILER_ENABLED 1
 +#endif
  
  #include <stdint.h>
@@ -297,3 +717,80 @@ index 2f62c49..3bb473a 100644
  
  	REC_RTYPE_RD_RT_SA(SRA, _Rd_, _Rt_, _Sa_);
  
+diff --git a/src/recompiler/mips/rec_lsu.cpp.h b/src/recompiler/mips/rec_lsu.cpp.h
+index 584761e..6541177 100644
+--- a/src/recompiler/mips/rec_lsu.cpp.h
++++ b/src/recompiler/mips/rec_lsu.cpp.h
+@@ -1021,9 +1021,33 @@ static void general_loads_stores(const int  count,
+ 						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
+ 						break;
+ 					case 0xac000000: // SW
+-						ADDIU(MIPSREG_A0, rs, op_imm);
+-						JAL(write_func[WIDTH_32]);
+-						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
++						// QPSX scratchpad fast path: 0x1f80_0000..0x1f80_03ff maps
++						// to psxH[addr & 0xffff] (scratchpad is the hot GPU-FIFO
++						// region for PS1 3D games). The helper-call fallback below
++						// still handles hardware registers and mirror regions.
++						{
++							u32 *label_slow_1 = 0, *label_slow_2 = 0, *label_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							SRL(TEMP_1, MIPSREG_A0, 16);         // t = addr >> 16
++							XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++							label_slow_1 = (u32 *)recMem;
++							BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++							ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++							SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++							label_slow_2 = (u32 *)recMem;
++							BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++							LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++							ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + m
++							LSU_OPCODE(0xac000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // SW rt, lo(psxH)(temp_3)
++							label_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(label_slow_1);
++							fixup_branch(label_slow_2);
++							JAL(write_func[WIDTH_32]);           // helper: addr already in $a0
++							MOV(MIPSREG_A1, rt);                 // <BD> value arg
++							fixup_branch(label_done);
++						}
+ 						break;
+ 					case 0xa8000000: // SWL
+ 					case 0xb8000000: // SWR
+@@ -1145,10 +1169,31 @@ static void general_loads_stores(const int  count,
+ 						}
+ 						break;
+ 					case 0x8c000000: // LW
+-						JAL(read_func[WIDTH_32]);   // result in MIPSREG_V0
+-						ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
+-						if (op_rt) {
+-							MOV(rt, MIPSREG_V0);
++						// QPSX scratchpad fast path (see the SW case above).
++						{
++							u32 *label_slow_1 = 0, *label_slow_2 = 0, *label_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							SRL(TEMP_1, MIPSREG_A0, 16);         // t = addr >> 16
++							XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++							label_slow_1 = (u32 *)recMem;
++							BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++							ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++							SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++							label_slow_2 = (u32 *)recMem;
++							BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++							LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++							ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + m
++							LSU_OPCODE(0x8c000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // LW rt, lo(psxH)(temp_3)
++							label_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(label_slow_1);
++							fixup_branch(label_slow_2);
++							JAL(read_func[WIDTH_32]);            // helper: addr already in $a0
++							NOP();                               // <BD> (result not ready yet)
++							if (op_rt)
++								MOV(rt, MIPSREG_V0);
++							fixup_branch(label_done);
+ 						}
+ 						break;
+ 					case 0x88000000: // LWL

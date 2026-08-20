@@ -416,12 +416,22 @@ ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
 endif
 QPSX_OPTIMIZE ?= -O2
-MUFROG_qpsx_EXTRA_CFLAGS := -Isrc/ -Isrc/spu/spu_pcsxrearmed \
+# The emulated-cycle profiler costs ~1/3 of frame time even when disabled at
+# runtime, so the production core compiles it out (-DQPSX_PROFILER_ENABLED=0,
+# zero overhead). The dev core keeps it on for benchmark breakdowns.
+QPSX_PROFILER ?= 0
+# Half-resolution GPU rasterization: skip every other scanline and let the GE
+# upscaler double the compacted frame back to full screen. Halves the native
+# fill cost; set QPSX_HALF_RES=0 to A/B against full resolution.
+QPSX_HALF_RES ?= 1
+MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
 	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
 	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
 	-DQPSX_MIPS32R2_SAFE=1 \
+	$(if $(filter 0,$(QPSX_HALF_RES)),,-DGPU_UNAI_HALF_RES) \
+	-DQPSX_PROFILER_ENABLED=$(QPSX_PROFILER) \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
 # The HC15xx is MIPS32r1 with a known-working subset of r2 (frog-toolchain
@@ -603,15 +613,15 @@ elf-audit:
 
 QPSX_AUDIT_EXECUTABLE ?= build/sf2000-qpsx
 
+# HC15xx is MIPS32r1 but a proven-working r2 subset (frog-toolchain PR #3)
+# is licensed: EXT, INS, CLZ, CLO, MOVN, MOVZ, multiply-accumulate.  The
+# genuinely buggy encodings ROTR/ROTRV, SEB/SEH, WSBH, RDHWR, SYNCI, EHB and
+# JR.HB/JALR.HB must never appear in the shipped core.
 qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 	@set -e; \
 	body="$$(mktemp)"; \
 	trap 'rm -f "$$body"' EXIT HUP INT TERM; \
 	$(CROSS_COMPILE)objdump -d -m mips:isa32r2 '$(QPSX_AUDIT_EXECUTABLE)' > "$$body"; \
-	# HC15xx is MIPS32r1 but a proven-working r2 subset (frog-toolchain
-	# PR #3) is licensed: EXT, INS, CLZ, CLO, MOVN, MOVZ, multiply-accumulate.
-	# The genuinely buggy encodings ROTR/ROTRV, SEB/SEH, WSBH, RDHWR, SYNCI,
-	# EHB and JR.HB/JALR.HB must never appear in the shipped core.
 	if grep -Eq '[[:space:]](rotr|rotrv|seb|seh|wsbh|rdhwr|synci|ehb|jr\.hb|jalr\.hb)[[:space:]]' "$$body"; then \
 		echo 'QPSX contains MIPS32r2 instructions that fault on HC15xx' >&2; \
 		exit 1; \
@@ -626,7 +636,9 @@ qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 # A compiler or flag change invalidates the QPSX objects; ordinary source edits
 # remain fully incremental.  ccache makes that required clean rebuild cheap.
 QPSX_DEV_R2 ?= 0
+QPSX_DEV_PROFILER ?= 1
 
+qpsx-dev-core: QPSX_PROFILER := $(QPSX_DEV_PROFILER)
 qpsx-dev-core:
 	@test -d '$(QPSX_DEV_SOURCE)/.git' || { \
 		echo 'QPSX_DEV_SOURCE must name the qpsx fork checkout' >&2; exit 2; }
@@ -643,14 +655,14 @@ qpsx-dev-core:
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
