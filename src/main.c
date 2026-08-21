@@ -204,6 +204,10 @@ static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
 static unsigned run_frames;
+/* Monotonic retro_run sequence used to key diagnostic windows.  The legacy
+ * run_frames field is reset with the ordinary metric interval, so it cannot
+ * identify which frames a rolling tail sample actually covered. */
+static uint64_t retro_run_total;
 static struct timespec metrics_start;
 /*
  * uClibc's MIPS getrusage wrapper is not ABI-compatible with the kernel on
@@ -303,6 +307,8 @@ static unsigned frame_tail_percentile(const uint16_t *hist,
 
 static void frame_tail_emit(void)
 {
+	uint64_t window_start;
+	uint64_t end_frame;
 	unsigned frame_tail_p95;
 	unsigned frame_tail_p98;
 	unsigned frame_tail_p99;
@@ -315,10 +321,13 @@ static void frame_tail_emit(void)
 	unsigned core_tail_avg;
 	unsigned frame_tail_p999_valid;
 	unsigned core_tail_p999_valid;
-	char details[448];
+	char details[512];
 
 	if (!frame_tail_runs)
 		return;
+	end_frame = retro_run_total;
+	window_start = end_frame >= frame_tail_samples ?
+		end_frame - frame_tail_samples + 1u : 0u;
 	frame_tail_p95 = frame_tail_percentile(frame_tail_hist,
 		frame_tail_samples, 950u);
 	frame_tail_p98 = frame_tail_percentile(frame_tail_hist,
@@ -344,8 +353,9 @@ static void frame_tail_emit(void)
 	core_tail_avg = core_tail_samples ?
 		(unsigned)(core_tail_sum_us / core_tail_samples) : 0u;
 	snprintf(details, sizeof(details),
-		"frame-tail run_frames=%u video_frames=%u samples=%u avg_us=%u max_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u p999_valid=%u p999_min_samples=1000 core_samples=%u core_avg_us=%u core_max_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u core_p999_valid=%u core_p999_min_samples=1000\n",
-		frame_tail_runs, video_callbacks, frame_tail_samples,
+		"frame-tail window_start=%" PRIu64 " end_frame=%" PRIu64 " window_samples=%u run_frames=%u video_frames=%u samples=%u avg_us=%u max_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u p999_valid=%u p999_min_samples=1000 core_samples=%u core_avg_us=%u core_max_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u core_p999_valid=%u core_p999_min_samples=1000\n",
+		window_start, end_frame, frame_tail_samples, frame_tail_runs,
+		video_callbacks, frame_tail_samples,
 		frame_tail_avg, frame_tail_max_us, frame_tail_p95, frame_tail_p98,
 		frame_tail_p99, frame_tail_p999,
 		frame_tail_p999_valid, core_tail_samples, core_tail_avg,
@@ -3662,6 +3672,7 @@ int main(int argc, char **argv)
 #endif
 		benchmark_frame_count++;
 		run_frames++;
+		retro_run_total++;
 		if (state_resume_probe_frames) {
 			char details[96];
 			unsigned completed = 3u - state_resume_probe_frames;

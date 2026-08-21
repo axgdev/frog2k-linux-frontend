@@ -654,6 +654,10 @@ QPSX_RUNTIME_TELEMETRY ?= 1
 # runtime, so the production core compiles it out (-DQPSX_PROFILER_ENABLED=0,
 # zero overhead). The dev core keeps it on for benchmark breakdowns.
 QPSX_PROFILER ?= 0
+# Canonical profile identity. Legacy ad-hoc targets retain their existing
+# build tags, while named profiles include this value in both the core's
+# startup build_id and the configuration fingerprint.
+QPSX_PROFILE_ID ?= legacy
 # Half-resolution GPU rasterization was tried and reverted (run 384): it
 # degraded the image for a couple of fps, and the full-res scratchpad dynarec
 # inlines delivered far more. Keep the profiler switch for dev A/B.
@@ -676,6 +680,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'gp=$(QPSX_MIPS_DISPATCH_CACHE_GP)' 'gp_abi=$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI)' \
 	'bl=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)' 'frame_bl=$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY)' \
 	'fold=$(QPSX_MIPS_FOLD_DIRECT_JUMPS)/$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)/$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)' \
+	'profile_id=$(QPSX_PROFILE_ID)' 'tail_metrics=$(SF2000_FRAME_TAIL_METRICS)' \
 	'raw=$(QPSX_GE_RAW_VRAM)' 'telemetry=$(QPSX_RUNTIME_TELEMETRY)' \
 	'profiler=$(QPSX_PROFILER)' 'gpu_fixed=$(QPSX_GPU_FIXED_FAST_PATH)' \
 	'gpu_light=$(QPSX_GPU_FIXED_LIGHTING)' 'linear4=$(QPSX_GPU_LINEAR_4BPP)' \
@@ -807,7 +812,7 @@ MUFROG_qpsx_EXTRA_CXXFLAGS := \
 # a real rebuild.
 QPSX_PROD_FLAGS_STAMP := build/mufrog/qpsx.compiler.flags
 
-$(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
+$(QPSX_PROD_FLAGS_STAMP): FORCE Makefile mk/qpsx-profiles.mk $(TOOLCHAIN_STAMP)
 	mkdir -p '$(@D)'
 	@set -eu; \
 	tmp='$@.tmp'; \
@@ -831,6 +836,8 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)'; \
 		printf 'QPSX_RUNTIME_TELEMETRY=%s\n' '$(QPSX_RUNTIME_TELEMETRY)'; \
+		printf 'QPSX_PROFILE_ID=%s\n' '$(QPSX_PROFILE_ID)'; \
+		printf 'SF2000_FRAME_TAIL_METRICS=%s\n' '$(SF2000_FRAME_TAIL_METRICS)'; \
 		printf 'QPSX_GTE_HOT_O3=%s\n' '$(QPSX_GTE_HOT_O3)'; \
 		printf 'QPSX_GTE_OPCODE_COUNTER=%s\n' '$(QPSX_GTE_OPCODE_COUNTER)'; \
 		printf 'QPSX_GTE_INTPL_OPTIMIZE=%s\n' '$(QPSX_GTE_INTPL_OPTIMIZE)'; \
@@ -963,6 +970,7 @@ QPSX_DEV_LOCK ?= build/qpsx-dev/.source-build.lock
 QPSX_DEV_LOCK_HELD ?= 0
 QPSX_VARIANTS_DIR ?= build/qpsx-variants
 QPSX_GP0_CANDIDATES_DIR ?= build/qpsx-gp0-candidates
+include mk/qpsx-profiles.mk
 JS2300_RUNTIME := build/js2300/libjs2300.a
 JS2300_BUILD_STAMP := build/.js2300-$(JS2300_REV).stamp
 JS2300_SOURCE_STAMP := build/.js2300-sources-$(JS2300_REV).stamp
@@ -1170,7 +1178,7 @@ qpsx-dev-core:
 	flock '$(QPSX_DEV_LOCK)' '$(MAKE)' --no-print-directory qpsx-dev-core-unlocked
 
 qpsx-dev-core-unlocked: QPSX_PROFILER := $(QPSX_DEV_PROFILER)
-qpsx-dev-core-unlocked:
+qpsx-dev-core-unlocked: mk/qpsx-profiles.mk
 	@test -d '$(QPSX_DEV_SOURCE)/.git' || { \
 		echo 'QPSX_DEV_SOURCE must name the qpsx fork checkout' >&2; exit 2; }
 	mkdir -p '$(dir $(QPSX_DEV_RAW))'
@@ -1195,6 +1203,8 @@ qpsx-dev-core-unlocked:
 		'QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK)' \
 		'QPSX_BUILD_TAG=$(QPSX_BUILD_TAG)' \
 		'QPSX_BUILD_FINGERPRINT=$(QPSX_BUILD_FINGERPRINT)' \
+		'QPSX_PROFILE_ID=$(QPSX_PROFILE_ID)' \
+		'SF2000_FRAME_TAIL_METRICS=$(SF2000_FRAME_TAIL_METRICS)' \
 		'QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK)' \
 		'QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)' \
 		'QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)' \
@@ -1521,24 +1531,21 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-phase:
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-phase-dev'
 
 # Equal-layout control/candidate pair for the established pre-adaptive-DMA
-# recipe.  The only performance knob that differs is the compact ASM read
-# helper; all DMA, INTPL, and RTPT candidates are explicitly disabled.  The
-# fixed-length suffixes keep the tagged core layout comparable and the
-# manifest records both executable and linker-map hashes.
+# recipe.  This historical target remains a compatibility alias for the
+# canonical tail profiles; the canonical targets additionally emit a complete
+# profile manifest, while these legacy filenames and map checks remain stable.
 qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-asm-reads-sweep:
 	mkdir -p '$(QPSX_VARIANTS_DIR)'
-	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
-		QPSX_ASM_READS=0 QPSX_FASTMEM_BUILD_SUFFIX=-asmreads-ctrl \
-		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-asmreads-ctrl'
-	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+	$(MAKE) --no-print-directory qpsx-profile-frontier-tail-control
+	cp '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-frontier-tail-control' \
 		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control'
-	cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control.map'
-	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
-		QPSX_ASM_READS=1 QPSX_FASTMEM_BUILD_SUFFIX=-asmreads-fast \
-		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-asmreads-fast'
-	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+	cp '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-frontier-tail-control.map' \
+		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control.map'
+	$(MAKE) --no-print-directory qpsx-profile-frontier-tail-candidate
+	cp '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-frontier-tail-candidate' \
 		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate'
-	cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate.map'
+	cp '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-frontier-tail-candidate.map' \
+		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate.map'
 	@set -eu; \
 	if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control.map'; then \
 		echo 'ASM-read control map unexpectedly references psxMemRead*_asm' >&2; exit 1; \
