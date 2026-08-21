@@ -460,6 +460,10 @@ QPSX_MIPS_PERSISTENT_RETURN_RA ?= 1
 # hide direct-mapped D-cache misses on the physical HC15xx, but is disabled by
 # default because a cache hit makes the hint unnecessary work.
 QPSX_MIPS_DISPATCH_PREFETCH ?= 0
+# Keep the NOMMU dispatch-cache base in $gp for the indirect dispatcher. This
+# removes one stack load per block without consuming a guest register-cache
+# slot; leave disabled until a physical A/B confirms the ABI-safe path.
+QPSX_MIPS_DISPATCH_CACHE_GP ?= 0
 # Fold a bounded chain of short forward direct jumps into one translated
 # superblock. Eight links/1 KiB is the best QEMU hot-scene point; keep both
 # limits configurable for compatibility/per-game A/B testing.
@@ -550,6 +554,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_FAST_MEM_CONVERT=$(QPSX_MIPS_FAST_MEM_CONVERT) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
 	-DQPSX_MIPS_DISPATCH_PREFETCH=$(QPSX_MIPS_DISPATCH_PREFETCH) \
+	-DQPSX_MIPS_DISPATCH_CACHE_GP=$(QPSX_MIPS_DISPATCH_CACHE_GP) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES) \
@@ -603,6 +608,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GTE_NATIVE_DIVIDE=%s\n' '$(QPSX_GTE_NATIVE_DIVIDE)'; \
 		printf 'QPSX_MIPS_PSMEM_REG=%s\n' '$(QPSX_MIPS_PSMEM_REG)'; \
 		printf 'QPSX_MIPS_PERSISTENT_RETURN_RA=%s\n' '$(QPSX_MIPS_PERSISTENT_RETURN_RA)'; \
+		printf 'QPSX_MIPS_DISPATCH_CACHE_GP=%s\n' '$(QPSX_MIPS_DISPATCH_CACHE_GP)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)'; \
