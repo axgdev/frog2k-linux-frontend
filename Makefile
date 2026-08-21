@@ -435,6 +435,10 @@ QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
 endif
+# Short, no-space identifier emitted in the core's startup fingerprint. Set
+# this for every physical A/B artifact so logs cannot confuse otherwise
+# identical flag sets or stale SD-card copies.
+QPSX_BUILD_TAG ?= untagged
 QPSX_OPTIMIZE ?= -O2
 # Optional size optimization for only the large Unai GPU translation units.
 # Leave the recompiler/GTE/audio at the measured -O2 default.
@@ -560,6 +564,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_DISPATCH_PREFETCH=$(QPSX_MIPS_DISPATCH_PREFETCH) \
 	-DQPSX_MIPS_DISPATCH_CACHE_GP=$(QPSX_MIPS_DISPATCH_CACHE_GP) \
 	-DQPSX_MIPS_DISPATCH_BRANCH_LIKELY=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY) \
+	-DQPSX_BUILD_TAG=\"$(QPSX_BUILD_TAG)\" \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES) \
@@ -615,6 +620,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_PERSISTENT_RETURN_RA=%s\n' '$(QPSX_MIPS_PERSISTENT_RETURN_RA)'; \
 		printf 'QPSX_MIPS_DISPATCH_CACHE_GP=%s\n' '$(QPSX_MIPS_DISPATCH_CACHE_GP)'; \
 		printf 'QPSX_MIPS_DISPATCH_BRANCH_LIKELY=%s\n' '$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)'; \
+		printf 'QPSX_BUILD_TAG=%s\n' '$(QPSX_BUILD_TAG)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)'; \
