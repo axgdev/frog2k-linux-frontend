@@ -557,9 +557,15 @@ QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS ?= 16
 # spans. Transparent CLUT entries retain the original per-pixel writes.
 QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES ?= 0
 QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL ?= 0
+QPSX_GPU_DIRECT_PACKET ?= 0
+# One harmless MIPS no-op per retro_run gives the QEMU cache model an exact
+# frame boundary. Keep it in physical A/B cores as well so QEMU measures the
+# identical executable layout; its runtime cost is one instruction per frame.
+QPSX_PERFORMANCE_FRAME_MARKERS ?= 1
 # A wrapper A/B target can append a suffix to the fullmask build tag while
 # reusing the exact production recipe. It remains empty for established cores.
 QPSX_FULLMASK_BUILD_SUFFIX ?=
+QPSX_FASTMEM_BUILD_SUFFIX ?=
 # Optional Linux NOMMU virtual mirroring. When the kernel accepts fixed
 # file-backed mappings, this removes the second-level PSX block-pointer LUT
 # and the per-load/store 21-bit RAM mask. The existing QPSX mapper falls back
@@ -640,6 +646,8 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'fullmask=$(QPSX_GPU_4BPP_FULLMASK)' 'fullmask_min=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)' \
 	'fullmask_pack=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)' \
 	'fullmask_unroll=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)' \
+	'direct_packet=$(QPSX_GPU_DIRECT_PACKET)' \
+	'frame_markers=$(QPSX_PERFORMANCE_FRAME_MARKERS)' \
 	'mirror=$(QPSX_LINUX_MIRRORING)' \
 	'fast_mem=$(QPSX_MIPS_FAST_MEM_CONVERT)' 'ram_helper=$(QPSX_LINUX_RAM_HELPER_FASTPATH)' \
 	'asm_reads=$(QPSX_MIPS_ASM_MEM_READS)' 'hle_lazy=$(QPSX_HLE_LAZY_EVENT_CHECK)' \
@@ -673,6 +681,8 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) \
 	-DQPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) \
 	-DQPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) \
+	-DQPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET) \
+	-DQPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS) \
 	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
 	-DQPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) \
@@ -776,6 +786,8 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)'; \
 		printf 'QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)'; \
+		printf 'QPSX_GPU_DIRECT_PACKET=%s\n' '$(QPSX_GPU_DIRECT_PACKET)'; \
+		printf 'QPSX_PERFORMANCE_FRAME_MARKERS=%s\n' '$(QPSX_PERFORMANCE_FRAME_MARKERS)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
 		printf 'QPSX_LINUX_RAM_HELPER_FASTPATH=%s\n' '$(QPSX_LINUX_RAM_HELPER_FASTPATH)'; \
@@ -870,8 +882,10 @@ QPSX_DEV_SOURCE ?= $(abspath ../sf2000-qpsx-playstation-emulator)
 QPSX_DEV_RAW := build/qpsx-dev/pcsx4all_libretro_sf2000.a
 QPSX_DEV_ARCHIVE := build/qpsx-dev/qpsx_libretro_linux.a
 QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
+QPSX_DEV_LINK_MAP := build/qpsx-dev/qpsx-dev.map
 QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
 QPSX_VARIANTS_DIR ?= build/qpsx-variants
+QPSX_GP0_CANDIDATES_DIR ?= build/qpsx-gp0-candidates
 JS2300_RUNTIME := build/js2300/libjs2300.a
 JS2300_BUILD_STAMP := build/.js2300-$(JS2300_REV).stamp
 JS2300_SOURCE_STAMP := build/.js2300-sources-$(JS2300_REV).stamp
@@ -893,6 +907,9 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
 	qpsx-dev-ge-raw-vram-overlay-cache qpsx-dev-ge-raw-vram-overlay-fastmem-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-control \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-direct-packet \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-sweep \
 	qpsx-dev-ge-raw-vram-overlay-recip8-hot qpsx-dev-ge-raw-vram-overlay-recip10-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot \
 	qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-hot \
@@ -1054,20 +1071,22 @@ qpsx-dev-core:
 		'QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)' \
 		'QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)' \
 		'QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)' \
+		'QPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET)' \
 		'QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE)' \
+		'QPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET) QPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET) QPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -1094,7 +1113,7 @@ $(QPSX_DEV_ARCHIVE): qpsx-dev-core
 $(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
 		$(MUFROG_MEMORY_STREAM) build/mufrog/adapter-qpsx.o \
 		build/mufrog/qpsx-adapter.o $(QPSX_DEV_ARCHIVE) Makefile
-	$(SF2000_CXX) $(SF2000_LDFLAGS) -o '$(QPSX_DEV_EXECUTABLE)' \
+	$(SF2000_CXX) $(SF2000_LDFLAGS) -Wl,-Map,'$(QPSX_DEV_LINK_MAP)' -o '$(QPSX_DEV_EXECUTABLE)' \
 		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
 		build/mufrog/adapter-qpsx.o '$(QPSX_DEV_ARCHIVE)' \
 		$(MUFROG_MEMORY_STREAM) build/mufrog/qpsx-adapter.o \
@@ -1228,7 +1247,7 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot:
 	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
 		SF2000_FRAME_TAIL_METRICS=1 \
 		QPSX_DEV_PROFILER=0 \
-		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-tail-fastmem-hot' \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-tail-fastmem-hot$(QPSX_FASTMEM_BUILD_SUFFIX)' \
 		QPSX_GE_RAW_VRAM=1 \
 		QPSX_DISPATCH_CACHE_ENTRIES=64 \
 		QPSX_MIPS_PSMEM_REG=1 \
@@ -1249,6 +1268,44 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot:
 		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
 		QPSX_GPU_PACKED_POLY_WRITES=1
 	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev'
+
+# Draw read-only GP0 packets in place from their already-aligned DMA command
+# list. Mutable line-strip/fixed-rectangle commands still use PacketBuffer.
+# The control/direct tag suffixes have equal length, preventing attribution
+# strings from independently shifting the static executable layout.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-control:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_DIRECT_PACKET=0 \
+		QPSX_FASTMEM_BUILD_SUFFIX=-gp0-copy-01
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-gp0-control-dev'
+
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-direct-packet:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_DIRECT_PACKET=1 \
+		QPSX_FASTMEM_BUILD_SUFFIX=-gp0-direct1
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-direct-packet-dev'
+
+# Produce a self-identifying physical-device A/B set in one command.  Every
+# core uses tail metrics and a same-length build-tag suffix, so both the log
+# attribution and executable-layout comparison remain controlled.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-sweep:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-control
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-direct-packet
+	mkdir -p '$(QPSX_GP0_CANDIDATES_DIR)'
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-gp0-control-dev' \
+		'$(QPSX_GP0_CANDIDATES_DIR)/01-control'
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-direct-packet-dev' \
+		'$(QPSX_GP0_CANDIDATES_DIR)/02-direct-packet'
+	{ \
+		printf '%s\n' \
+			'01-control QPSX_GPU_DIRECT_PACKET=0 (run-470 configuration control)' \
+			'02-direct-packet QPSX_GPU_DIRECT_PACKET=1 (read-only GP0 packets in place)'; \
+		sha256sum '$(QPSX_GP0_CANDIDATES_DIR)'/01-control \
+			'$(QPSX_GP0_CANDIDATES_DIR)'/02-direct-packet; \
+	} > '$(QPSX_GP0_CANDIDATES_DIR)/MANIFEST'
+	cat '$(QPSX_GP0_CANDIDATES_DIR)/MANIFEST'
 
 # Small3dlib-style integer experiment: replace the expensive polygon-setup
 # divides selected by gpu_unai with a normalized reciprocal table that fits in
