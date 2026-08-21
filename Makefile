@@ -425,7 +425,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-gpu-packed-spans.patch \
 	patches/mufrog/qpsx-sf2000-mirror-safety.patch \
 	patches/mufrog/qpsx-sf2000-fast-mem-fingerprint.patch \
-	patches/mufrog/qpsx-sf2000-fast-mem-convert.patch
+	patches/mufrog/qpsx-sf2000-fast-mem-convert.patch \
+	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -474,6 +475,10 @@ QPSX_GPU_LINEAR_4BPP ?= 0
 # fall back to the original loops for all other primitive/texture cases.
 QPSX_GPU_PACKED_TILE_WRITES ?= 0
 QPSX_GPU_PACKED_SPRITE_4BPP ?= 0
+# Optional exact CF=32 4bpp polygon path for full-window, flat-V spans. It
+# keeps a texture row pointer and proves that U does not wrap once per span;
+# all window/wrap/blend/lighting cases fall back to the generic renderer.
+QPSX_GPU_4BPP_FLATV ?= 0
 # Optional Linux NOMMU virtual mirroring. When the kernel accepts fixed
 # file-backed mappings, this removes the second-level PSX block-pointer LUT
 # and the per-load/store 21-bit RAM mask. The existing QPSX mapper falls back
@@ -512,6 +517,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_LINEAR_4BPP=$(QPSX_GPU_LINEAR_4BPP) \
 	-DQPSX_GPU_PACKED_TILE_WRITES=$(QPSX_GPU_PACKED_TILE_WRITES) \
 	-DQPSX_GPU_PACKED_SPRITE_4BPP=$(QPSX_GPU_PACKED_SPRITE_4BPP) \
+	-DQPSX_GPU_4BPP_FLATV=$(QPSX_GPU_4BPP_FLATV) \
 	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
@@ -580,6 +586,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_LINEAR_4BPP=%s\n' '$(QPSX_GPU_LINEAR_4BPP)'; \
 		printf 'QPSX_GPU_PACKED_TILE_WRITES=%s\n' '$(QPSX_GPU_PACKED_TILE_WRITES)'; \
 		printf 'QPSX_GPU_PACKED_SPRITE_4BPP=%s\n' '$(QPSX_GPU_PACKED_SPRITE_4BPP)'; \
+		printf 'QPSX_GPU_4BPP_FLATV=%s\n' '$(QPSX_GPU_4BPP_FLATV)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
 		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
