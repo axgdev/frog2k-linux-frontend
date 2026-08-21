@@ -1011,6 +1011,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-control \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-fast \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-safe \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-guarded \
 	qpsx-dev-ge-raw-vram-overlay-layout-sweep \
 	qpsx-dev-ge-raw-vram-overlay-recip8-hot qpsx-dev-ge-raw-vram-overlay-recip10-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot \
@@ -1801,6 +1802,22 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-safe:
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-gte-rtpt-asm-safe-dev'
 	cp 'build/qpsx-dev/qpsx-dev.map' \
 		'build/qpsx-dev/gte-rtpt-asm-safe.map'
+
+# Same guarded implementation as the safe target, with a fresh build tag so
+# physical logs unambiguously identify the post-run-517 compatibility fix.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-guarded:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=0 \
+		QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=8192 \
+		QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH=0 \
+		QPSX_GTE_INTPL_OPTIMIZE=0 QPSX_GTE_INTPL_COMPACT=0 QPSX_GTE_RTPT_OS=0 \
+		QPSX_GTE_RTPT_ASM_FAST=1 QPSX_HOT_LAYOUT=0 QPSX_FASTMEM_HOT_ORDER=1 \
+		QPSX_FASTEST_BUILD_TAG=dispatch64-gp-blikely-packed-gpu-fastmem-asmreads-s7nomove \
+		QPSX_FASTMEM_BUILD_SUFFIX=-dma-prev8192-v7-gte-rtpt-asm-guarded
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-gte-rtpt-asm-guarded-dev'
+	cp 'build/qpsx-dev/qpsx-dev.map' \
+		'build/qpsx-dev/gte-rtpt-asm-guarded.map'
 
 # Diagnostics use exactly the control/predictor recipes but retain the
 # 300-frame phase counters. They are never candidates for speed measurement.
