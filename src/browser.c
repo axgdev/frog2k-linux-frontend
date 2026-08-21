@@ -36,6 +36,7 @@ extern long syscall(long number, ...);
 #define FCEUMM_PATH "/mnt/sd/sf2000/cores/sf2000-fceumm"
 #define PLAYER_PATH "/usr/bin/sf2000-player"
 #define SD_ROOT "/mnt/sd"
+#define BROWSER_STARTUP_CONFIG_PATH SD_ROOT "/cores/config/browser_startup.cfg"
 #define STORAGE_ROOTS_PATH "/run/sf2000-storage-roots"
 #define BROWSER_STATE_PATH "/run/sf2000-browser-state"
 #define MAX_ENTRIES 128
@@ -122,6 +123,8 @@ static unsigned log_flush_chord_latched;
 static unsigned log_flush_held;
 static void log_message(const char *message);
 static int write_frame(void);
+static void scan_directory(void);
+static void launch_selected(int input);
 
 static void save_browser_state(void)
 {
@@ -311,6 +314,158 @@ static int path_is_extra_root(const char *path)
 			return 1;
 	}
 	return 0;
+}
+
+static int startup_delimiter(char value)
+{
+	return value == ' ' || value == '\n' || value == '\r' || value == '\t';
+}
+
+/* Copy one whitespace-delimited startup option without pulling in a parser
+ * or libc allocation.  /proc/cmdline and the small FAT config use the same
+ * token shape, so this keeps the direct-launch path tiny in the browser. */
+static int startup_option(const char *text, const char *key,
+	char *output, size_t output_size)
+{
+	const size_t key_length = strlen(key);
+	const char *cursor = text;
+
+	while (*cursor) {
+		const char *value;
+		const char *end;
+		size_t length;
+
+		while (*cursor && startup_delimiter(*cursor))
+			cursor++;
+		if (!*cursor)
+			break;
+		if (strncmp(cursor, key, key_length) != 0) {
+			while (*cursor && !startup_delimiter(*cursor))
+				cursor++;
+			continue;
+		}
+		value = cursor + key_length;
+		end = value;
+		while (*end && !startup_delimiter(*end))
+			end++;
+		length = (size_t)(end - value);
+		if (!length || length >= output_size)
+			return 0;
+		memcpy(output, value, length);
+		output[length] = 0;
+		return 1;
+	}
+	return 0;
+}
+
+static int startup_path_allowed(const char *path)
+{
+	unsigned i;
+	size_t primary_length;
+
+	if (path[0] != '/' || strstr(path, ".."))
+		return 0;
+	primary_length = strlen(primary_root);
+	if ((!strncmp(path, primary_root, primary_length) &&
+			(path[primary_length] == 0 || path[primary_length] == '/')) ||
+		(!strncmp(path, SD_ROOT, strlen(SD_ROOT)) &&
+			(path[strlen(SD_ROOT)] == 0 || path[strlen(SD_ROOT)] == '/')))
+		return 1;
+	for (i = 0; i < extra_root_count; i++) {
+		size_t length = strlen(extra_roots[i]);
+		if (!strncmp(path, extra_roots[i], length) &&
+			(path[length] == 0 || path[length] == '/'))
+			return 1;
+	}
+	return 0;
+}
+
+static int startup_auto_launch_path(char *output, size_t output_size,
+	const char **source)
+{
+	char buffer[1024];
+	ssize_t bytes;
+	int fd;
+
+	/* A kernel command-line option is ideal for QEMU and one-off tests: it
+	 * avoids rewriting a 128 MiB FAT image just to change the launch target. */
+	fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		bytes = read(fd, buffer, sizeof(buffer) - 1u);
+		close(fd);
+		if (bytes > 0) {
+			buffer[bytes] = 0;
+			if (startup_option(buffer, "SF2000_AUTO_LAUNCH=",
+				output, output_size) && startup_path_allowed(output)) {
+				if (source)
+					*source = "cmdline";
+				return 1;
+			}
+		}
+	}
+
+	fd = open(BROWSER_STARTUP_CONFIG_PATH, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	bytes = read(fd, buffer, sizeof(buffer) - 1u);
+	close(fd);
+	if (bytes <= 0)
+		return 0;
+	buffer[bytes] = 0;
+	if (!startup_option(buffer, "auto_launch=", output, output_size) ||
+		!startup_path_allowed(output))
+		return 0;
+	if (source)
+		*source = "config";
+	return 1;
+}
+
+static int select_startup_path(const char *path)
+{
+	char directory[MAX_PATH];
+	const char *slash = strrchr(path, '/');
+	unsigned i;
+	size_t length;
+
+	if (!slash || !slash[1] || slash == path ||
+		!startup_path_allowed(path))
+		return 0;
+	length = (size_t)(slash - path);
+	if (length >= sizeof(directory))
+		return 0;
+	memcpy(directory, path, length);
+	directory[length] = 0;
+	snprintf(current, sizeof(current), "%s", directory);
+	scan_directory();
+	for (i = 0; i < entry_count; i++) {
+		if (!entries[i].directory && !strcmp(entries[i].name, slash + 1)) {
+			selected = i;
+			first = 0;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int launch_startup_game(int input)
+{
+	char path[MAX_PATH];
+	const char *source = NULL;
+	char message[MAX_PATH + 96];
+
+	if (!startup_auto_launch_path(path, sizeof(path), &source))
+		return 0;
+	if (!select_startup_path(path)) {
+		snprintf(message, sizeof(message),
+			"startup auto-launch target not found path=%s", path);
+		log_message(message);
+		return 0;
+	}
+	snprintf(message, sizeof(message), "startup auto-launch path=%s source=%s",
+		path, source ? source : "unknown");
+	log_message(message);
+	launch_selected(input);
+	return 1;
 }
 
 static void begin_performance_session(void)
@@ -1558,6 +1713,16 @@ int main(void)
 	selected = first = 0;
 	view = VIEW_HOME;
 	draw();
+	if (launch_startup_game(input)) {
+		/* launch_selected() replaces the browser on success.  If exec fails,
+		 * leave the user at a usable home screen rather than a half-selected
+		 * directory. */
+		view = VIEW_HOME;
+		snprintf(current, sizeof(current), "%s", primary_root);
+		scan_directory();
+		selected = first = 0;
+		draw();
+	}
 	{ int ready = open(READY_MARKER, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (ready >= 0) close(ready); }
 	{

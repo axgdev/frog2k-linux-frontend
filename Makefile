@@ -538,6 +538,20 @@ QPSX_GPU_4BPP_PALETTE_LUT ?= 0
 # and the per-load/store 21-bit RAM mask. The existing QPSX mapper falls back
 # to the normal malloc/LUT path when a fixed mapping is refused.
 QPSX_LINUX_MIRRORING ?= 0
+# Optional direct RAM-mirror fast path in psxMemRead/Write helpers. It trades
+# a short range test (and a few I-cache bytes) for the 64K LUT pointer load.
+QPSX_LINUX_RAM_HELPER_FASTPATH ?= 0
+# Optional compact MIPS read helpers for dynamic non-inline loads. Writes stay
+# in C so cache-control and SMC invalidation behavior is untouched.
+QPSX_MIPS_ASM_MEM_READS ?= 0
+# HLE BIOS calls normally enter the event dispatcher defensively. The
+# recompiler already tests the same counter at block return, so a candidate
+# can defer that call until an event is due; keep it opt-in for compatibility.
+QPSX_HLE_LAZY_EVENT_CHECK ?= 0
+# If Gouraud endpoints quantize to the same 5-bit RGB values, use the exact
+# flat-line raster path. This removes interpolation work without changing
+# pixels, mask handling, or blending; keep it an explicit A/B knob.
+QPSX_GPU_GOURAUD_LINE_FLATFAST ?= 0
 # Fold the NOMMU 21-bit RAM mirror mask into the output register, eliminating
 # one emitted MOV from every dynamic address conversion. Keep this opt-in for
 # physical A/B testing; it is only active with the stable $s7 PSX base.
@@ -593,6 +607,10 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_MIPS_FAST_MEM_CONVERT=$(QPSX_MIPS_FAST_MEM_CONVERT) \
+	-DQPSX_LINUX_RAM_HELPER_FASTPATH=$(QPSX_LINUX_RAM_HELPER_FASTPATH) \
+	-DQPSX_MIPS_ASM_MEM_READS=$(QPSX_MIPS_ASM_MEM_READS) \
+	-DQPSX_HLE_LAZY_EVENT_CHECK=$(QPSX_HLE_LAZY_EVENT_CHECK) \
+	-DQPSX_GPU_GOURAUD_LINE_FLATFAST=$(QPSX_GPU_GOURAUD_LINE_FLATFAST) \
 	-DQPSX_MIPS_PROPAGATE_FUZZY_ADDR=$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR) \
 	-DQPSX_RECMEM_ALIGNMENT=$(QPSX_RECMEM_ALIGNMENT) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
@@ -680,6 +698,10 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_PALETTE_LUT=%s\n' '$(QPSX_GPU_4BPP_PALETTE_LUT)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
+		printf 'QPSX_LINUX_RAM_HELPER_FASTPATH=%s\n' '$(QPSX_LINUX_RAM_HELPER_FASTPATH)'; \
+		printf 'QPSX_MIPS_ASM_MEM_READS=%s\n' '$(QPSX_MIPS_ASM_MEM_READS)'; \
+		printf 'QPSX_HLE_LAZY_EVENT_CHECK=%s\n' '$(QPSX_HLE_LAZY_EVENT_CHECK)'; \
+		printf 'QPSX_GPU_GOURAUD_LINE_FLATFAST=%s\n' '$(QPSX_GPU_GOURAUD_LINE_FLATFAST)'; \
 		printf 'QPSX_MIPS_PROPAGATE_FUZZY_ADDR=%s\n' '$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR)'; \
 		printf 'QPSX_RECMEM_ALIGNMENT=%s\n' '$(QPSX_RECMEM_ALIGNMENT)'; \
 		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
@@ -787,7 +809,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
 	qpsx-production-sweep \
-	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
+	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-package \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated \
@@ -976,6 +998,33 @@ qpsx-dev: $(QPSX_DEV_EXECUTABLE)
 
 qpsx-dev-mips32r1-audit: qpsx-dev
 	$(MAKE) QPSX_AUDIT_EXECUTABLE='$(QPSX_DEV_EXECUTABLE)' qpsx-mips32r1-audit
+
+# Reproducible physical/QEMU candidate built from the strongest measured
+# dispatch path plus the exact packed GPU paths used by run455.  Keeping this
+# as a target makes the next A/B a one-line command and, importantly, keeps
+# profiler code out of the performance core while retaining the startup
+# fingerprint and shutdown telemetry.
+QPSX_FASTEST_BUILD_TAG ?= dispatch64-gp-blikely-packed-gpu-fastmem-asmreads
+qpsx-dev-fastest:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)' \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
 
 qpsx-dev-package: qpsx-dev-mips32r1-audit
 	mkdir -p build/core-packages/licenses

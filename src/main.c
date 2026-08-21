@@ -25,7 +25,6 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <ucontext.h>
@@ -158,7 +157,14 @@ static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
 static struct timespec metrics_start;
-static struct rusage metrics_cpu_start;
+/*
+ * uClibc's MIPS getrusage wrapper is not ABI-compatible with the kernel on
+ * the SF2000 image: the timeval fields can be read with the wrong word
+ * width, producing wrapped multi-exabyte CPU times.  Keep the wall-clock
+ * interval above, but measure this process with the kernel's CPU clock.
+ */
+static struct timespec metrics_cpu_start;
+static int metrics_cpu_clock_valid;
 static int metrics_fd = -1;
 static struct sf2000_pacer pacer;
 static unsigned interval_max_run_us;
@@ -178,17 +184,19 @@ static unsigned audio_sustaining;
 static int audio_last_sample;
 #endif
 
-static uint64_t timeval_us(const struct timeval *value)
+static uint64_t timespec_delta_us(const struct timespec *now,
+	const struct timespec *start)
 {
-	return (uint64_t)value->tv_sec * 1000000u +
-		(uint64_t)value->tv_usec;
-}
+	uint64_t current;
+	uint64_t previous;
 
-static uint64_t rusage_delta_us(const struct timeval *now,
-	const struct timeval *start)
-{
-	uint64_t current = timeval_us(now);
-	uint64_t previous = timeval_us(start);
+	if (now->tv_sec < start->tv_sec ||
+		(now->tv_sec == start->tv_sec && now->tv_nsec < start->tv_nsec))
+		return 0;
+	current = (uint64_t)now->tv_sec * 1000000u +
+		(uint64_t)now->tv_nsec / 1000u;
+	previous = (uint64_t)start->tv_sec * 1000000u +
+		(uint64_t)start->tv_nsec / 1000u;
 
 	return current >= previous ? current - previous : 0;
 }
@@ -290,7 +298,8 @@ static void reset_metric_window(void)
 	previous_xruns = audio_metrics.xruns;
 	sf2000_input_reset_interval(&host.input);
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
-	(void)getrusage(RUSAGE_SELF, &metrics_cpu_start);
+	metrics_cpu_clock_valid =
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -1136,7 +1145,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		reset_metric_window();
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
-		struct rusage cpu_now;
+		struct timespec cpu_now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
 		uint64_t cpu_user_us = 0;
@@ -1160,17 +1169,14 @@ static void video(const void *data, unsigned width, unsigned height,
 		fps_milli = elapsed_ms ?
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
-		if (getrusage(RUSAGE_SELF, &cpu_now) == 0) {
-			cpu_user_us = rusage_delta_us(&cpu_now.ru_utime,
-				&metrics_cpu_start.ru_utime);
-			cpu_sys_us = rusage_delta_us(&cpu_now.ru_stime,
-				&metrics_cpu_start.ru_stime);
-		}
+		if (metrics_cpu_clock_valid &&
+			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_now) == 0)
+			cpu_user_us = timespec_delta_us(&cpu_now, &metrics_cpu_start);
 		cpu_total_us = cpu_user_us + cpu_sys_us;
 		if (elapsed_ms)
 			cpu_pct_milli = (cpu_total_us * 100u) / elapsed_ms;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu cpu_user_us=%" PRIu64 " cpu_sys_us=%" PRIu64 " cpu_pct_milli=%" PRIu64 " pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu cpu_metric=process-clock cpu_user_us=%" PRIu64 " cpu_sys_us=%" PRIu64 " cpu_pct_milli=%" PRIu64 " pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -1220,7 +1226,8 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_ge_stage_frames = 0;
 		interval_buffered_frames = 0;
 		sf2000_input_reset_interval(&host.input);
-		(void)getrusage(RUSAGE_SELF, &metrics_cpu_start);
+		metrics_cpu_clock_valid =
+			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
 	}
 }
 
