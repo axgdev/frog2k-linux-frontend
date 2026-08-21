@@ -436,6 +436,9 @@ ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
 endif
 QPSX_OPTIMIZE ?= -O2
+# Optional size optimization for only the large Unai GPU translation units.
+# Leave the recompiler/GTE/audio at the measured -O2 default.
+QPSX_GPU_OPTIMIZE ?=
 # The Linux NOMMU dispatcher uses a small guest-PC->host-code cache because
 # recRAM cannot be mirrored.  Keep the default small for the 16 KiB D-cache;
 # this knob is exposed for device/QEMU A/B measurements.
@@ -590,6 +593,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'CXX=%s\n' '$(SF2000_CXX)'; \
 		printf 'QPSX_PLATFORM=%s\n' '$(QPSX_PLATFORM)'; \
 		printf 'QPSX_OPTIMIZE=%s\n' '$(QPSX_OPTIMIZE)'; \
+		printf 'QPSX_GPU_OPTIMIZE=%s\n' '$(QPSX_GPU_OPTIMIZE)'; \
 		printf 'QPSX_MIPS_DISPATCH_CACHE_ENTRIES=%s\n' '$(QPSX_DISPATCH_CACHE_ENTRIES)'; \
 		printf 'QPSX_GTE_NATIVE_DIVIDE=%s\n' '$(QPSX_GTE_NATIVE_DIVIDE)'; \
 		printf 'QPSX_MIPS_PSMEM_REG=%s\n' '$(QPSX_MIPS_PSMEM_REG)'; \
@@ -851,20 +855,21 @@ qpsx-dev-core:
 		'AR=$(CROSS_COMPILE)ar' \
 		'QPSX_PLATFORM=$(QPSX_PLATFORM)' \
 		'QPSX_OPTIMIZE=$(QPSX_OPTIMIZE)' \
+		'QPSX_GPU_OPTIMIZE=$(QPSX_GPU_OPTIMIZE)' \
 		'QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -910,7 +915,7 @@ qpsx-dev-package: qpsx-dev-mips32r1-audit
 
 qpsx-dev-clean:
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-		platform=unix QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' STATIC_LINKING=1 RECOMPILER=mips \
+		platform=unix QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' STATIC_LINKING=1 RECOMPILER=mips \
 		TARGET='$(abspath $(QPSX_DEV_RAW))'
 	rm -rf build/qpsx-dev '$(QPSX_DEV_EXECUTABLE)'
 
@@ -1489,7 +1494,7 @@ build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile  $(TOOLCHAIN_STA
 	rm -f '$$@'
 	$(MAKE) -C 'build/mufrog/src/$(1)/$(MUFROG_$(call mufrog_key,$(1))_WORKDIR)' \
 		-f '$(MUFROG_$(call mufrog_key,$(1))_MAKEFILE)' \
-		platform=unix $(if $(filter qpsx,$(1)),QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)',) \
+		platform=unix $(if $(filter qpsx,$(1)),QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)',) \
 		STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $$@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' \
