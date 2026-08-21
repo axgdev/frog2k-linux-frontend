@@ -90,23 +90,30 @@ qpsx_profile_args = \
 qpsx_profile_tail = $(if $(findstring -tail-,$(1)),1,0)
 qpsx_profile_peer = $(if $(findstring -control,$(1)),$(subst -control,-candidate,$(1)),$(subst -candidate,-control,$(1)))
 
-.PHONY: qpsx-profile-list $(addprefix qpsx-profile-,$(QPSX_PROFILE_NAMES))
+.PHONY: qpsx-profile-list qpsx-profile-build \
+	$(addprefix qpsx-profile-,$(QPSX_PROFILE_NAMES))
 qpsx-profile-list:
 	@printf '%s\n' $(QPSX_PROFILE_NAMES)
 
-define qpsx_profile_target
-qpsx-profile-$(1):
+$(addprefix qpsx-profile-,$(QPSX_PROFILE_NAMES)):
+	$(MAKE) --no-print-directory qpsx-profile-build \
+		QPSX_PROFILE=$(@:qpsx-profile-%=%)
+
+# Keep the manifest recipe outside an eval-generated rule.  Besides being
+# easier to audit, this ensures Make does not consume shell-variable dollars
+# during two rounds of expansion.
+qpsx-profile-build:
 	@mkdir -p '$(QPSX_PROFILE_ARTIFACT_ROOT)'
-	$$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
-		$(call qpsx_profile_args,$(1))
-	@cp '$(QPSX_DEV_EXECUTABLE)' '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-$(1)'
-	@cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-$(1).map'
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		$(call qpsx_profile_args,$(QPSX_PROFILE))
+	@cp '$(QPSX_DEV_EXECUTABLE)' '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-$(QPSX_PROFILE)'
+	@cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_PROFILE_ARTIFACT_ROOT)/sf2000-qpsx-$(QPSX_PROFILE).map'
 	@set -eu; \
-		profile='$(1)'; \
+		profile='$(QPSX_PROFILE)'; \
 		out='$(QPSX_PROFILE_ARTIFACT_ROOT)'; \
 		exe="$$out/sf2000-qpsx-$$profile"; \
 		map="$$out/sf2000-qpsx-$$profile.map"; \
-		peer_profile='$(call qpsx_profile_peer,$(1))'; \
+		peer_profile='$(call qpsx_profile_peer,$(QPSX_PROFILE))'; \
 		peer="$$out/sf2000-qpsx-$$peer_profile"; \
 		stamp='$(QPSX_DEV_FLAGS_STAMP)'; \
 		test -s "$$exe" && test -s "$$map" && test -s "$$stamp"; \
@@ -118,7 +125,7 @@ qpsx-profile-$(1):
 		tail_stamp=$$(sed -n 's/^SF2000_FRAME_TAIL_METRICS=//p' "$$stamp" | head -n 1); \
 		fingerprint=$$(sed -n 's/^QPSX_BUILD_FINGERPRINT=//p' "$$stamp" | head -n 1); \
 		test "$$profile_stamp" = "$$profile"; \
-		test "$$tail_stamp" = '$(call qpsx_profile_tail,$(1))'; \
+		test "$$tail_stamp" = '$(call qpsx_profile_tail,$(QPSX_PROFILE))'; \
 		test -n "$$fingerprint"; \
 		case "$$profile" in \
 			*-control) if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' "$$map"; then \
@@ -140,7 +147,7 @@ qpsx-profile-$(1):
 			printf 'profile=%s\n' "$$profile"; \
 			printf 'profile_peer=%s\n' "$$peer_profile"; \
 			printf 'fingerprint=%s\n' "$$fingerprint"; \
-			printf 'effective_key_flags=%s\n' '$(call qpsx_profile_args,$(1))'; \
+			printf 'effective_key_flags=%s\n' '$(call qpsx_profile_args,$(QPSX_PROFILE))'; \
 			printf 'effective_compiler_flags=%s\n' "$$(sed -n 's/^CFLAGS=//p' "$$stamp" | head -n 1)"; \
 			printf 'frontend_rev=%s\nfrontend_dirty=%s\n' "$$frontend_rev" "$$frontend_dirty"; \
 			printf 'qpsx_rev=%s\nqpsx_dirty=%s\n' "$$qpsx_rev" "$$qpsx_dirty"; \
@@ -150,6 +157,3 @@ qpsx-profile-$(1):
 		} > "$$tmp"; \
 		mv "$$tmp" "$$manifest"; \
 		cat "$$manifest"
-endef
-
-$(foreach profile,$(QPSX_PROFILE_NAMES),$(eval $(call qpsx_profile_target,$(profile))))
