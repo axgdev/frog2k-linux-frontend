@@ -414,7 +414,9 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-performance.patch \
 	patches/mufrog/qpsx-sf2000-cd-preload.patch \
 	patches/mufrog/qpsx-sf2000-nommu-hot.patch \
-	patches/mufrog/qpsx-sf2000-superblock.patch
+	patches/mufrog/qpsx-sf2000-superblock.patch \
+	patches/mufrog/qpsx-sf2000-telemetry.patch \
+	patches/mufrog/qpsx-sf2000-runtime-report.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -447,6 +449,11 @@ QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES ?= 1024
 # stays at the cache-tested -O2 setting; this measured attribute only affects
 # the two straight-line kernels that dominate GTE time.
 QPSX_GTE_HOT_O3 ?= 1
+# Emit one startup build-fingerprint line and shutdown-only block compilation
+# counters.  No per-instruction hooks are enabled; this is deliberately much
+# cheaper than the emulated-cycle profiler and makes physical A/B logs
+# attributable to an exact production variant.
+QPSX_RUNTIME_TELEMETRY ?= 1
 # The emulated-cycle profiler costs ~1/3 of frame time even when disabled at
 # runtime, so the production core compiles it out (-DQPSX_PROFILER_ENABLED=0,
 # zero overhead). The dev core keeps it on for benchmark breakdowns.
@@ -468,6 +475,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES) \
+	-DQPSX_RUNTIME_TELEMETRY=$(QPSX_RUNTIME_TELEMETRY) \
 	-DQPSX_PROFILER_ENABLED=$(QPSX_PROFILER) \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
@@ -494,6 +502,38 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 # the shared Mufrog rule remains warning-free for the C portions of the core.
 MUFROG_qpsx_EXTRA_CXXFLAGS := \
 	-fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
+
+# The production Mufrog rule intentionally rebuilds the QPSX archive from a
+# disposable patched tree.  Make does not otherwise know that a command-line
+# tuning flag changed, so an A/B build could silently reuse the previous
+# archive.  Keep a compare-and-replace flag fingerprint as an explicit edge;
+# unchanged experiments remain incremental, while every changed variant gets
+# a real rebuild.
+QPSX_PROD_FLAGS_STAMP := build/mufrog/qpsx.compiler.flags
+
+$(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
+	mkdir -p '$(@D)'
+	@set -eu; \
+	tmp='$@.tmp'; \
+	{ \
+		printf 'CC=%s\n' '$(SF2000_CC)'; \
+		printf 'CXX=%s\n' '$(SF2000_CXX)'; \
+		printf 'QPSX_PLATFORM=%s\n' '$(QPSX_PLATFORM)'; \
+		printf 'QPSX_OPTIMIZE=%s\n' '$(QPSX_OPTIMIZE)'; \
+		printf 'QPSX_MIPS_DISPATCH_CACHE_ENTRIES=%s\n' '$(QPSX_DISPATCH_CACHE_ENTRIES)'; \
+		printf 'QPSX_GTE_NATIVE_DIVIDE=%s\n' '$(QPSX_GTE_NATIVE_DIVIDE)'; \
+		printf 'QPSX_MIPS_PSMEM_REG=%s\n' '$(QPSX_MIPS_PSMEM_REG)'; \
+		printf 'QPSX_MIPS_PERSISTENT_RETURN_RA=%s\n' '$(QPSX_MIPS_PERSISTENT_RETURN_RA)'; \
+		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS)'; \
+		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)'; \
+		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)'; \
+		printf 'QPSX_RUNTIME_TELEMETRY=%s\n' '$(QPSX_RUNTIME_TELEMETRY)'; \
+		printf 'QPSX_GTE_HOT_O3=%s\n' '$(QPSX_GTE_HOT_O3)'; \
+		printf 'QPSX_PROFILER=%s\n' '$(QPSX_PROFILER)'; \
+		printf 'CFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CFLAGS)'; \
+		printf 'CXXFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
+	} > "$$tmp"; \
+	if cmp -s "$$tmp" '$@' 2>/dev/null; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
 # The upstream "sf2000" platform selects bare-metal GPU/GTE/PSX-memory
 # assembly. Its GPU object explicitly uses MIPS32r2 EXT instructions, while
 # HC15xx is MIPS32r1. The Linux build already supplies every required ABI and
@@ -574,6 +614,7 @@ QPSX_DEV_RAW := build/qpsx-dev/pcsx4all_libretro_sf2000.a
 QPSX_DEV_ARCHIVE := build/qpsx-dev/qpsx_libretro_linux.a
 QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
 QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
+QPSX_VARIANTS_DIR ?= build/qpsx-variants
 JS2300_RUNTIME := build/js2300/libjs2300.a
 JS2300_BUILD_STAMP := build/.js2300-$(JS2300_REV).stamp
 JS2300_SOURCE_STAMP := build/.js2300-sources-$(JS2300_REV).stamp
@@ -591,6 +632,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 # the runtime repository intentionally ships no platform-specific scripts.
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
+	qpsx-production-sweep \
 	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-package \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
@@ -663,6 +705,47 @@ qpsx-mips32r1-audit: $(QPSX_AUDIT_EXECUTABLE)
 		echo 'QPSX contains MIPS32r2 instructions that fault on HC15xx' >&2; \
 		exit 1; \
 	fi
+
+# Build a small, named production matrix for physical A/B tests.  The
+# generated source tree and ccache are shared, but the flag fingerprint above
+# makes each changed configuration rebuild exactly once.  This target never
+# formats or copies a game image; it only leaves independently auditable cores
+# under build/qpsx-variants/.
+qpsx-production-sweep:
+	@set -eu; \
+	out='$(QPSX_VARIANTS_DIR)'; \
+	manifest="$$out/MANIFEST.tmp"; \
+	mkdir -p "$$out"; \
+	$(MAKE) -j'$(JOBS)' qpsx-mips32r1-audit \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=0; \
+	cp 'build/sf2000-qpsx' "$$out/sf2000-qpsx-baseline"; \
+	$(MAKE) -j'$(JOBS)' qpsx-mips32r1-audit \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=0; \
+	cp 'build/sf2000-qpsx' "$$out/sf2000-qpsx-return-ra"; \
+	$(MAKE) -j'$(JOBS)' qpsx-mips32r1-audit \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=2 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=256; \
+	cp 'build/sf2000-qpsx' "$$out/sf2000-qpsx-fold2"; \
+	$(MAKE) -j'$(JOBS)' qpsx-mips32r1-audit \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024; \
+	cp 'build/sf2000-qpsx' "$$out/sf2000-qpsx-fold8"; \
+	{ \
+		printf '%s\n' '# QPSX production physical A/B matrix'; \
+		printf '%s\n' '# each row: name return_ra fold max_links max_bytes telemetry sha256'; \
+		printf 'baseline 0 0 0 0 $(QPSX_RUNTIME_TELEMETRY) '; sha256sum "$$out/sf2000-qpsx-baseline"; \
+		printf 'return-ra 1 0 0 0 $(QPSX_RUNTIME_TELEMETRY) '; sha256sum "$$out/sf2000-qpsx-return-ra"; \
+		printf 'fold2 0 1 2 256 $(QPSX_RUNTIME_TELEMETRY) '; sha256sum "$$out/sf2000-qpsx-fold2"; \
+		printf 'fold8 1 1 8 1024 $(QPSX_RUNTIME_TELEMETRY) '; sha256sum "$$out/sf2000-qpsx-fold8"; \
+	} > "$$manifest"; \
+	mv "$$manifest" "$$out/MANIFEST"; \
+	cat "$$out/MANIFEST"
 
 # Fast QPSX development path.  It compiles directly in the maintained fork,
 # preserving its object files between invocations, and deliberately bypasses
@@ -1318,7 +1401,7 @@ build/mufrog/src/$(1)/.source: Makefile $(MUFROG_$(call mufrog_key,$(1))_PATCHES
 	touch '$$@'
 
 build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile  $(TOOLCHAIN_STAMP) \
-		src/mufrog_picodrive_config.h
+		src/mufrog_picodrive_config.h $(if $(filter qpsx,$(1)),$(QPSX_PROD_FLAGS_STAMP),)
 	mkdir -p '$$(@D)'
 	find 'build/mufrog/src/$(1)' -type f -name '*.o' -delete
 	find 'build/mufrog/src/$(1)' -type f -name '*.a' -delete
