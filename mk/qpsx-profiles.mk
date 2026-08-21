@@ -64,11 +64,15 @@ QPSX_PROFILE_FRONTIER_PRODUCTION_CONTROL_ARGS := \
 	QPSX_PROFILE_ID=frontier-production-control \
 	QPSX_BUILD_TAG=qpsx-frontier-prod-asm0 \
 	SF2000_FRAME_TAIL_METRICS=0 QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
+# True ASM-read builds execute retro_run but stall Ridge Racer before sustained
+# scanout (physical runs 524/525 and the QEMU attract visual gate).  Keep the
+# public candidate safe until the helper has a differential ABI/semantic test;
+# do not make a black-screen experiment look production-ready by its name.
 QPSX_PROFILE_FRONTIER_PRODUCTION_CANDIDATE_ARGS := \
 	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
 	QPSX_PROFILE_ID=frontier-production-candidate \
-	QPSX_BUILD_TAG=qpsx-frontier-prod-asm1 \
-	SF2000_FRAME_TAIL_METRICS=0 QPSX_ASM_READS=1 QPSX_MIPS_ASM_MEM_READS=1
+	QPSX_BUILD_TAG=qpsx-frontier-prod-safe \
+	SF2000_FRAME_TAIL_METRICS=0 QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
 QPSX_PROFILE_FRONTIER_TAIL_CONTROL_ARGS := \
 	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
 	QPSX_PROFILE_ID=frontier-tail-control \
@@ -77,8 +81,8 @@ QPSX_PROFILE_FRONTIER_TAIL_CONTROL_ARGS := \
 QPSX_PROFILE_FRONTIER_TAIL_CANDIDATE_ARGS := \
 	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
 	QPSX_PROFILE_ID=frontier-tail-candidate \
-	QPSX_BUILD_TAG=qpsx-frontier-tail-asm1 \
-	SF2000_FRAME_TAIL_METRICS=1 QPSX_ASM_READS=1 QPSX_MIPS_ASM_MEM_READS=1
+	QPSX_BUILD_TAG=qpsx-frontier-tail-safe \
+	SF2000_FRAME_TAIL_METRICS=1 QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
 
 qpsx_profile_args = \
 	$(if $(filter frontier-production-control,$(1)),$(QPSX_PROFILE_FRONTIER_PRODUCTION_CONTROL_ARGS),\
@@ -127,12 +131,10 @@ qpsx-profile-build:
 		test "$$profile_stamp" = "$$profile"; \
 		test "$$tail_stamp" = '$(call qpsx_profile_tail,$(QPSX_PROFILE))'; \
 		test -n "$$fingerprint"; \
-		case "$$profile" in \
-			*-control) if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' "$$map"; then \
-				echo "QPSX profile $$profile unexpectedly references ASM reads" >&2; exit 1; fi ;; \
-			*-candidate) if ! grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' "$$map"; then \
-				echo "QPSX profile $$profile lacks ASM reads" >&2; exit 1; fi ;; \
-		esac; \
+		if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' "$$map"; then \
+			echo "QPSX safe profile $$profile unexpectedly references quarantined ASM reads" >&2; \
+			exit 1; \
+		fi; \
 		frontend_rev=$$(git rev-parse --verify HEAD); \
 		frontend_status=$$(git status --porcelain --untracked-files=all); \
 		frontend_dirty=0; test -z "$$frontend_status" || frontend_dirty=1; \
