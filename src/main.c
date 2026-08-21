@@ -41,6 +41,8 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
+_Static_assert((AUDIO_SUSTAIN_SAMPLES & (AUDIO_SUSTAIN_SAMPLES - 1u)) == 0,
+	"AUDIO_SUSTAIN_SAMPLES must be a power of two");
 /*
  * When a slow core cannot keep the DMA ring at its target delay, the
  * frontend sustains by repeating the most recent audio.  Sustains fire
@@ -54,6 +56,17 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_SUSTAIN_DECAY 160u
 #define AUDIO_SUSTAIN_FLOOR 32u
 #define AUDIO_DECLICK_SAMPLES 64u
+
+/*
+ * Full waveform diagnostics require two extra passes over every sample sent
+ * to the mono DAC.  They are useful while diagnosing crackle, but are not
+ * part of playback and become material when a slow core also needs several
+ * million sustained samples.  Keep the counters in the metric ABI, while
+ * compiling the sample-by-sample analysis out of production builds.
+ */
+#ifndef SF2000_AUDIO_WAVEFORM_METRICS
+#define SF2000_AUDIO_WAVEFORM_METRICS 0
+#endif
 
 /*
  * Rates the HC15xx SND0 APLL/I2S can generate natively (vendor libauddrv
@@ -156,7 +169,9 @@ static unsigned audio_suppressed;
 static unsigned audio_sustain_factor = 256u;
 static int audio_last_output;
 static unsigned audio_sustaining;
+#if SF2000_AUDIO_WAVEFORM_METRICS
 static int audio_last_sample;
+#endif
 static unsigned loading_game;
 static int core_watchdog_kmsg_fd = -1;
 static volatile sig_atomic_t core_watchdog_stage;
@@ -966,8 +981,11 @@ static void ge_disable_cpu_fallback(void)
 		return;
 	(void)hcge_engine_sync(host.ge);
 	for (i = 0; i < host.ge_buffers; i++) {
-		(void)hcge_linux_free_buffer(host.ge, host.ge_source_handle[i]);
+		if (host.ge_source_handle[i])
+			(void)hcge_linux_free_buffer(host.ge,
+				host.ge_source_handle[i]);
 		host.ge_source[i] = NULL;
+		host.ge_source_handle[i] = 0;
 	}
 	hcge_close_context(host.ge);
 	host.ge = NULL;
@@ -1454,7 +1472,7 @@ static void audio_update_feedback(void)
 
 static void audio_tail_push(const int16_t *samples, unsigned count)
 {
-	unsigned i;
+	unsigned first;
 
 	if (!count)
 		return;
@@ -1467,13 +1485,20 @@ static void audio_tail_push(const int16_t *samples, unsigned count)
 		host.audio_tail_play = 0;
 		return;
 	}
-	for (i = 0; i < count; ++i) {
-		host.audio_tail[host.audio_tail_write] = samples[i];
-		host.audio_tail_write = (host.audio_tail_write + 1u) %
-			AUDIO_SUSTAIN_SAMPLES;
-		if (host.audio_tail_count < AUDIO_SUSTAIN_SAMPLES)
-			host.audio_tail_count++;
-	}
+	first = AUDIO_SUSTAIN_SAMPLES - host.audio_tail_write;
+	if (first > count)
+		first = count;
+	memcpy(host.audio_tail + host.audio_tail_write, samples,
+		first * sizeof(*samples));
+	if (first < count)
+		memcpy(host.audio_tail, samples + first,
+			(count - first) * sizeof(*samples));
+	host.audio_tail_write = (host.audio_tail_write + count) &
+		(AUDIO_SUSTAIN_SAMPLES - 1u);
+	if (count > AUDIO_SUSTAIN_SAMPLES - host.audio_tail_count)
+		host.audio_tail_count = AUDIO_SUSTAIN_SAMPLES;
+	else
+		host.audio_tail_count += count;
 	host.audio_tail_play = 0;
 }
 
@@ -1484,7 +1509,6 @@ static void audio_queue(const int16_t *samples, unsigned count,
 		sizeof(host.audio_buffer[0]);
 	unsigned tail;
 	unsigned first;
-	unsigned i;
 
 	if (!count)
 		return;
@@ -1494,25 +1518,31 @@ static void audio_queue(const int16_t *samples, unsigned count,
 		audio_metrics.sustained += count;
 	if (generated)
 		audio_sustain_factor = 256u;
-	for (i = 0; i < count; ++i) {
-		int sample = samples[i];
-		unsigned magnitude = sample < 0 ?
-			(unsigned)-sample : (unsigned)sample;
+#if SF2000_AUDIO_WAVEFORM_METRICS
+	{
+		unsigned i;
 
-		if (magnitude > audio_metrics.peak)
-			audio_metrics.peak = magnitude;
-		if (generated) {
-			int delta = sample - audio_last_sample;
+		for (i = 0; i < count; ++i) {
+			int sample = samples[i];
+			unsigned magnitude = sample < 0 ?
+				(unsigned)-sample : (unsigned)sample;
 
-			if (magnitude >= 32000u)
-				audio_metrics.nearclip++;
-			if (delta < 0)
-				delta = -delta;
-			if ((unsigned)delta > 24000u)
-				audio_metrics.clicks++;
-			audio_last_sample = sample;
+			if (magnitude > audio_metrics.peak)
+				audio_metrics.peak = magnitude;
+			if (generated) {
+				int delta = sample - audio_last_sample;
+
+				if (magnitude >= 32000u)
+					audio_metrics.nearclip++;
+				if (delta < 0)
+					delta = -delta;
+				if ((unsigned)delta > 24000u)
+					audio_metrics.clicks++;
+				audio_last_sample = sample;
+			}
 		}
 	}
+#endif
 	if (count > capacity - host.audio_count)
 		audio_flush();
 	while (count > capacity - host.audio_count) {
@@ -1536,6 +1566,7 @@ static void audio_queue(const int16_t *samples, unsigned count,
 	if (generated)
 		audio_tail_push(samples, count);
 	if (count) {
+#if SF2000_AUDIO_WAVEFORM_METRICS
 		int enq_prev = audio_last_output;
 		int gen_prev = audio_last_sample;
 		unsigned i;
@@ -1563,6 +1594,7 @@ static void audio_queue(const int16_t *samples, unsigned count,
 			}
 			enq_prev = sample;
 		}
+#endif
 		audio_last_output = samples[count - 1];
 	}
 	tail = (host.audio_head + host.audio_count) % capacity;
@@ -1630,15 +1662,30 @@ static void audio_enqueue_repeat(unsigned count)
 				AUDIO_SUSTAIN_SAMPLES - host.audio_tail_count) %
 				AUDIO_SUSTAIN_SAMPLES;
 			unsigned old_play = host.audio_tail_play;
+			unsigned filled = 0;
 
-			for (i = 0; i < chunk; ++i)
-				samples[i] = host.audio_tail[(start +
-					host.audio_tail_play + i) % AUDIO_SUSTAIN_SAMPLES];
-			host.audio_tail_play = (host.audio_tail_play + chunk) %
-				host.audio_tail_count;
-			/* Declick every repeat-loop wrap inside this chunk
-			 * (position 0 is the fresh-to-repeat boundary and is
-			 * declicked separately below). */
+			/* Copy contiguous pieces of the circular tail.  The former
+			 * per-sample modulo loop was disproportionately expensive on
+			 * MIPS32 when the core was slow enough to sustain audio. */
+			while (filled < chunk) {
+				unsigned index = (start + host.audio_tail_play) &
+					(AUDIO_SUSTAIN_SAMPLES - 1u);
+				unsigned span = host.audio_tail_count -
+					host.audio_tail_play;
+				unsigned physical = AUDIO_SUSTAIN_SAMPLES - index;
+
+				if (span > physical)
+					span = physical;
+				if (span > chunk - filled)
+					span = chunk - filled;
+				memcpy(samples + filled, host.audio_tail + index,
+					span * sizeof(*samples));
+				filled += span;
+				host.audio_tail_play += span;
+				if (host.audio_tail_play == host.audio_tail_count)
+					host.audio_tail_play = 0;
+			}
+			/* Declick each loop boundary after all target samples exist. */
 			{
 				unsigned wrap = (host.audio_tail_count - old_play) %
 					host.audio_tail_count;
@@ -2626,24 +2673,46 @@ static int open_platform(void)
 		return -1;
 	if (host.fb_phys && hcge_open_context(&host.ge_storage) == 0) {
 		unsigned i;
+		uint16_t *allocation;
+		uint32_t allocation_phys;
+		uint32_t allocation_handle;
+		size_t allocation_bytes;
 
 		host.ge = &host.ge_storage;
 		host.ge_source_bytes = (size_t)GE_SOURCE_MAX_WIDTH *
 			GE_SOURCE_MAX_HEIGHT * sizeof(uint16_t);
-		for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
-			host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
-				(unsigned int)host.ge_source_bytes,
-				&host.ge_source_phys[i], &host.ge_source_handle[i]);
-			if (!host.ge_source[i]) {
-				char details[160];
-
-				snprintf(details, sizeof(details),
-					"GE source buffer allocation failed index=%u bytes=%lu errno=%d\n",
-					i, (unsigned long)host.ge_source_bytes, errno);
-				log_kmsg(details);
-				break;
+		allocation_bytes = host.ge_source_bytes * GE_SOURCE_BUFFERS;
+		allocation = hcge_linux_alloc_buffer(host.ge,
+			(unsigned int)allocation_bytes, &allocation_phys,
+			&allocation_handle);
+		if (allocation) {
+			/* The kernel exposes only three managed GE handles globally and
+			 * the screen service owns one.  Suballocate all frontend surfaces
+			 * from one contiguous handle so triple buffering really fits. */
+			for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
+				host.ge_source[i] = allocation +
+					i * (host.ge_source_bytes / sizeof(*allocation));
+				host.ge_source_phys[i] = allocation_phys +
+					i * (uint32_t)host.ge_source_bytes;
 			}
-			host.ge_buffers++;
+			host.ge_source_handle[0] = allocation_handle;
+			host.ge_buffers = GE_SOURCE_BUFFERS;
+		} else {
+			char details[160];
+
+			snprintf(details, sizeof(details),
+				"GE source slab allocation failed bytes=%lu errno=%d; trying separate buffers\n",
+				(unsigned long)allocation_bytes, errno);
+			log_kmsg(details);
+			for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
+				host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
+					(unsigned int)host.ge_source_bytes,
+					&host.ge_source_phys[i],
+					&host.ge_source_handle[i]);
+				if (!host.ge_source[i])
+					break;
+				host.ge_buffers++;
+			}
 		}
 		if (!host.ge_buffers) {
 			hcge_close_context(host.ge);
