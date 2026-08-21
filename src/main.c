@@ -162,8 +162,6 @@ static unsigned interval_max_run_us;
 static unsigned interval_sampled_present_us;
 static unsigned interval_ge_stage_frames;
 static unsigned interval_buffered_frames;
-static unsigned ge_psx_fill_count;
-static unsigned long long ge_psx_fill_pixels;
 static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
@@ -671,87 +669,6 @@ static void cpu_present(const void *data, unsigned width, unsigned height,
 #endif
 }
 
-/*
- * Optional QPSX primitive offload.  The PSX stores 0bbbbbgggggrrrrr pixels;
- * programming the GE destination as ARGB1555 and swapping the paint color's
- * red/blue channels produces exactly that 15-bit word.  The two cacheflushes
- * are the ownership hand-off for the non-coherent GE: CPU -> device before
- * the fill, then device -> CPU after its completion.  Callers retain their
- * software renderer whenever the GE or physical mapping is unavailable.
- */
-int sf2000_ge_fill_psx_rect(void *vram, unsigned x, unsigned y,
-	unsigned width, unsigned height, unsigned short pixel)
-{
-#ifdef __mips__
-	hcge_state *state;
-	HCGERectangle rectangle;
-	uint32_t physical;
-	uint8_t *range;
-	size_t bytes;
-
-	if (!host.ge || !vram || !width || !height || x + width > 1024u ||
-			y + height > 512u)
-		return 0;
-	physical = hcge_linux_cached_phys(vram);
-	if (!physical)
-		return 0;
-	bytes = (size_t)(height - 1u) * 2048u + width * sizeof(uint16_t);
-	if (bytes > INT_MAX)
-		return 0;
-	range = (uint8_t *)vram + (size_t)y * 2048u + x * sizeof(uint16_t);
-
-	if (host.ge_pending) {
-		if (hcge_engine_sync(host.ge) < 0)
-			return 0;
-		host.ge_pending = 0;
-	}
-	if (cacheflush(range, (int)bytes, DCACHE) != 0)
-		return 0;
-
-	state = &host.ge->state;
-	memset(state, 0, sizeof(*state));
-	state->render_options = HCGE_DSRO_NONE;
-	state->drawingflags = HCGE_DSDRAW_NOFX;
-	state->blittingflags = HCGE_DSBLIT_NOFX;
-	state->destination.config.format = HCGE_DSPF_ARGB1555;
-	state->destination.config.size.w = 1024;
-	state->destination.config.size.h = 512;
-	state->dst.phys = physical;
-	state->dst.pitch = 2048u;
-	state->color.a = 0;
-	state->color.r = (uint8_t)(((pixel >> 10) & 31u) << 3);
-	state->color.g = (uint8_t)(((pixel >> 5) & 31u) << 3);
-	state->color.b = (uint8_t)((pixel & 31u) << 3);
-	state->accel = HCGE_DFXL_FILLRECTANGLE;
-	hcge_set_state(host.ge, state, state->accel);
-	rectangle = (HCGERectangle){ (int)x, (int)y, (int)width, (int)height };
-	if (!hcge_fill_rect(host.ge, &rectangle) ||
-			hcge_engine_sync(host.ge) < 0 ||
-			cacheflush(range, (int)bytes, DCACHE) != 0)
-		return 0;
-
-	ge_psx_fill_count++;
-	ge_psx_fill_pixels += (unsigned long long)width * height;
-	if ((ge_psx_fill_count & 255u) == 1u) {
-		char message[80];
-
-		(void)snprintf(message, sizeof(message),
-			"GE PSX tile fills=%u pixels=%llu\n", ge_psx_fill_count,
-			ge_psx_fill_pixels);
-		log_kmsg(message);
-	}
-	return 1;
-#else
-	(void)vram;
-	(void)x;
-	(void)y;
-	(void)width;
-	(void)height;
-	(void)pixel;
-	return 0;
-#endif
-}
-
 static int ge_present(const void *data, unsigned width, unsigned height,
 	size_t pitch, unsigned out_w, unsigned out_h, unsigned left, unsigned top)
 {
@@ -1202,7 +1119,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		/* Must fit the whole metric line including the trailing newline:
 		 * a truncated write swallows the '\n', gluing the next record
 		 * (e.g. a mode event) onto this line so sf2000-logd drops it. */
-		char details[832];
+		char details[768];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1217,7 +1134,7 @@ static void video(const void *data, unsigned width, unsigned height,
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u ge_psx_fills=%u ge_psx_pixels=%llu input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
@@ -1229,7 +1146,6 @@ static void video(const void *data, unsigned width, unsigned height,
 			pacer.interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
 			interval_ge_stage_frames, interval_buffered_frames,
-			ge_psx_fill_count, ge_psx_fill_pixels,
 			host.input.polls, host.input.events,
 			host.input.interval_max_latency_us,
 			uncapped_mode ? "uncapped" : "normal",
