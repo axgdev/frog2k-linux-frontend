@@ -50,6 +50,7 @@ QPSX_PROFILE_FRONTIER_COMMON_ARGS := \
 	QPSX_PERFORMANCE_FRAME_MARKERS=1 QPSX_FULLMASK_BUILD_SUFFIX= \
 	QPSX_FASTMEM_BUILD_SUFFIX= QPSX_LINUX_MIRRORING=0 \
 	QPSX_LINUX_RAM_HELPER_FASTPATH=1 QPSX_HLE_LAZY_EVENT_CHECK=0 \
+	QPSX_LAYOUT_PAD_BYTES=0 \
 	QPSX_GE_RAW_VRAM=1 QPSX_GPU_GOURAUD_LINE_FLATFAST=0 \
 	QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=0 \
 	QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=0 \
@@ -68,11 +69,14 @@ QPSX_PROFILE_FRONTIER_PRODUCTION_CONTROL_ARGS := \
 # scanout (physical runs 524/525 and the QEMU attract visual gate).  Keep the
 # public candidate safe until the helper has a differential ABI/semantic test;
 # do not make a black-screen experiment look production-ready by its name.
+# The candidate instead restores the 0x640 hot-text displacement of run 521
+# without executing its tail metrics, isolating cache colour from diagnostics.
 QPSX_PROFILE_FRONTIER_PRODUCTION_CANDIDATE_ARGS := \
 	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
 	QPSX_PROFILE_ID=frontier-production-candidate \
-	QPSX_BUILD_TAG=qpsx-frontier-prod-safe \
-	SF2000_FRAME_TAIL_METRICS=0 QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
+	QPSX_BUILD_TAG=qpsx-frontier-prod-pad640 \
+	SF2000_FRAME_TAIL_METRICS=0 QPSX_LAYOUT_PAD_BYTES=1600 \
+	QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
 QPSX_PROFILE_FRONTIER_TAIL_CONTROL_ARGS := \
 	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
 	QPSX_PROFILE_ID=frontier-tail-control \
@@ -134,6 +138,10 @@ qpsx-profile-build:
 		if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' "$$map"; then \
 			echo "QPSX safe profile $$profile unexpectedly references quarantined ASM reads" >&2; \
 			exit 1; \
+		fi; \
+		if test "$$profile" = frontier-production-candidate; then \
+			awk '/^[[:space:]]*\.text\.sf2000_qpsx_layout_pad$$/ { getline; if ($$2 == "0x640") ok=1 } END { exit !ok }' "$$map" || { \
+				echo "QPSX profile $$profile lacks its 0x640 layout pad" >&2; exit 1; }; \
 		fi; \
 		frontend_rev=$$(git rev-parse --verify HEAD); \
 		frontend_status=$$(git status --porcelain --untracked-files=all); \

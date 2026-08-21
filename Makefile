@@ -230,6 +230,7 @@ COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
 SF2000_FRAME_TAIL_METRICS ?= 0
+QPSX_LAYOUT_PAD_BYTES ?= 0
 SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float \
 	-fPIC -mabicalls \
 	-DSF2000_FRAME_TAIL_METRICS=$(SF2000_FRAME_TAIL_METRICS) \
@@ -241,6 +242,7 @@ $(SF2000_HOST_FLAGS_STAMP): FORCE Makefile
 	@set -eu; \
 	tmp='$@.tmp'; \
 	printf 'SF2000_FRAME_TAIL_METRICS=%s\n' '$(SF2000_FRAME_TAIL_METRICS)' > "$$tmp"; \
+	printf 'QPSX_LAYOUT_PAD_BYTES=%s\n' '$(QPSX_LAYOUT_PAD_BYTES)' >> "$$tmp"; \
 	if cmp -s "$$tmp" '$@' 2>/dev/null; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
 FROG_TOOLCHAIN_GCC_VERSION ?= 16.2.0
 SF2000_SYSROOT ?= $(TOOLCHAIN_DIR)/$(FROG_TOOLCHAIN_TUPLE)/sysroot
@@ -681,6 +683,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'bl=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)' 'frame_bl=$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY)' \
 	'fold=$(QPSX_MIPS_FOLD_DIRECT_JUMPS)/$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)/$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)' \
 	'profile_id=$(QPSX_PROFILE_ID)' 'tail_metrics=$(SF2000_FRAME_TAIL_METRICS)' \
+	'layout_pad=$(QPSX_LAYOUT_PAD_BYTES)' \
 	'raw=$(QPSX_GE_RAW_VRAM)' 'telemetry=$(QPSX_RUNTIME_TELEMETRY)' \
 	'profiler=$(QPSX_PROFILER)' 'gpu_fixed=$(QPSX_GPU_FIXED_FAST_PATH)' \
 	'gpu_light=$(QPSX_GPU_FIXED_LIGHTING)' 'linear4=$(QPSX_GPU_LINEAR_4BPP)' \
@@ -1258,11 +1261,12 @@ qpsx-dev-archive-unlocked: qpsx-dev-core-unlocked
 	else \
 		mv "$$tmp" '$(QPSX_DEV_ARCHIVE)'; \
 	fi
-$(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
+$(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) build/qpsx-layout-pad.o $(LIBRETRO_COMMON) \
 		$(MUFROG_MEMORY_STREAM) build/mufrog/adapter-qpsx.o \
 		build/mufrog/qpsx-adapter.o $(QPSX_DEV_ARCHIVE) Makefile
 	$(SF2000_CXX) $(SF2000_LDFLAGS) -Wl,-Map,'$(QPSX_DEV_LINK_MAP)' -o '$(QPSX_DEV_EXECUTABLE)' \
 		$(SF2000_STARTFILES) $(SF2000_HOST_OBJECTS) \
+		-Wl,-u,sf2000_qpsx_layout_pad_start build/qpsx-layout-pad.o \
 		build/mufrog/adapter-qpsx.o '$(QPSX_DEV_ARCHIVE)' \
 		$(MUFROG_MEMORY_STREAM) build/mufrog/qpsx-adapter.o \
 		$(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
@@ -2598,6 +2602,10 @@ build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h  $(T
 		include/sf2000_browser_ui.h include/sf2000_log.h $(SF2000_HOST_FLAGS_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
+
+build/qpsx-layout-pad.o: src/qpsx_layout_pad.S $(TOOLCHAIN_STAMP) $(SF2000_HOST_FLAGS_STAMP)
+	mkdir -p build
+	$(SF2000_CC) $(SF2000_CFLAGS) -DQPSX_LAYOUT_PAD_BYTES=$(QPSX_LAYOUT_PAD_BYTES) -c -o $@ $<
 
 build/host-input.o: src/sf2000_input.c include/sf2000_input.h include/libretro_min.h $(TOOLCHAIN_STAMP)
 	mkdir -p build
