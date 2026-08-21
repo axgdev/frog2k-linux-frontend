@@ -234,14 +234,15 @@ static int audio_last_sample;
 #if SF2000_FRAME_TAIL_METRICS
 /* A 1 ms bucket gives useful p99.9 resolution while keeping the two
  * diagnostic histograms at 4 KiB total (uint16_t counts are sufficient for a
- * 300-frame reporting interval). Frames longer than one second saturate in
- * the final bucket instead of corrupting the percentile calculation. */
+ * 300-retro_run reporting interval). Frames longer than one second saturate
+ * in the final bucket instead of corrupting the percentile calculation. */
 static uint16_t frame_tail_hist[FRAME_TAIL_BUCKETS];
 static uint16_t core_tail_hist[FRAME_TAIL_BUCKETS];
 static uint64_t frame_tail_sum_us;
 static uint64_t core_tail_sum_us;
 static unsigned frame_tail_samples;
 static unsigned core_tail_samples;
+static unsigned frame_tail_runs;
 
 static void frame_tail_hist_reset(void)
 {
@@ -287,6 +288,56 @@ static unsigned frame_tail_percentile(const uint16_t *hist,
 			return i * FRAME_TAIL_BUCKET_US + FRAME_TAIL_BUCKET_US - 1u;
 	}
 	return FRAME_TAIL_BUCKETS * FRAME_TAIL_BUCKET_US - 1u;
+}
+
+static void frame_tail_emit(void)
+{
+	unsigned frame_tail_p95;
+	unsigned frame_tail_p98;
+	unsigned frame_tail_p99;
+	unsigned frame_tail_p999;
+	unsigned core_tail_p95;
+	unsigned core_tail_p98;
+	unsigned core_tail_p99;
+	unsigned core_tail_p999;
+	unsigned frame_tail_avg;
+	unsigned core_tail_avg;
+	char details[448];
+
+	if (!frame_tail_runs)
+		return;
+	frame_tail_p95 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 950u);
+	frame_tail_p98 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 980u);
+	frame_tail_p99 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 990u);
+	frame_tail_p999 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 999u);
+	core_tail_p95 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 950u);
+	core_tail_p98 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 980u);
+	core_tail_p99 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 990u);
+	core_tail_p999 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 999u);
+	frame_tail_avg = frame_tail_samples ?
+		(unsigned)(frame_tail_sum_us / frame_tail_samples) : 0u;
+	core_tail_avg = core_tail_samples ?
+		(unsigned)(core_tail_sum_us / core_tail_samples) : 0u;
+	snprintf(details, sizeof(details),
+		"frame-tail run_frames=%u video_frames=%u samples=%u avg_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u core_samples=%u core_avg_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u\n",
+		frame_tail_runs, video_callbacks, frame_tail_samples,
+		frame_tail_avg, frame_tail_p95, frame_tail_p98, frame_tail_p99,
+		frame_tail_p999, core_tail_samples, core_tail_avg, core_tail_p95,
+		core_tail_p98, core_tail_p99, core_tail_p999);
+	if (metrics_fd >= 0 && write(metrics_fd, details,
+		strlen(details)) < 0) {
+		/* best-effort tail metrics spool */
+	}
+	frame_tail_hist_reset();
+	frame_tail_runs = 0;
 }
 #endif
 
@@ -406,6 +457,7 @@ static void reset_metric_window(void)
 	sf2000_input_reset_interval(&host.input);
 #if SF2000_FRAME_TAIL_METRICS
 	frame_tail_hist_reset();
+	frame_tail_runs = 0;
 #endif
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 	metrics_cpu_clock_valid =
@@ -1631,39 +1683,6 @@ static void video(const void *data, unsigned width, unsigned height,
 		char details[1280];
 		long cpu_khz = current_cpu_khz();
 		long temperature_mc = current_temperature_mc();
-#if SF2000_FRAME_TAIL_METRICS
-		unsigned frame_tail_p95 = 0;
-		unsigned frame_tail_p98 = 0;
-		unsigned frame_tail_p99 = 0;
-		unsigned frame_tail_p999 = 0;
-		unsigned core_tail_p95 = 0;
-		unsigned core_tail_p98 = 0;
-		unsigned core_tail_p99 = 0;
-		unsigned core_tail_p999 = 0;
-		unsigned frame_tail_avg = 0;
-		unsigned core_tail_avg = 0;
-
-		frame_tail_p95 = frame_tail_percentile(frame_tail_hist,
-			frame_tail_samples, 950u);
-		frame_tail_p98 = frame_tail_percentile(frame_tail_hist,
-			frame_tail_samples, 980u);
-		frame_tail_p99 = frame_tail_percentile(frame_tail_hist,
-			frame_tail_samples, 990u);
-		frame_tail_p999 = frame_tail_percentile(frame_tail_hist,
-			frame_tail_samples, 999u);
-		core_tail_p95 = frame_tail_percentile(core_tail_hist,
-			core_tail_samples, 950u);
-		core_tail_p98 = frame_tail_percentile(core_tail_hist,
-			core_tail_samples, 980u);
-		core_tail_p99 = frame_tail_percentile(core_tail_hist,
-			core_tail_samples, 990u);
-		core_tail_p999 = frame_tail_percentile(core_tail_hist,
-			core_tail_samples, 999u);
-		frame_tail_avg = frame_tail_samples ?
-			(unsigned)(frame_tail_sum_us / frame_tail_samples) : 0u;
-		core_tail_avg = core_tail_samples ?
-			(unsigned)(core_tail_sum_us / core_tail_samples) : 0u;
-#endif
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1730,24 +1749,6 @@ static void video(const void *data, unsigned width, unsigned height,
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
 		}
-#if SF2000_FRAME_TAIL_METRICS
-		{
-			char tail_details[384];
-
-			snprintf(tail_details, sizeof(tail_details),
-				"frame-tail samples=%u avg_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u core_samples=%u core_avg_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u\n",
-				frame_tail_samples, frame_tail_avg,
-				frame_tail_p95, frame_tail_p98, frame_tail_p99,
-				frame_tail_p999, core_tail_samples, core_tail_avg,
-				core_tail_p95, core_tail_p98, core_tail_p99,
-				core_tail_p999);
-			if (metrics_fd >= 0 &&
-				write(metrics_fd, tail_details,
-					strlen(tail_details)) < 0) {
-				/* best-effort tail metrics spool */
-			}
-		}
-#endif
 #ifdef __mips__
 		(void)hc15xx_retained_mark(
 			(volatile struct hc15xx_retained_log *)(uintptr_t)
@@ -1769,6 +1770,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		sf2000_input_reset_interval(&host.input);
 #if SF2000_FRAME_TAIL_METRICS
 		frame_tail_hist_reset();
+		frame_tail_runs = 0;
 #endif
 		metrics_cpu_clock_valid =
 			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
@@ -3672,6 +3674,9 @@ int main(int argc, char **argv)
 			&core_tail_sum_us, timespec_delta_us(&core_end, &run_start));
 		frame_tail_hist_add(frame_tail_hist, &frame_tail_samples,
 			&frame_tail_sum_us, timespec_delta_us(&now, &run_start));
+		frame_tail_runs++;
+		if (frame_tail_runs >= 300u)
+			frame_tail_emit();
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);
 			continue;

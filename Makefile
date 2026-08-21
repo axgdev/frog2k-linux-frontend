@@ -579,6 +579,10 @@ QPSX_RECMEM_ALIGNMENT ?= 4
 # increments once per draw command, not per pixel, and is compiled out of the
 # production image so the counters cannot perturb the 16 KiB data cache.
 QPSX_GPU_RUNTIME_METRICS ?= 0
+# Cache-sized normalized reciprocal table for integer polygon setup.  Values
+# 8 and 10 are the intended SF2000 experiments (1 KiB/4 KiB); zero keeps the
+# exact hardware divide path used by the established production candidate.
+QPSX_GPU_RECIP_TABLE_BITS ?= 0
 # Emit one startup build-fingerprint line and shutdown-only block compilation
 # counters.  No per-instruction hooks are enabled; this is deliberately much
 # cheaper than the emulated-cycle profiler and makes physical A/B logs
@@ -617,7 +621,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'palette_lut=$(QPSX_GPU_4BPP_PALETTE_LUT)' 'mirror=$(QPSX_LINUX_MIRRORING)' \
 	'fast_mem=$(QPSX_MIPS_FAST_MEM_CONVERT)' 'ram_helper=$(QPSX_LINUX_RAM_HELPER_FASTPATH)' \
 	'asm_reads=$(QPSX_MIPS_ASM_MEM_READS)' 'hle_lazy=$(QPSX_HLE_LAZY_EVENT_CHECK)' \
-	'line_flat=$(QPSX_GPU_GOURAUD_LINE_FLATFAST)' 'fuzzy=$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR)' \
+	'line_flat=$(QPSX_GPU_GOURAUD_LINE_FLATFAST)' 'gpu_recip=$(QPSX_GPU_RECIP_TABLE_BITS)' 'fuzzy=$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR)' \
 	'rec_align=$(QPSX_RECMEM_ALIGNMENT)' 'gpu_metrics=$(QPSX_GPU_RUNTIME_METRICS)' \
 	| sha256sum | cut -c1-16)
 MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
@@ -644,6 +648,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_4BPP_PALETTE_LUT=$(QPSX_GPU_4BPP_PALETTE_LUT) \
 	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
+	-DQPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_MIPS_FAST_MEM_CONVERT=$(QPSX_MIPS_FAST_MEM_CONVERT) \
@@ -748,6 +753,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_PROPAGATE_FUZZY_ADDR=%s\n' '$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR)'; \
 		printf 'QPSX_RECMEM_ALIGNMENT=%s\n' '$(QPSX_RECMEM_ALIGNMENT)'; \
 		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
+		printf 'QPSX_GPU_RECIP_TABLE_BITS=%s\n' '$(QPSX_GPU_RECIP_TABLE_BITS)'; \
 		printf 'QPSX_PROFILER=%s\n' '$(QPSX_PROFILER)'; \
 		printf 'CFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CFLAGS)'; \
 		printf 'CXXFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
@@ -855,6 +861,8 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
 	qpsx-dev-ge-raw-vram-overlay-cache qpsx-dev-ge-raw-vram-overlay-fastmem-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+	qpsx-dev-ge-raw-vram-overlay-recip8-hot qpsx-dev-ge-raw-vram-overlay-recip10-hot \
+	qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated \
@@ -1001,14 +1009,14 @@ qpsx-dev-core:
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -1190,6 +1198,92 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot:
 		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
 		QPSX_GPU_PACKED_POLY_WRITES=1
 	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev'
+
+# Small3dlib-style integer experiment: replace the expensive polygon-setup
+# divides selected by gpu_unai with a normalized reciprocal table that fits in
+# the target D-cache.  Eight bits costs 1 KiB and is the aggressive option;
+# ten bits costs 4 KiB and is the accuracy-first option.  Both retain the
+# exact raster inner loops and the raw GE presenter.
+qpsx-dev-ge-raw-vram-overlay-recip8-hot:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		SF2000_FRAME_TAIL_METRICS=0 \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_GPU_RECIP_TABLE_BITS=8 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-recip8-hot' \
+		QPSX_GE_RAW_VRAM=1 \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_FAST_MEM_CONVERT=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_HOT_DRIVER_ORDER=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-recip8-hot-dev'
+
+qpsx-dev-ge-raw-vram-overlay-recip10-hot:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		SF2000_FRAME_TAIL_METRICS=0 \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_GPU_RECIP_TABLE_BITS=10 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-recip10-hot' \
+		QPSX_GE_RAW_VRAM=1 \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_FAST_MEM_CONVERT=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_HOT_DRIVER_ORDER=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-recip10-hot-dev'
+
+qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		SF2000_FRAME_TAIL_METRICS=1 \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_GPU_RECIP_TABLE_BITS=10 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-tail-recip10-hot' \
+		QPSX_GE_RAW_VRAM=1 \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_FAST_MEM_CONVERT=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_HOT_DRIVER_ORDER=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-recip10-hot-dev'
 
 qpsx-dev-package: qpsx-dev-mips32r1-audit
 	mkdir -p build/core-packages/licenses
