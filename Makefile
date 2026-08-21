@@ -553,7 +553,7 @@ QPSX_GTE_OPCODE_COUNTER ?= 0
 QPSX_GTE_INTPL_OPTIMIZE ?= 0
 QPSX_GTE_INTPL_COMPACT ?= 0
 QPSX_GTE_RTPT_OS ?= 0
-# Hand-written leaf RTPT kernel for a dedicated no-saturation physical A/B.
+# Hand-written leaf RTPT kernel for a dedicated MIPS32 physical A/B.
 QPSX_GTE_RTPT_ASM_FAST ?= 0
 # Optional exact CF=32 4bpp polygon path for full-window, flat-V spans. It
 # keeps a texture row pointer and proves that U does not wrap once per span;
@@ -1010,6 +1010,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-os \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-control \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-fast \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-safe \
 	qpsx-dev-ge-raw-vram-overlay-layout-sweep \
 	qpsx-dev-ge-raw-vram-overlay-recip8-hot qpsx-dev-ge-raw-vram-overlay-recip10-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot \
@@ -1752,8 +1753,8 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-os:
 
 # RTPT leaf-kernel A/B. The control is the established C implementation;
 # the candidate replaces only the fixed-size three-vertex transform/projection
-# command with a no-C-call MIPS32 leaf. It deliberately keeps the risky
-# no-saturation behavior opt-in so compatibility builds remain unchanged.
+# command with a no-C-call MIPS32 leaf. It remains opt-in so compatibility
+# builds remain unchanged.
 qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-control:
 	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
 		QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=0 \
@@ -1781,6 +1782,25 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-fast:
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-gte-rtpt-asm-fast-dev'
 	cp 'build/qpsx-dev/qpsx-dev.map' \
 		'build/qpsx-dev/gte-rtpt-asm-fast.map'
+
+# Saturating RTPT leaf-kernel candidate.  The assembly kernel applies the
+# PS1 IR/depth/projection/IR0 bounds directly, preventing wrapped coordinates
+# from generating solid corrupt polygons while avoiding the C fallback on the
+# normal path. Keep a distinct artifact suffix so a physical log cannot
+# accidentally be attributed to the old unsafe binary.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-safe:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=0 \
+		QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=8192 \
+		QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH=0 \
+		QPSX_GTE_INTPL_OPTIMIZE=0 QPSX_GTE_INTPL_COMPACT=0 QPSX_GTE_RTPT_OS=0 \
+		QPSX_GTE_RTPT_ASM_FAST=1 QPSX_HOT_LAYOUT=0 QPSX_FASTMEM_HOT_ORDER=1 \
+		QPSX_FASTEST_BUILD_TAG=dispatch64-gp-blikely-packed-gpu-fastmem-asmreads-s7nomove \
+		QPSX_FASTMEM_BUILD_SUFFIX=-dma-prev8192-v7-gte-rtpt-asm-safe
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-gte-rtpt-asm-safe-dev'
+	cp 'build/qpsx-dev/qpsx-dev.map' \
+		'build/qpsx-dev/gte-rtpt-asm-safe.map'
 
 # Diagnostics use exactly the control/predictor recipes but retain the
 # 300-frame phase counters. They are never candidates for speed measurement.
