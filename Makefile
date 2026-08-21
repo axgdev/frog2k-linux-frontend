@@ -1783,11 +1783,11 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-fast:
 	cp 'build/qpsx-dev/qpsx-dev.map' \
 		'build/qpsx-dev/gte-rtpt-asm-fast.map'
 
-# Saturating RTPT leaf-kernel candidate.  The assembly kernel applies the
-# PS1 IR/depth/projection/IR0 bounds directly, preventing wrapped coordinates
-# from generating solid corrupt polygons while avoiding the C fallback on the
-# normal path. Keep a distinct artifact suffix so a physical log cannot
-# accidentally be attributed to the old unsafe binary.
+# Guarded RTPT leaf-kernel candidate. The assembly kernel checks PS1
+# IR/depth/projection/IR0 and accumulator bounds, then falls back to the exact
+# C path for exceptional vertices so flags and clipping remain compatible.
+# Keep a distinct artifact suffix so a physical log cannot be attributed to
+# the old unsafe binary.
 qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-gte-rtpt-asm-safe:
 	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
 		QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=0 \
