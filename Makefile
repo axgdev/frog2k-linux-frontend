@@ -600,6 +600,7 @@ QPSX_LINUX_RAM_HELPER_FASTPATH ?= 0
 # Optional compact MIPS read helpers for dynamic non-inline loads. Writes stay
 # in C so cache-control and SMC invalidation behavior is untouched.
 QPSX_MIPS_ASM_MEM_READS ?= 0
+QPSX_ASM_READS ?= 1
 # HLE BIOS calls normally enter the event dispatcher defensively. The
 # recompiler already tests the same counter at block return, so a candidate
 # can defer that call until an event is due; keep it opt-in for compatibility.
@@ -669,6 +670,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'gte_rtpt_os=$(QPSX_GTE_RTPT_OS)' \
 	'gte_rtpt_asm=$(QPSX_GTE_RTPT_ASM_FAST)' \
 	'gte_opcode_counter=$(QPSX_GTE_OPCODE_COUNTER)' \
+	'gte_intpl=$(QPSX_GTE_INTPL_OPTIMIZE)' 'gte_intpl_compact=$(QPSX_GTE_INTPL_COMPACT)' \
 	'psxM_reg=$(QPSX_MIPS_PSMEM_REG)' \
 	'ra=$(QPSX_MIPS_PERSISTENT_RETURN_RA)' 'prefetch=$(QPSX_MIPS_DISPATCH_PREFETCH)' \
 	'gp=$(QPSX_MIPS_DISPATCH_CACHE_GP)' 'gp_abi=$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI)' \
@@ -682,6 +684,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'gflatv_min=$(QPSX_GPU_4BPP_GOURAUD_FLATV_MIN_PIXELS)' \
 	'gcache=$(QPSX_GPU_4BPP_GOURAUD_CACHE)' \
 	'hot_order=$(QPSX_GPU_HOT_DRIVER_ORDER)' \
+	'fastmem_hot_order=$(QPSX_FASTMEM_HOT_ORDER)' \
 	'hot_layout=$(QPSX_HOT_LAYOUT)' \
 	'phase_metrics=$(QPSX_PHASE_METRICS)' \
 	'flatv=$(QPSX_GPU_4BPP_FLATV)' 'flatv_row=$(QPSX_GPU_4BPP_FLATV_ROW)' \
@@ -693,6 +696,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'fullmask_unroll=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)' \
 	'direct_packet=$(QPSX_GPU_DIRECT_PACKET)' \
 	'frame_markers=$(QPSX_PERFORMANCE_FRAME_MARKERS)' \
+	'fullmask_suffix=$(QPSX_FULLMASK_BUILD_SUFFIX)' \
 	'mirror=$(QPSX_LINUX_MIRRORING)' \
 	'fast_mem=$(QPSX_MIPS_FAST_MEM_CONVERT)' 'ram_helper=$(QPSX_LINUX_RAM_HELPER_FASTPATH)' \
 	'asm_reads=$(QPSX_MIPS_ASM_MEM_READS)' 'hle_lazy=$(QPSX_HLE_LAZY_EVENT_CHECK)' \
@@ -712,6 +716,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_DISPATCH_CACHE_ENTRIES=$(QPSX_DISPATCH_CACHE_ENTRIES) \
 	-DQPSX_GTE_HOT_O3=$(QPSX_GTE_HOT_O3) \
 	-DQPSX_GTE_OPCODE_COUNTER=$(QPSX_GTE_OPCODE_COUNTER) \
+	-DQPSX_GTE_INTPL_OPTIMIZE=$(QPSX_GTE_INTPL_OPTIMIZE) \
 	-DQPSX_GTE_INTPL_COMPACT=$(QPSX_GTE_INTPL_COMPACT) \
 	-DQPSX_GTE_RTPT_OS=$(QPSX_GTE_RTPT_OS) \
 	-DQPSX_GTE_RTPT_ASM_FAST=$(QPSX_GTE_RTPT_ASM_FAST) \
@@ -828,8 +833,11 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_RUNTIME_TELEMETRY=%s\n' '$(QPSX_RUNTIME_TELEMETRY)'; \
 		printf 'QPSX_GTE_HOT_O3=%s\n' '$(QPSX_GTE_HOT_O3)'; \
 		printf 'QPSX_GTE_OPCODE_COUNTER=%s\n' '$(QPSX_GTE_OPCODE_COUNTER)'; \
+		printf 'QPSX_GTE_INTPL_OPTIMIZE=%s\n' '$(QPSX_GTE_INTPL_OPTIMIZE)'; \
 		printf 'QPSX_GPU_FIXED_FAST_PATH=%s\n' '$(QPSX_GPU_FIXED_FAST_PATH)'; \
 		printf 'QPSX_GPU_FIXED_LIGHTING=%s\n' '$(QPSX_GPU_FIXED_LIGHTING)'; \
+		printf 'QPSX_GPU_HOT_DRIVER_ORDER=%s\n' '$(QPSX_GPU_HOT_DRIVER_ORDER)'; \
+		printf 'QPSX_FASTMEM_HOT_ORDER=%s\n' '$(QPSX_FASTMEM_HOT_ORDER)'; \
 		printf 'QPSX_GPU_LINEAR_4BPP=%s\n' '$(QPSX_GPU_LINEAR_4BPP)'; \
 		printf 'QPSX_GPU_PACKED_TILE_WRITES=%s\n' '$(QPSX_GPU_PACKED_TILE_WRITES)'; \
 		printf 'QPSX_GPU_PACKED_SPRITE_4BPP=%s\n' '$(QPSX_GPU_PACKED_SPRITE_4BPP)'; \
@@ -846,6 +854,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)'; \
 		printf 'QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)'; \
+		printf 'QPSX_FULLMASK_BUILD_SUFFIX=%s\n' '$(QPSX_FULLMASK_BUILD_SUFFIX)'; \
 		printf 'QPSX_GPU_DIRECT_PACKET=%s\n' '$(QPSX_GPU_DIRECT_PACKET)'; \
 		printf 'QPSX_HOT_LAYOUT=%s\n' '$(QPSX_HOT_LAYOUT)'; \
 		printf 'QPSX_PHASE_METRICS=%s\n' '$(QPSX_PHASE_METRICS)'; \
@@ -950,6 +959,7 @@ QPSX_DEV_ARCHIVE := build/qpsx-dev/qpsx_libretro_linux.a
 QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
 QPSX_DEV_LINK_MAP := build/qpsx-dev/qpsx-dev.map
 QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
+QPSX_DEV_LOCK ?= build/qpsx-dev/.source-build.lock
 QPSX_VARIANTS_DIR ?= build/qpsx-variants
 QPSX_GP0_CANDIDATES_DIR ?= build/qpsx-gp0-candidates
 JS2300_RUNTIME := build/js2300/libjs2300.a
@@ -970,9 +980,10 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
 	qpsx-production-sweep \
-	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
+	qpsx-dev qpsx-dev-core qpsx-dev-core-unlocked qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
 	qpsx-dev-ge-raw-vram-overlay-cache qpsx-dev-ge-raw-vram-overlay-fastmem-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-asm-reads-sweep \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-control \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-direct-packet \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-gp0-sweep \
@@ -1153,8 +1164,12 @@ qpsx-production-sweep:
 QPSX_DEV_R2 ?= 0
 QPSX_DEV_PROFILER ?= 1
 
-qpsx-dev-core: QPSX_PROFILER := $(QPSX_DEV_PROFILER)
 qpsx-dev-core:
+	mkdir -p '$(dir $(QPSX_DEV_LOCK))'
+	flock 9 '$(MAKE)' --no-print-directory qpsx-dev-core-unlocked 9>'$(QPSX_DEV_LOCK)'
+
+qpsx-dev-core-unlocked: QPSX_PROFILER := $(QPSX_DEV_PROFILER)
+qpsx-dev-core-unlocked:
 	@test -d '$(QPSX_DEV_SOURCE)/.git' || { \
 		echo 'QPSX_DEV_SOURCE must name the qpsx fork checkout' >&2; exit 2; }
 	mkdir -p '$(dir $(QPSX_DEV_RAW))'
@@ -1193,14 +1208,14 @@ qpsx-dev-core:
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_SPU_OPTIMIZE='$(QPSX_SPU_OPTIMIZE)' QPSX_GTE_RTPT_ASM_FAST=$(QPSX_GTE_RTPT_ASM_FAST) QPSX_GTE_OPCODE_COUNTER=$(QPSX_GTE_OPCODE_COUNTER) QPSX_GTE_INTPL_OPTIMIZE=$(QPSX_GTE_INTPL_OPTIMIZE) QPSX_GTE_INTPL_COMPACT=$(QPSX_GTE_INTPL_COMPACT) QPSX_GTE_RTPT_OS=$(QPSX_GTE_RTPT_OS) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_POLY_2043_FAST=$(QPSX_GPU_POLY_2043_FAST) QPSX_GPU_DMA_CHAIN_FAST=$(QPSX_GPU_DMA_CHAIN_FAST) QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK) QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET) QPSX_HOT_LAYOUT=$(QPSX_HOT_LAYOUT) QPSX_PHASE_METRICS=$(QPSX_PHASE_METRICS) QPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_SPU_OPTIMIZE='$(QPSX_SPU_OPTIMIZE)' QPSX_GTE_RTPT_ASM_FAST=$(QPSX_GTE_RTPT_ASM_FAST) QPSX_GTE_OPCODE_COUNTER=$(QPSX_GTE_OPCODE_COUNTER) QPSX_GTE_INTPL_OPTIMIZE=$(QPSX_GTE_INTPL_OPTIMIZE) QPSX_GTE_INTPL_COMPACT=$(QPSX_GTE_INTPL_COMPACT) QPSX_GTE_RTPT_OS=$(QPSX_GTE_RTPT_OS) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_POLY_2043_FAST=$(QPSX_GPU_POLY_2043_FAST) QPSX_GPU_DMA_CHAIN_FAST=$(QPSX_GPU_DMA_CHAIN_FAST) QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK) QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET) QPSX_HOT_LAYOUT=$(QPSX_HOT_LAYOUT) QPSX_PHASE_METRICS=$(QPSX_PHASE_METRICS) QPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS) QPSX_MIPS_ASM_MEM_READS=$(QPSX_MIPS_ASM_MEM_READS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		QPSX_GTE_INTPL_OPTIMIZE=$(QPSX_GTE_INTPL_OPTIMIZE) QPSX_GTE_INTPL_COMPACT=$(QPSX_GTE_INTPL_COMPACT) QPSX_GTE_RTPT_OS=$(QPSX_GTE_RTPT_OS) QPSX_GTE_RTPT_ASM_FAST=$(QPSX_GTE_RTPT_ASM_FAST) \
+		QPSX_GTE_INTPL_OPTIMIZE=$(QPSX_GTE_INTPL_OPTIMIZE) QPSX_GTE_INTPL_COMPACT=$(QPSX_GTE_INTPL_COMPACT) QPSX_GTE_RTPT_OS=$(QPSX_GTE_RTPT_OS) QPSX_GTE_RTPT_ASM_FAST=$(QPSX_GTE_RTPT_ASM_FAST) QPSX_MIPS_ASM_MEM_READS=$(QPSX_MIPS_ASM_MEM_READS) \
 		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_SPU_OPTIMIZE='$(QPSX_SPU_OPTIMIZE)' QPSX_GTE_OPCODE_COUNTER=$(QPSX_GTE_OPCODE_COUNTER) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_POLY_2043_FAST=$(QPSX_GPU_POLY_2043_FAST) QPSX_GPU_DMA_CHAIN_FAST=$(QPSX_GPU_DMA_CHAIN_FAST) QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK) QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH=$(QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_GPU_DIRECT_PACKET=$(QPSX_GPU_DIRECT_PACKET) QPSX_HOT_LAYOUT=$(QPSX_HOT_LAYOUT) QPSX_PHASE_METRICS=$(QPSX_PHASE_METRICS) QPSX_PERFORMANCE_FRAME_MARKERS=$(QPSX_PERFORMANCE_FRAME_MARKERS) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
@@ -1214,7 +1229,7 @@ qpsx-dev-core:
 			$(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) \
 			$(MUFROG_qpsx_EXTRA_CXXFLAGS)'
 
-$(QPSX_DEV_ARCHIVE): qpsx-dev-core
+$(QPSX_DEV_ARCHIVE): qpsx-dev-core-unlocked
 	@set -eu; \
 	tmp='$@.tmp'; \
 	$(SF2000_OBJCOPY) -D $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=qpsx_$(symbol)) \
@@ -1235,7 +1250,11 @@ $(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
 		$(LIBRETRO_COMMON) -lm $(SF2000_ENDFILES)
 	$(SF2000_STRIP) --strip-unneeded '$(QPSX_DEV_EXECUTABLE)'
 
-qpsx-dev: $(QPSX_DEV_EXECUTABLE)
+qpsx-dev:
+	mkdir -p '$(dir $(QPSX_DEV_LOCK))'
+	flock 9 '$(MAKE)' --no-print-directory qpsx-dev-unlocked 9>'$(QPSX_DEV_LOCK)'
+
+qpsx-dev-unlocked: $(QPSX_DEV_EXECUTABLE)
 
 qpsx-dev-mips32r1-audit: qpsx-dev
 	$(MAKE) QPSX_AUDIT_EXECUTABLE='$(QPSX_DEV_EXECUTABLE)' qpsx-mips32r1-audit
@@ -1379,7 +1398,9 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot:
 		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
 		QPSX_RECMEM_ALIGNMENT=16 \
 		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
-		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_MIPS_ASM_MEM_READS=$(QPSX_ASM_READS) \
+		QPSX_GTE_INTPL_OPTIMIZE=0 QPSX_GTE_INTPL_COMPACT=0 QPSX_GTE_RTPT_OS=0 QPSX_GTE_RTPT_ASM_FAST=0 \
+		QPSX_GPU_DMA_CHAIN_FAST=0 QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=0 QPSX_GPU_DMA_CHAIN_ADAPTIVE_DEFER_PREFETCH=0 \
 		QPSX_GPU_HOT_DRIVER_ORDER=$(QPSX_FASTMEM_HOT_ORDER) \
 		QPSX_GPU_PACKED_TILE_WRITES=1 \
 		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
@@ -1490,6 +1511,36 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-phase:
 		QPSX_FASTMEM_BUILD_SUFFIX=-phase
 	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-phase-dev'
+
+# Equal-layout control/candidate pair for the established pre-adaptive-DMA
+# recipe.  The only performance knob that differs is the compact ASM read
+# helper; all DMA, INTPL, and RTPT candidates are explicitly disabled.  The
+# fixed-length suffixes keep the tagged core layout comparable and the
+# manifest records both executable and linker-map hashes.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-asm-reads-sweep:
+	mkdir -p '$(QPSX_VARIANTS_DIR)'
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_ASM_READS=0 QPSX_FASTMEM_BUILD_SUFFIX=-asmreads-ctrl \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-asmreads-ctrl'
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control'
+	cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control.map'
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_ASM_READS=1 QPSX_FASTMEM_BUILD_SUFFIX=-asmreads-fast \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-asmreads-fast'
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate'
+	cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate.map'
+	@set -eu; \
+	out='$(QPSX_VARIANTS_DIR)'; mkdir -p "$$out"; \
+	manifest="$$out/asmreads-MANIFEST.tmp"; \
+	{ \
+		printf '%s\n' '# exact pre-adaptive-DMA ASM-read A/B'; \
+		printf 'control asm_reads=0 intpl=0 intpl_compact=0 rtpt_os=0 rtpt_asm=0 dma=0 adaptive_prev=0 adaptive_prefetch=0 '; \
+		sha256sum "$$out/sf2000-qpsx-asmreads-control" "$$out/sf2000-qpsx-asmreads-control.map"; \
+		printf 'candidate asm_reads=1 intpl=0 intpl_compact=0 rtpt_os=0 rtpt_asm=0 dma=0 adaptive_prev=0 adaptive_prefetch=0 '; \
+		sha256sum "$$out/sf2000-qpsx-asmreads-candidate" "$$out/sf2000-qpsx-asmreads-candidate.map"; \
+	} > "$$manifest"; mv "$$manifest" "$$out/asmreads-MANIFEST"; cat "$$out/asmreads-MANIFEST"
 
 # CF=2043 frontier A/Bs.  Keep all three on the exact run-492/495 raw-VRAM,
 # tail, fastmem recipe.  The first is a byte-for-byte algorithmic control
