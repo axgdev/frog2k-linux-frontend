@@ -422,7 +422,10 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-gpu-lighting-knob.patch \
 	patches/mufrog/qpsx-sf2000-gpu-span-metrics.patch \
 	patches/mufrog/qpsx-sf2000-gpu-linear4bpp.patch \
-	patches/mufrog/qpsx-sf2000-gpu-packed-spans.patch
+	patches/mufrog/qpsx-sf2000-gpu-packed-spans.patch \
+	patches/mufrog/qpsx-sf2000-mirror-safety.patch \
+	patches/mufrog/qpsx-sf2000-fast-mem-fingerprint.patch \
+	patches/mufrog/qpsx-sf2000-fast-mem-convert.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -471,6 +474,15 @@ QPSX_GPU_LINEAR_4BPP ?= 0
 # fall back to the original loops for all other primitive/texture cases.
 QPSX_GPU_PACKED_TILE_WRITES ?= 0
 QPSX_GPU_PACKED_SPRITE_4BPP ?= 0
+# Optional Linux NOMMU virtual mirroring. When the kernel accepts fixed
+# file-backed mappings, this removes the second-level PSX block-pointer LUT
+# and the per-load/store 21-bit RAM mask. The existing QPSX mapper falls back
+# to the normal malloc/LUT path when a fixed mapping is refused.
+QPSX_LINUX_MIRRORING ?= 0
+# Fold the NOMMU 21-bit RAM mirror mask into the output register, eliminating
+# one emitted MOV from every dynamic address conversion. Keep this opt-in for
+# physical A/B testing; it is only active with the stable $s7 PSX base.
+QPSX_MIPS_FAST_MEM_CONVERT ?= 0
 # Optional primitive-selection histogram for a dedicated profiling core. It
 # increments once per draw command, not per pixel, and is compiled out of the
 # production image so the counters cannot perturb the 16 KiB data cache.
@@ -500,9 +512,11 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_LINEAR_4BPP=$(QPSX_GPU_LINEAR_4BPP) \
 	-DQPSX_GPU_PACKED_TILE_WRITES=$(QPSX_GPU_PACKED_TILE_WRITES) \
 	-DQPSX_GPU_PACKED_SPRITE_4BPP=$(QPSX_GPU_PACKED_SPRITE_4BPP) \
+	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
+	-DQPSX_MIPS_FAST_MEM_CONVERT=$(QPSX_MIPS_FAST_MEM_CONVERT) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
@@ -566,6 +580,8 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_LINEAR_4BPP=%s\n' '$(QPSX_GPU_LINEAR_4BPP)'; \
 		printf 'QPSX_GPU_PACKED_TILE_WRITES=%s\n' '$(QPSX_GPU_PACKED_TILE_WRITES)'; \
 		printf 'QPSX_GPU_PACKED_SPRITE_4BPP=%s\n' '$(QPSX_GPU_PACKED_SPRITE_4BPP)'; \
+		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
+		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
 		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
 		printf 'QPSX_PROFILER=%s\n' '$(QPSX_PROFILER)'; \
 		printf 'CFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CFLAGS)'; \
