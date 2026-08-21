@@ -417,7 +417,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-superblock.patch \
 	patches/mufrog/qpsx-sf2000-telemetry.patch \
 	patches/mufrog/qpsx-sf2000-runtime-report.patch \
-	patches/mufrog/qpsx-sf2000-fixed-fast-path.patch
+	patches/mufrog/qpsx-sf2000-fixed-fast-path.patch \
+	patches/mufrog/qpsx-sf2000-gpu-metrics.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -454,6 +455,10 @@ QPSX_GTE_HOT_O3 ?= 1
 # choice compile-time so the pixel loops do not reload mutable option bits on
 # every pixel; set to 0 for the compatibility/runtime-toggle build.
 QPSX_GPU_FIXED_FAST_PATH ?= 1
+# Optional primitive-selection histogram for a dedicated profiling core. It
+# increments once per draw command, not per pixel, and is compiled out of the
+# production image so the counters cannot perturb the 16 KiB data cache.
+QPSX_GPU_RUNTIME_METRICS ?= 0
 # Emit one startup build-fingerprint line and shutdown-only block compilation
 # counters.  No per-instruction hooks are enabled; this is deliberately much
 # cheaper than the emulated-cycle profiler and makes physical A/B logs
@@ -475,6 +480,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_DISPATCH_CACHE_ENTRIES=$(QPSX_DISPATCH_CACHE_ENTRIES) \
 	-DQPSX_GTE_HOT_O3=$(QPSX_GTE_HOT_O3) \
 	-DQPSX_GPU_FIXED_FAST_PATH=$(QPSX_GPU_FIXED_FAST_PATH) \
+	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
@@ -536,6 +542,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_RUNTIME_TELEMETRY=%s\n' '$(QPSX_RUNTIME_TELEMETRY)'; \
 		printf 'QPSX_GTE_HOT_O3=%s\n' '$(QPSX_GTE_HOT_O3)'; \
 		printf 'QPSX_GPU_FIXED_FAST_PATH=%s\n' '$(QPSX_GPU_FIXED_FAST_PATH)'; \
+		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
 		printf 'QPSX_PROFILER=%s\n' '$(QPSX_PROFILER)'; \
 		printf 'CFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CFLAGS)'; \
 		printf 'CXXFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
