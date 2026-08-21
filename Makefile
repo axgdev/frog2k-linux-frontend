@@ -486,6 +486,10 @@ QPSX_GPU_LINEAR_4BPP ?= 0
 # fall back to the original loops for all other primitive/texture cases.
 QPSX_GPU_PACKED_TILE_WRITES ?= 0
 QPSX_GPU_PACKED_SPRITE_4BPP ?= 0
+# Put the four measured polygon drivers first in the renderer text. This is
+# an I-cache locality experiment; the dispatch table and all fallbacks stay
+# unchanged.
+QPSX_GPU_HOT_DRIVER_ORDER ?= 0
 # Optional exact CF=32 4bpp polygon path for full-window, flat-V spans. It
 # keeps a texture row pointer and proves that U does not wrap once per span;
 # all window/wrap/blend/lighting cases fall back to the generic renderer.
@@ -535,6 +539,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_LINEAR_4BPP=$(QPSX_GPU_LINEAR_4BPP) \
 	-DQPSX_GPU_PACKED_TILE_WRITES=$(QPSX_GPU_PACKED_TILE_WRITES) \
 	-DQPSX_GPU_PACKED_SPRITE_4BPP=$(QPSX_GPU_PACKED_SPRITE_4BPP) \
+	-DQPSX_GPU_HOT_DRIVER_ORDER=$(QPSX_GPU_HOT_DRIVER_ORDER) \
 	-DQPSX_GPU_4BPP_FLATV=$(QPSX_GPU_4BPP_FLATV) \
 	-DQPSX_GPU_4BPP_FLATV_MIN_PIXELS=$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS) \
 	-DQPSX_GPU_4BPP_PALETTE_LUT=$(QPSX_GPU_4BPP_PALETTE_LUT) \
