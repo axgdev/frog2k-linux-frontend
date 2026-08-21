@@ -638,6 +638,7 @@ QPSX_PROFILER ?= 0
 # tag or stale object archive even when two artifacts have different files.
 QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'tag=$(QPSX_BUILD_TAG)' \
+	'build_suffix=$(QPSX_FASTMEM_BUILD_SUFFIX)' \
 	'platform=$(QPSX_PLATFORM)' 'opt=$(QPSX_OPTIMIZE)' \
 	'gpu_opt=$(QPSX_GPU_OPTIMIZE)' 'dispatch=$(QPSX_DISPATCH_CACHE_ENTRIES)' \
 	'gte_div=$(QPSX_GTE_NATIVE_DIVIDE)' 'gte_o3=$(QPSX_GTE_HOT_O3)' \
@@ -944,6 +945,8 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-control \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-fast \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-order \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-v2-control \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-v2-fast \
 	qpsx-dev-ge-raw-vram-overlay-layout-sweep \
 	qpsx-dev-ge-raw-vram-overlay-recip8-hot qpsx-dev-ge-raw-vram-overlay-recip10-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot \
@@ -1440,6 +1443,24 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-order:
 		QPSX_FASTMEM_BUILD_SUFFIX=-poly2043-order
 	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-order-dev'
+
+# Corrected CF=2043 A/Bs.  These names intentionally carry a new generation
+# suffix: the shared production loop and its differential proof changed after
+# the first-cycle artifacts were built.  Both retain the exact legacy hot
+# order (mode 1); the rejected measured mode 2 is not part of this pair.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-v2-control:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_POLY_2043_FAST=0 QPSX_FASTMEM_HOT_ORDER=1 \
+		QPSX_FASTMEM_BUILD_SUFFIX=-poly2043-v2-control
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-v2-control-dev'
+
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-v2-fast:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_POLY_2043_FAST=1 QPSX_FASTMEM_HOT_ORDER=1 \
+		QPSX_FASTMEM_BUILD_SUFFIX=-poly2043-v2-fast
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-poly2043-v2-fast-dev'
 
 # A single serialized entry point avoids the shared qpsx-dev object/archive
 # race that occurs when make -j is given independent A/B wrapper targets.
