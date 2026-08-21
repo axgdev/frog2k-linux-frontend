@@ -151,6 +151,22 @@ struct host {
 	struct sf2000_input input;
 };
 
+/* Optional GE-composited diagnostic strips supplied by the QPSX core.  They
+ * remain valid for the duration of sf2000_video_vram_fps(), so no copy or
+ * full-frame CPU conversion is needed. */
+struct ge_overlay_request {
+	const void *data;
+	unsigned width;
+	unsigned height;
+	size_t pitch;
+	unsigned x;
+	unsigned y;
+};
+
+static struct ge_overlay_request raw_overlays[2];
+static unsigned raw_overlay_count;
+static unsigned ge_fps_overlay_logged;
+
 static struct host host = { .fb_fd = -1, .pcm_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
@@ -874,6 +890,59 @@ static void cpu_present(const void *data, unsigned width, unsigned height,
 #endif
 }
 
+/* Queue one small opaque RGB565 diagnostic strip after the raw BGR555
+ * stretch.  A missing/ordinary userspace mapping is intentionally a no-op:
+ * the game frame must remain on the GE path even when the optional overlay
+ * cannot be addressed by the NOMMU physical window. */
+static void ge_submit_overlay(const struct ge_overlay_request *overlay)
+{
+	hcge_state *state;
+	HCGERectangle source;
+	uint32_t source_phys;
+	size_t source_bytes;
+
+	if (!overlay || !overlay->data || !host.ge || !host.fb_phys ||
+		!overlay->width || !overlay->height ||
+		overlay->width > host.fb_width || overlay->height > host.fb_height ||
+		overlay->x > host.fb_width - overlay->width ||
+		overlay->y > host.fb_height - overlay->height ||
+		overlay->pitch < (size_t)overlay->width * sizeof(uint16_t))
+		return;
+	source_bytes = overlay->pitch * overlay->height;
+	if (source_bytes / overlay->height != overlay->pitch ||
+		source_bytes > UINT_MAX)
+		return;
+	source_phys = hcge_linux_cached_phys(overlay->data);
+	if (!source_phys || hcge_linux_cache_clean(host.ge,
+			(void *)overlay->data, (unsigned)source_bytes) < 0)
+		return;
+	state = &host.ge->state;
+	memset(state, 0, sizeof(*state));
+	state->render_options = HCGE_DSRO_NONE;
+	state->drawingflags = HCGE_DSDRAW_NOFX;
+	state->blittingflags = HCGE_DSBLIT_NOFX;
+	state->destination.config.format = HCGE_DSPF_RGB16;
+	state->destination.config.size.w = (int)host.fb_width;
+	state->destination.config.size.h = (int)host.fb_height;
+	state->source.config.format = HCGE_DSPF_RGB16;
+	state->source.config.size.w = (int)overlay->width;
+	state->source.config.size.h = (int)overlay->height;
+	state->dst.phys = host.fb_phys;
+	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
+	state->src.phys = source_phys;
+	state->src.pitch = (uint32_t)overlay->pitch;
+	state->accel = HCGE_DFXL_BLIT;
+	hcge_set_state(host.ge, state, state->accel);
+	source = (HCGERectangle){ 0, 0, (int)overlay->width,
+		(int)overlay->height };
+	if (!hcge_blit(host.ge, &source, (int)overlay->x, (int)overlay->y))
+		return;
+	if (!ge_fps_overlay_logged) {
+		log_kmsg("GE FPS overlay strips active\n");
+		ge_fps_overlay_logged = 1;
+	}
+}
+
 static int ge_present(const void *data, unsigned width, unsigned height,
 	size_t pitch, unsigned out_w, unsigned out_h, unsigned left, unsigned top)
 {
@@ -1188,6 +1257,13 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		if (!hcge_stretch_blit(host.ge, &source, &destination))
 			return -1;
 	}
+	if (direct_raw && raw_overlay_count) {
+		unsigned overlay_index;
+
+		for (overlay_index = 0; overlay_index < raw_overlay_count;
+			overlay_index++)
+			ge_submit_overlay(&raw_overlays[overlay_index]);
+	}
 	if (!first_frame)
 		log_kmsg("GE first present submitted\n");
 	host.ge_pending++;
@@ -1473,6 +1549,31 @@ void sf2000_video_vram(const void *data, unsigned width, unsigned height,
 	host.format = RETRO_PIXEL_FORMAT_0RGB1555;
 	video(data, width, height, pitch);
 	host.format = previous;
+}
+
+void sf2000_video_vram_fps(const void *data, unsigned width, unsigned height,
+	size_t pitch, const void *left, unsigned left_width,
+	unsigned left_height, size_t left_pitch, const void *right,
+	unsigned right_width, unsigned right_height, size_t right_pitch)
+{
+	enum retro_pixel_format previous = host.format;
+
+	raw_overlay_count = 0;
+	if (left && left_width && left_height) {
+		raw_overlays[raw_overlay_count++] =
+		(struct ge_overlay_request){ left, left_width, left_height,
+		left_pitch, 2u, 2u };
+	}
+	if (right && right_width && right_height) {
+		raw_overlays[raw_overlay_count++] =
+		(struct ge_overlay_request){ right, right_width, right_height,
+		right_pitch, host.fb_width > right_width + 2u ?
+		host.fb_width - right_width - 2u : 0u, 2u };
+	}
+	host.format = RETRO_PIXEL_FORMAT_0RGB1555;
+	video(data, width, height, pitch);
+	host.format = previous;
+	raw_overlay_count = 0;
 }
 
 static struct snd_mask *pcm_param_mask(struct snd_pcm_hw_params *parameters,
