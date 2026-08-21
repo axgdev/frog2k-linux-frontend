@@ -542,6 +542,10 @@ QPSX_LINUX_MIRRORING ?= 0
 # one emitted MOV from every dynamic address conversion. Keep this opt-in for
 # physical A/B testing; it is only active with the stable $s7 PSX base.
 QPSX_MIPS_FAST_MEM_CONVERT ?= 0
+# Propagate the existing fuzzy PS1-address classification through ADDIU.
+# This can remove repeated range checks in address-arithmetic chains, but the
+# classification is intentionally heuristic, so keep it an explicit A/B.
+QPSX_MIPS_PROPAGATE_FUZZY_ADDR ?= 0
 # Optional primitive-selection histogram for a dedicated profiling core. It
 # increments once per draw command, not per pixel, and is compiled out of the
 # production image so the counters cannot perturb the 16 KiB data cache.
@@ -585,6 +589,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_MIPS_FAST_MEM_CONVERT=$(QPSX_MIPS_FAST_MEM_CONVERT) \
+	-DQPSX_MIPS_PROPAGATE_FUZZY_ADDR=$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
 	-DQPSX_MIPS_DISPATCH_PREFETCH=$(QPSX_MIPS_DISPATCH_PREFETCH) \
 	-DQPSX_MIPS_DISPATCH_CACHE_GP=$(QPSX_MIPS_DISPATCH_CACHE_GP) \
@@ -670,6 +675,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_PALETTE_LUT=%s\n' '$(QPSX_GPU_4BPP_PALETTE_LUT)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
+		printf 'QPSX_MIPS_PROPAGATE_FUZZY_ADDR=%s\n' '$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR)'; \
 		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
 		printf 'QPSX_PROFILER=%s\n' '$(QPSX_PROFILER)'; \
 		printf 'CFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CFLAGS)'; \
