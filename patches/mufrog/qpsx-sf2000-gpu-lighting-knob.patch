@@ -1,0 +1,56 @@
+diff --git a/src/gpu/gpu_unai/gpu_unai.h b/src/gpu/gpu_unai/gpu_unai.h
+index f467b30..d6dba7e 100644
+--- a/src/gpu/gpu_unai/gpu_unai.h
++++ b/src/gpu/gpu_unai/gpu_unai.h
+@@ -294,11 +294,19 @@ static inline bool FastLightingEnabled()
+ #ifndef QPSX_GPU_FIXED_FAST_PATH
+ #define QPSX_GPU_FIXED_FAST_PATH 0
+ #endif
+-#if QPSX_GPU_FIXED_FAST_PATH
++#ifndef QPSX_GPU_FIXED_LIGHTING
++#define QPSX_GPU_FIXED_LIGHTING QPSX_GPU_FIXED_FAST_PATH
++#endif
++#if QPSX_GPU_FIXED_LIGHTING
+ 	/* Linux production keeps this option permanently enabled.  Returning a
+ 	 * compile-time constant removes a mutable bitfield load and branch from
+ 	 * every lit pixel; other ports retain their runtime option semantics. */
+ 	return true;
++#elif QPSX_GPU_FIXED_FAST_PATH
++	/* Keep the A/B experiment compile-time exact: with the general fixed fast
++	 * path enabled but lighting explicitly disabled, select the original LUT
++	 * implementation without reintroducing a per-pixel option load. */
++	return false;
+ #else
+ 	return gpu_unai.config.fast_lighting;
+ #endif
+diff --git a/src/r3000a.cpp b/src/r3000a.cpp
+index aa39b98..db14ea9 100644
+--- a/src/r3000a.cpp
++++ b/src/r3000a.cpp
+@@ -72,6 +72,9 @@ extern "C" void xlog(const char *fmt, ...);
+ #ifndef QPSX_GPU_FIXED_FAST_PATH
+ #define QPSX_GPU_FIXED_FAST_PATH 0
+ #endif
++#ifndef QPSX_GPU_FIXED_LIGHTING
++#define QPSX_GPU_FIXED_LIGHTING QPSX_GPU_FIXED_FAST_PATH
++#endif
+ #ifndef QPSX_GPU_RUNTIME_METRICS
+ #define QPSX_GPU_RUNTIME_METRICS 0
+ #endif
+@@ -88,13 +91,14 @@ int psxInit() {
+ 	printf("Running PCSX Version %s (%s).\n", PACKAGE_VERSION, __DATE__);
+ 	xlog("QPSX: build knobs dispatch_cache=%d psxM_reg=%d gte_native_div=%d "
+ 	     "gte_hot_o3=%d return_ra=%d fold=%d/%d/%d profiler=%d telemetry=%d "
+-	     "gpu_fixed=%d gpu_metrics=%d",
++	     "gpu_fixed=%d gpu_light_fast=%d gpu_metrics=%d",
+ 	     QPSX_MIPS_DISPATCH_CACHE_ENTRIES, QPSX_MIPS_PSMEM_REG,
+ 	     QPSX_GTE_NATIVE_DIVIDE, QPSX_GTE_HOT_O3,
+ 	     QPSX_MIPS_PERSISTENT_RETURN_RA, QPSX_MIPS_FOLD_DIRECT_JUMPS,
+ 	     QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX, QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES,
+ 	     QPSX_PROFILER_ENABLED, QPSX_RUNTIME_TELEMETRY,
+-	     QPSX_GPU_FIXED_FAST_PATH, QPSX_GPU_RUNTIME_METRICS);
++	     QPSX_GPU_FIXED_FAST_PATH, QPSX_GPU_FIXED_LIGHTING,
++	     QPSX_GPU_RUNTIME_METRICS);
+ 
+ #ifdef PSXREC
+ 	#ifndef interpreter_none
