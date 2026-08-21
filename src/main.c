@@ -302,6 +302,178 @@ static void reset_metric_window(void)
 		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
 }
 
+/*
+ * A core is a statically linked executable on the NOMMU image, so opening a
+ * different core starts a fresh process but does not guarantee that every
+ * physically indexed cache line left by the previous process has been
+ * invalidated.  Flush private executable/data mappings once at the process
+ * boundary.  Shared device mappings (framebuffer/GE) are deliberately left
+ * alone: they are maintained by their own cache-clean calls and passing a
+ * device VMA to cacheflush is not portable across the vendor kernels.
+ */
+static void clear_core_open_caches(void)
+{
+#ifdef __mips__
+	FILE *maps;
+	char line[320];
+	unsigned ranges = 0;
+	unsigned errors = 0;
+	uint64_t bytes = 0;
+
+	maps = fopen("/proc/self/maps", "r");
+	if (!maps) {
+		char details[128];
+
+		snprintf(details, sizeof(details),
+			"core_cache_clear=maps-open-failed errno=%d\n", errno);
+		log_kmsg(details);
+		return;
+	}
+	while (fgets(line, sizeof(line), maps)) {
+		unsigned long start;
+		unsigned long end;
+		char perms[5];
+		char pathname[192];
+		int fields;
+		unsigned long cursor;
+
+		pathname[0] = '\0';
+		fields = sscanf(line, "%lx-%lx %4s %*s %*s %*s %191[^\n]",
+			&start, &end, perms, pathname);
+		if (fields < 3 || end <= start || perms[3] != 'p')
+			continue;
+		/* cacheflush takes an int byte count on the SF2000 ABI. */
+		cursor = start;
+		while (cursor < end) {
+			unsigned long chunk = end - cursor;
+
+			if (chunk > (unsigned long)INT_MAX)
+				chunk = (unsigned long)INT_MAX;
+			if (cacheflush((void *)(uintptr_t)cursor, (int)chunk,
+					BCACHE) < 0)
+				errors++;
+			ranges++;
+			bytes += chunk;
+			cursor += chunk;
+		}
+	}
+	fclose(maps);
+	{
+		char details[160];
+
+		snprintf(details, sizeof(details),
+			"core_cache_clear=private-maps ranges=%u bytes=%" PRIu64
+			" errors=%u\n", ranges, bytes, errors);
+		log_kmsg(details);
+	}
+#else
+	log_kmsg("core_cache_clear=host-none\n");
+#endif
+}
+
+static long read_sysfs_long(const char *path)
+{
+	char text[40];
+	char *end;
+	long value;
+	int fd;
+	ssize_t length;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	length = read(fd, text, sizeof(text) - 1u);
+	close(fd);
+	if (length <= 0)
+		return 0;
+	text[length] = '\0';
+	errno = 0;
+	value = strtol(text, &end, 10);
+	if (end == text || errno == ERANGE)
+		return 0;
+	return value;
+}
+
+static long current_cpu_khz(void)
+{
+	long value = read_sysfs_long(
+		"/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq");
+
+	if (value <= 0)
+		value = read_sysfs_long(
+			"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq");
+	return value;
+}
+
+static long current_temperature_mc(void)
+{
+	return read_sysfs_long("/sys/class/thermal/thermal_zone0/temp");
+}
+
+static uint64_t fnv1a_file(const char *path, uint64_t *bytes, int *ok)
+{
+	unsigned char buffer[4096];
+	uint64_t hash = UINT64_C(1469598103934665603);
+	uint64_t total = 0;
+	int fd;
+
+	*ok = 0;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	for (;;) {
+		ssize_t length = read(fd, buffer, sizeof(buffer));
+		size_t i;
+
+		if (length == 0)
+			break;
+		if (length < 0) {
+			if (errno == EINTR)
+				continue;
+			close(fd);
+			return 0;
+		}
+		for (i = 0; i < (size_t)length; i++) {
+			hash ^= buffer[i];
+			hash *= UINT64_C(1099511628211);
+		}
+		total += (uint64_t)length;
+	}
+	close(fd);
+	*bytes = total;
+	*ok = 1;
+	return hash;
+}
+
+static void log_frontend_identity(const char *argv0)
+{
+	char resolved[PATH_MAX];
+	const char *path = argv0;
+	ssize_t length;
+	uint64_t bytes = 0;
+	uint64_t hash;
+	int hash_ok;
+	struct stat status;
+
+	length = readlink("/proc/self/exe", resolved, sizeof(resolved) - 1u);
+	if (length > 0) {
+		resolved[length] = '\0';
+		path = resolved;
+	}
+	hash = fnv1a_file(path, &bytes, &hash_ok);
+	if (stat(path, &status) < 0)
+		memset(&status, 0, sizeof(status));
+	{
+		char details[320];
+
+		snprintf(details, sizeof(details),
+			"frontend identity path=%.*s bytes=%" PRIu64
+			" mtime=%ld fnv1a=%016" PRIx64 " hash_ok=%d\n",
+			180, path, bytes, (long)status.st_mtime, hash, hash_ok);
+		log_kmsg(details);
+	}
+}
+
 void unifrog_core_load_progress(const char *stage, unsigned current,
 	unsigned total)
 {
@@ -713,6 +885,7 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	int direct;
 	unsigned source_index;
 	unsigned y;
+	int direct_raw;
 
 	if (!host.ge || !host.ge_buffers || width > GE_SOURCE_MAX_WIDTH ||
 			height > GE_SOURCE_MAX_HEIGHT ||
@@ -735,12 +908,15 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	if (((host.format == RETRO_PIXEL_FORMAT_RGB565 &&
 			pitch == (size_t)width * sizeof(uint16_t)) ||
 			(host.format == RETRO_PIXEL_FORMAT_XRGB8888 &&
-			pitch == (size_t)width * sizeof(uint32_t))) &&
+			pitch == (size_t)width * sizeof(uint32_t)) ||
+			(host.format == RETRO_PIXEL_FORMAT_0RGB1555 &&
+			pitch >= (size_t)width * sizeof(uint16_t))) &&
 			source_bytes <= UINT_MAX &&
 			(uintptr_t)data + source_bytes >= (uintptr_t)data &&
 			(uintptr_t)data + source_bytes <= 0xa0000000u)
-		direct_phys = hcge_linux_cached_phys(data);
+	direct_phys = hcge_linux_cached_phys(data);
 	direct = direct_phys != 0;
+	direct_raw = direct && host.format == RETRO_PIXEL_FORMAT_0RGB1555;
 	/*
 	 * Keep one complete source surface available while the GE consumes the
 	 * other.  The barrier before reuse is the ownership boundary: the CPU
@@ -756,7 +932,21 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	source_buffer = host.ge_source[source_index];
 	if (!first_frame)
 		log_kmsg("GE first present source prepare begin\n");
-	if (data == (const void *)source_buffer &&
+	if (direct_raw) {
+		/*
+		 * QPSX's optional raw-VRAM presenter hands us a display window in
+		 * native PS1 ARGB1555.  KSEG0 VRAM is physically linear on the NOMMU
+		 * target, so the GE can convert it directly; no managed staging buffer
+		 * or CPU RGB conversion is needed.  The final fence below is required
+		 * because the emulator reuses the same VRAM on its next frame.
+		 */
+		if (source_bytes > UINT_MAX ||
+			hcge_linux_cache_clean(host.ge, (void *)data,
+				(unsigned int)source_bytes) < 0)
+			return -1;
+		source_phys = direct_phys;
+		interval_ge_stage_frames++;
+	} else if (data == (const void *)source_buffer &&
 			host.format == RETRO_PIXEL_FORMAT_RGB565) {
 		if (hcge_linux_cache_clean(host.ge, source_buffer,
 				(unsigned int)(width * height * sizeof(uint16_t))) < 0)
@@ -782,7 +972,8 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		state->destination.config.size.h = (int)height;
 		state->source.config.format =
 			host.format == RETRO_PIXEL_FORMAT_XRGB8888 ?
-			HCGE_DSPF_RGB32 : HCGE_DSPF_RGB16;
+			HCGE_DSPF_RGB32 : host.format == RETRO_PIXEL_FORMAT_0RGB1555 ?
+			HCGE_DSPF_ARGB1555 : HCGE_DSPF_RGB16;
 		state->source.config.size.w = (int)width;
 		state->source.config.size.h = (int)height;
 		state->dst.phys = host.ge_source_phys[source_index];
@@ -963,13 +1154,14 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->destination.config.format = HCGE_DSPF_RGB16;
 	state->destination.config.size.w = (int)host.fb_width;
 	state->destination.config.size.h = (int)host.fb_height;
-	state->source.config.format = HCGE_DSPF_RGB16;
+	state->source.config.format = direct_raw ? HCGE_DSPF_ARGB1555 :
+		HCGE_DSPF_RGB16;
 	state->source.config.size.w = (int)width;
 	state->source.config.size.h = (int)height;
 	state->dst.phys = host.fb_phys;
 	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
 	state->src.phys = source_phys;
-	state->src.pitch = width * sizeof(uint16_t);
+	state->src.pitch = direct_raw ? pitch : width * sizeof(uint16_t);
 	source = (HCGERectangle){ 0, 0, (int)width, (int)height };
 	if (width == out_w && height == out_h) {
 		state->accel = HCGE_DFXL_BLIT;
@@ -987,9 +1179,16 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	if (!first_frame)
 		log_kmsg("GE first present submitted\n");
 	host.ge_pending++;
-	host.ge_next = (host.ge_next + 1u) % host.ge_buffers;
+	if (direct_raw) {
+		/* The raw source is the emulator's live VRAM, not a queued snapshot. */
+		if (hcge_engine_sync(host.ge) < 0)
+			return -1;
+		host.ge_pending = 0;
+	} else {
+		host.ge_next = (host.ge_next + 1u) % host.ge_buffers;
+	}
 	/* Make the first frame observable before publishing READY_MARKER. */
-	if (!first_frame) {
+	if (!first_frame && !direct_raw) {
 		if (hcge_engine_sync(host.ge) < 0)
 			return -1;
 		host.ge_pending = 0;
@@ -1155,7 +1354,9 @@ static void video(const void *data, unsigned width, unsigned height,
 		/* Must fit the whole metric line including the trailing newline:
 		 * a truncated write swallows the '\n', gluing the next record
 		 * (e.g. a mode event) onto this line so sf2000-logd drops it. */
-		char details[896];
+		char details[1024];
+		long cpu_khz = current_cpu_khz();
+		long temperature_mc = current_temperature_mc();
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1203,6 +1404,18 @@ static void video(const void *data, unsigned width, unsigned height,
 				(audio_metrics.enq_hf * 1000u) /
 					audio_metrics.enq_l1 : 0u,
 			audio_metrics.enq_clicks);
+		/* Keep the established metric ABI stable and append hardware state
+		 * without making the hot per-frame path perform any sysfs I/O. */
+		{
+			size_t details_length = strlen(details);
+
+			if (details_length && details[details_length - 1u] == '\n') {
+				snprintf(details + details_length - 1u,
+					sizeof(details) - details_length + 1u,
+					" cpu_khz=%ld temp_mc=%ld\n", cpu_khz,
+					temperature_mc);
+			}
+		}
 		if (metrics_fd >= 0 &&
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
@@ -1229,6 +1442,22 @@ static void video(const void *data, unsigned width, unsigned height,
 		metrics_cpu_clock_valid =
 			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
 	}
+}
+
+/*
+ * Optional QPSX zero-copy path.  The ordinary libretro pixel-format
+ * negotiation remains RGB565 for every core (and for QPSX menus); this narrow
+ * entry point labels only a native PS1 VRAM callback as ARGB1555 so the GE
+ * presenter can submit it without a CPU conversion pass.
+ */
+void sf2000_video_vram(const void *data, unsigned width, unsigned height,
+	size_t pitch)
+{
+	enum retro_pixel_format previous = host.format;
+
+	host.format = RETRO_PIXEL_FORMAT_0RGB1555;
+	video(data, width, height, pitch);
+	host.format = previous;
 }
 
 static struct snd_mask *pcm_param_mask(struct snd_pcm_hw_params *parameters,
@@ -2871,6 +3100,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	log_kmsg("entry\n");
+	log_frontend_identity(argv[0]);
 	retained_stage("frontend-entry", 1);
 	core_watchdog_kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	(void)signal(SIGALRM, core_load_timeout_signal);
@@ -2897,6 +3127,10 @@ int main(int argc, char **argv)
 	retro_set_audio_sample_batch(audio_batch);
 	retro_set_input_poll(input_poll);
 	retro_set_input_state(input_state);
+	/* This is a process-open operation, never a per-frame operation.  Keep it
+	 * after the platform mappings exist so every private core mapping is
+	 * covered, but before retro_init can execute hot translated code. */
+	clear_core_open_caches();
 	if (retro_api_version() != RETRO_API_VERSION) {
 		fprintf(stderr, "sf2000-frontend: incompatible libretro API\n");
 		close_platform();

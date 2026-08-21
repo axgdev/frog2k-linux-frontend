@@ -548,6 +548,7 @@ QPSX_MIPS_ASM_MEM_READS ?= 0
 # recompiler already tests the same counter at block return, so a candidate
 # can defer that call until an event is due; keep it opt-in for compatibility.
 QPSX_HLE_LAZY_EVENT_CHECK ?= 0
+QPSX_GE_RAW_VRAM ?= 0
 # If Gouraud endpoints quantize to the same 5-bit RGB values, use the exact
 # flat-line raster path. This removes interpolation work without changing
 # pixels, mask handling, or blending; keep it an explicit A/B knob.
@@ -610,6 +611,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_LINUX_RAM_HELPER_FASTPATH=$(QPSX_LINUX_RAM_HELPER_FASTPATH) \
 	-DQPSX_MIPS_ASM_MEM_READS=$(QPSX_MIPS_ASM_MEM_READS) \
 	-DQPSX_HLE_LAZY_EVENT_CHECK=$(QPSX_HLE_LAZY_EVENT_CHECK) \
+	-DQPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) \
 	-DQPSX_GPU_GOURAUD_LINE_FLATFAST=$(QPSX_GPU_GOURAUD_LINE_FLATFAST) \
 	-DQPSX_MIPS_PROPAGATE_FUZZY_ADDR=$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR) \
 	-DQPSX_RECMEM_ALIGNMENT=$(QPSX_RECMEM_ALIGNMENT) \
@@ -809,7 +811,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
 	qpsx-production-sweep \
-	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-package \
+	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated \
@@ -948,19 +950,20 @@ qpsx-dev-core:
 		'QPSX_OPTIMIZE=$(QPSX_OPTIMIZE)' \
 		'QPSX_GPU_OPTIMIZE=$(QPSX_GPU_OPTIMIZE)' \
 		'QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2)' \
+		'QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -1025,6 +1028,33 @@ qpsx-dev-fastest:
 		QPSX_GPU_PACKED_TILE_WRITES=1 \
 		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
 		QPSX_GPU_PACKED_POLY_WRITES=1
+
+# Experimental GE offload: QPSX submits the native ARGB1555 display window
+# directly from its KSEG0 VRAM and the Linux frontend asks HC15xx to convert
+# and scale it. Keep this separate from qpsx-dev until a physical A/B proves
+# that the extra GE fence beats the CPU conversion on the target firmware.
+qpsx-dev-ge-raw-vram:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram' \
+		QPSX_GE_RAW_VRAM=1 \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-dev'
 
 qpsx-dev-package: qpsx-dev-mips32r1-audit
 	mkdir -p build/core-packages/licenses
