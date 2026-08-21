@@ -216,6 +216,7 @@ static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
 static unsigned pause_ge_disabled;
 static unsigned pause_ge_presented;
+static unsigned ge_raw_logged;
 /* One-shot guard so a failed GE present resets and retries the engine at
  * most once before the permanent CPU fallback. */
 static unsigned ge_reset_retried;
@@ -944,6 +945,15 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 			hcge_linux_cache_clean(host.ge, (void *)data,
 				(unsigned int)source_bytes) < 0)
 			return -1;
+		if (!ge_raw_logged) {
+			char details[160];
+
+			snprintf(details, sizeof(details),
+				"GE raw VRAM path active phys=%08x size=%ux%u pitch=%lu\n",
+				direct_phys, width, height, (unsigned long)pitch);
+			log_kmsg(details);
+			ge_raw_logged = 1;
+		}
 		source_phys = direct_phys;
 		interval_ge_stage_frames++;
 	} else if (data == (const void *)source_buffer &&
