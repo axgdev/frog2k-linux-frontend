@@ -93,7 +93,7 @@ static unsigned audio_native_rate(unsigned rate)
 #define CORE_RUN_TIMEOUT_SECONDS 10u
 #define AUDIO_CONVERT_CAPACITY (AUDIO_CONVERT_SAMPLES * 8u)
 #define AUDIO_WRITE_CHUNK 1024u
-#define GE_SOURCE_BUFFERS 2u
+#define GE_SOURCE_BUFFERS 3u
 #define GE_SOURCE_MAX_WIDTH 512u
 #define GE_SOURCE_MAX_HEIGHT 320u
 #define GE_SOURCE_STRIDE (GE_SOURCE_MAX_WIDTH * sizeof(uint16_t))
@@ -924,13 +924,20 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
 	state->src.phys = source_phys;
 	state->src.pitch = width * sizeof(uint16_t);
-	state->accel = HCGE_DFXL_STRETCHBLIT;
-	hcge_set_state(host.ge, state, state->accel);
 	source = (HCGERectangle){ 0, 0, (int)width, (int)height };
-	destination = (HCGERectangle){ (int)left, (int)top,
-		(int)out_w, (int)out_h };
-	if (!hcge_stretch_blit(host.ge, &source, &destination))
-		return -1;
+	if (width == out_w && height == out_h) {
+		state->accel = HCGE_DFXL_BLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		if (!hcge_blit(host.ge, &source, (int)left, (int)top))
+			return -1;
+	} else {
+		state->accel = HCGE_DFXL_STRETCHBLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		destination = (HCGERectangle){ (int)left, (int)top,
+			(int)out_w, (int)out_h };
+		if (!hcge_stretch_blit(host.ge, &source, &destination))
+			return -1;
+	}
 	if (!first_frame)
 		log_kmsg("GE first present submitted\n");
 	host.ge_pending++;
@@ -2642,16 +2649,17 @@ static int open_platform(void)
 			hcge_close_context(host.ge);
 			host.ge = NULL;
 		} else {
-			char details[192];
+			char details[224];
 
 			memset(host.fb, 0, host.fb_bytes);
 #ifdef __mips__
 			(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 			snprintf(details, sizeof(details),
-				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u fenced_depth=%u max_source=%ux%u\n",
+				"GE RGB565 presenter ready fb_phys=%08x source0=%08x source1=%08x source2=%08x bytes=%lu buffers=%u fenced_depth=%u max_source=%ux%u\n",
 				host.fb_phys, host.ge_source_phys[0],
 				host.ge_buffers > 1 ? host.ge_source_phys[1] : 0,
+				host.ge_buffers > 2 ? host.ge_source_phys[2] : 0,
 				(unsigned long)host.ge_source_bytes, host.ge_buffers,
 				host.ge_buffers, GE_SOURCE_MAX_WIDTH, GE_SOURCE_MAX_HEIGHT);
 			log_kmsg(details);
