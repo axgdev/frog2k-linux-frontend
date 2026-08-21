@@ -1,0 +1,29 @@
+diff --git a/src/gpu/gpu_unai/gpu_inner.h b/src/gpu/gpu_unai/gpu_inner.h
+index cf5da47..1ec554e 100644
+--- a/src/gpu/gpu_unai/gpu_inner.h
++++ b/src/gpu/gpu_unai/gpu_inner.h
+@@ -854,9 +854,22 @@ static void gpuPolySpanFn(const gpu_unai_t &gpu_unai, u16 *pDst, u32 count)
+ 	}
+ #endif
+ #if QPSX_GPU_4BPP_FLATV
++	/* Keep the out-of-line proof helper off the generic hot path.  The
++	 * previous guard called it for every long CF=32 span, including spans
++	 * with a non-unit U step that it immediately rejected.  On the small
++	 * I-cache this call/return plus the duplicate proof outweighed the
++	 * paired-byte loop.  These cheap fields are sufficient to select the
++	 * only high-volume specialization; the helper retains its full checks
++	 * as a defensive correctness boundary. */
+ 	if (CF == 32 && count >= QPSX_GPU_4BPP_FLATV_MIN_PIXELS &&
+-	    qpsx_gpu_poly_span_4bpp_flatv(gpu_unai, pDst, count))
+-		return;
++	    gpu_unai.u_msk == ((255u << FIXED_BITS) | fixed_LOMASK) &&
++	    gpu_unai.v_msk == ((255u << FIXED_BITS) | fixed_LOMASK) &&
++	    gpu_unai.v_inc == 0 && gpu_unai.u_inc == (1 << FIXED_BITS)) {
++		const u32 tu = (gpu_unai.u & gpu_unai.u_msk) >> FIXED_BITS;
++		if (tu < 256u && count <= 256u - tu &&
++		    qpsx_gpu_poly_span_4bpp_flatv(gpu_unai, pDst, count))
++			return;
++	}
+ #endif
+ #if QPSX_GPU_LINEAR_4BPP
+ 	if (CF == 32 && qpsx_gpu_poly_span_4bpp_linear(gpu_unai, pDst, count))
