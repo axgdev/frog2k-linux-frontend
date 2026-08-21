@@ -203,6 +203,7 @@ static struct host host = { .fb_fd = -1, .pcm_fd = -1,
 static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
+static unsigned run_frames;
 static struct timespec metrics_start;
 /*
  * uClibc's MIPS getrusage wrapper is not ABI-compatible with the kernel on
@@ -240,6 +241,8 @@ static uint16_t frame_tail_hist[FRAME_TAIL_BUCKETS];
 static uint16_t core_tail_hist[FRAME_TAIL_BUCKETS];
 static uint64_t frame_tail_sum_us;
 static uint64_t core_tail_sum_us;
+static unsigned frame_tail_max_us;
+static unsigned core_tail_max_us;
 static unsigned frame_tail_samples;
 static unsigned core_tail_samples;
 static unsigned frame_tail_runs;
@@ -250,6 +253,8 @@ static void frame_tail_hist_reset(void)
 	memset(core_tail_hist, 0, sizeof(core_tail_hist));
 	frame_tail_sum_us = 0;
 	core_tail_sum_us = 0;
+	frame_tail_max_us = 0;
+	core_tail_max_us = 0;
 	frame_tail_samples = 0;
 	core_tail_samples = 0;
 }
@@ -268,6 +273,12 @@ static void frame_tail_hist_add(uint16_t *hist, unsigned *samples,
 		(*samples)++;
 	if (*sum_us <= UINT64_MAX - elapsed_us)
 		*sum_us += elapsed_us;
+}
+
+static void frame_tail_max_update(unsigned *max_us, uint64_t elapsed_us)
+{
+	if (elapsed_us > *max_us)
+		*max_us = elapsed_us > UINT_MAX ? UINT_MAX : (unsigned)elapsed_us;
 }
 
 static unsigned frame_tail_percentile(const uint16_t *hist,
@@ -302,6 +313,8 @@ static void frame_tail_emit(void)
 	unsigned core_tail_p999;
 	unsigned frame_tail_avg;
 	unsigned core_tail_avg;
+	unsigned frame_tail_p999_valid;
+	unsigned core_tail_p999_valid;
 	char details[448];
 
 	if (!frame_tail_runs)
@@ -322,16 +335,20 @@ static void frame_tail_emit(void)
 		core_tail_samples, 990u);
 	core_tail_p999 = frame_tail_percentile(core_tail_hist,
 		core_tail_samples, 999u);
+	frame_tail_p999_valid = frame_tail_samples >= 1000u;
+	core_tail_p999_valid = core_tail_samples >= 1000u;
 	frame_tail_avg = frame_tail_samples ?
 		(unsigned)(frame_tail_sum_us / frame_tail_samples) : 0u;
 	core_tail_avg = core_tail_samples ?
 		(unsigned)(core_tail_sum_us / core_tail_samples) : 0u;
 	snprintf(details, sizeof(details),
-		"frame-tail run_frames=%u video_frames=%u samples=%u avg_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u core_samples=%u core_avg_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u\n",
+		"frame-tail run_frames=%u video_frames=%u samples=%u avg_us=%u max_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u p999_valid=%u p999_min_samples=1000 core_samples=%u core_avg_us=%u core_max_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u core_p999_valid=%u core_p999_min_samples=1000\n",
 		frame_tail_runs, video_callbacks, frame_tail_samples,
-		frame_tail_avg, frame_tail_p95, frame_tail_p98, frame_tail_p99,
-		frame_tail_p999, core_tail_samples, core_tail_avg, core_tail_p95,
-		core_tail_p98, core_tail_p99, core_tail_p999);
+		frame_tail_avg, frame_tail_max_us, frame_tail_p95, frame_tail_p98,
+		frame_tail_p99, frame_tail_p999,
+		frame_tail_p999_valid, core_tail_samples, core_tail_avg,
+		core_tail_max_us, core_tail_p95, core_tail_p98, core_tail_p99,
+		core_tail_p999, core_tail_p999_valid);
 	if (metrics_fd >= 0 && write(metrics_fd, details,
 		strlen(details)) < 0) {
 		/* best-effort tail metrics spool */
@@ -448,6 +465,7 @@ static void start_metrics_logging(void)
 static void reset_metric_window(void)
 {
 	video_callbacks = 0;
+	run_frames = 0;
 	sf2000_pacer_reset_interval(&pacer);
 	interval_max_run_us = 0;
 	interval_sampled_present_us = 0;
@@ -1589,7 +1607,7 @@ static void video(const void *data, unsigned width, unsigned height,
 	out_h = host.fb_height;
 	left = 0;
 	top = 0;
-	profile_present = first_frame && (video_callbacks % 300u) == 0;
+	profile_present = first_frame && ((run_frames + 1u) % 300u) == 0;
 	if (profile_present)
 		(void)clock_gettime(CLOCK_MONOTONIC, &present_start);
 	if (ge_present(data, width, height, pitch, out_w, out_h, left, top) < 0) {
@@ -1667,6 +1685,7 @@ static void video(const void *data, unsigned width, unsigned height,
 #endif
 		first_frame = 1;
 		video_callbacks = 0;
+		run_frames = 0;
 		reset_metric_window();
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
@@ -3640,6 +3659,7 @@ int main(int argc, char **argv)
 		(void)clock_gettime(CLOCK_MONOTONIC, &core_end);
 #endif
 		benchmark_frame_count++;
+		run_frames++;
 		if (state_resume_probe_frames) {
 			char details[96];
 			unsigned completed = 3u - state_resume_probe_frames;
@@ -3674,6 +3694,10 @@ int main(int argc, char **argv)
 			&core_tail_sum_us, timespec_delta_us(&core_end, &run_start));
 		frame_tail_hist_add(frame_tail_hist, &frame_tail_samples,
 			&frame_tail_sum_us, timespec_delta_us(&now, &run_start));
+		frame_tail_max_update(&core_tail_max_us,
+			timespec_delta_us(&core_end, &run_start));
+		frame_tail_max_update(&frame_tail_max_us,
+			timespec_delta_us(&now, &run_start));
 		frame_tail_runs++;
 		if (frame_tail_runs >= 300u)
 			frame_tail_emit();
