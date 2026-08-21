@@ -960,6 +960,7 @@ QPSX_DEV_EXECUTABLE := build/sf2000-qpsx-dev
 QPSX_DEV_LINK_MAP := build/qpsx-dev/qpsx-dev.map
 QPSX_DEV_FLAGS_STAMP := build/qpsx-dev/compiler.flags
 QPSX_DEV_LOCK ?= build/qpsx-dev/.source-build.lock
+QPSX_DEV_LOCK_HELD ?= 0
 QPSX_VARIANTS_DIR ?= build/qpsx-variants
 QPSX_GP0_CANDIDATES_DIR ?= build/qpsx-gp0-candidates
 JS2300_RUNTIME := build/js2300/libjs2300.a
@@ -980,7 +981,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
 	qpsx-production-sweep \
-	qpsx-dev qpsx-dev-core qpsx-dev-core-unlocked qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
+	qpsx-dev qpsx-dev-core qpsx-dev-core-unlocked qpsx-dev-archive-unlocked qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
 	qpsx-dev-ge-raw-vram-overlay-cache qpsx-dev-ge-raw-vram-overlay-fastmem-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-asm-reads-sweep \
@@ -1166,7 +1167,7 @@ QPSX_DEV_PROFILER ?= 1
 
 qpsx-dev-core:
 	mkdir -p '$(dir $(QPSX_DEV_LOCK))'
-	flock 9 '$(MAKE)' --no-print-directory qpsx-dev-core-unlocked 9>'$(QPSX_DEV_LOCK)'
+	flock '$(QPSX_DEV_LOCK)' '$(MAKE)' --no-print-directory qpsx-dev-core-unlocked
 
 qpsx-dev-core-unlocked: QPSX_PROFILER := $(QPSX_DEV_PROFILER)
 qpsx-dev-core-unlocked:
@@ -1229,17 +1230,24 @@ qpsx-dev-core-unlocked:
 			$(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) \
 			$(MUFROG_qpsx_EXTRA_CXXFLAGS)'
 
-$(QPSX_DEV_ARCHIVE): qpsx-dev-core-unlocked
-	@set -eu; \
-	tmp='$@.tmp'; \
-	$(SF2000_OBJCOPY) -D $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=qpsx_$(symbol)) \
-		'$(QPSX_DEV_RAW)' "$$tmp"; \
-	if cmp -s "$$tmp" '$@' 2>/dev/null; then \
-		rm -f "$$tmp"; \
+$(QPSX_DEV_ARCHIVE): FORCE
+	mkdir -p '$(dir $(QPSX_DEV_LOCK))'
+	@if test '$(QPSX_DEV_LOCK_HELD)' = 1; then \
+		$(MAKE) --no-print-directory qpsx-dev-archive-unlocked; \
 	else \
-		mv "$$tmp" '$@'; \
+		flock '$(QPSX_DEV_LOCK)' '$(MAKE)' --no-print-directory qpsx-dev-archive-unlocked QPSX_DEV_LOCK_HELD=1; \
 	fi
 
+qpsx-dev-archive-unlocked: qpsx-dev-core-unlocked
+	@set -eu; \
+	tmp='$(QPSX_DEV_ARCHIVE).tmp'; \
+	$(SF2000_OBJCOPY) -D $(foreach symbol,$(LIBRETRO_API_SYMBOLS),--redefine-sym $(symbol)=qpsx_$(symbol)) \
+		'$(QPSX_DEV_RAW)' "$$tmp"; \
+	if cmp -s "$$tmp" '$(QPSX_DEV_ARCHIVE)' 2>/dev/null; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" '$(QPSX_DEV_ARCHIVE)'; \
+	fi
 $(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
 		$(MUFROG_MEMORY_STREAM) build/mufrog/adapter-qpsx.o \
 		build/mufrog/qpsx-adapter.o $(QPSX_DEV_ARCHIVE) Makefile
@@ -1252,7 +1260,7 @@ $(QPSX_DEV_EXECUTABLE): $(SF2000_HOST_OBJECTS) $(LIBRETRO_COMMON) \
 
 qpsx-dev:
 	mkdir -p '$(dir $(QPSX_DEV_LOCK))'
-	flock 9 '$(MAKE)' --no-print-directory qpsx-dev-unlocked 9>'$(QPSX_DEV_LOCK)'
+	flock '$(QPSX_DEV_LOCK)' '$(MAKE)' --no-print-directory qpsx-dev-unlocked QPSX_DEV_LOCK_HELD=1
 
 qpsx-dev-unlocked: $(QPSX_DEV_EXECUTABLE)
 
@@ -1531,6 +1539,13 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-asm-reads-sweep:
 	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
 		'$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate'
 	cp '$(QPSX_DEV_LINK_MAP)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate.map'
+	@set -eu; \
+	if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-control.map'; then \
+		echo 'ASM-read control map unexpectedly references psxMemRead*_asm' >&2; exit 1; \
+	fi; \
+	if ! grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' '$(QPSX_VARIANTS_DIR)/sf2000-qpsx-asmreads-candidate.map'; then \
+		echo 'ASM-read candidate map lacks psxMemRead*_asm' >&2; exit 1; \
+	fi
 	@set -eu; \
 	out='$(QPSX_VARIANTS_DIR)'; mkdir -p "$$out"; \
 	manifest="$$out/asmreads-MANIFEST.tmp"; \

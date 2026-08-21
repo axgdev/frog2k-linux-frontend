@@ -335,6 +335,8 @@ static void frame_tail_emit(void)
 		core_tail_samples, 990u);
 	core_tail_p999 = frame_tail_percentile(core_tail_hist,
 		core_tail_samples, 999u);
+	/* At the fixed 300-run window p999 is the maximum order statistic, not
+	 * a statistically meaningful 99.9th percentile; retain it but flag it. */
 	frame_tail_p999_valid = frame_tail_samples >= 1000u;
 	core_tail_p999_valid = core_tail_samples >= 1000u;
 	frame_tail_avg = frame_tail_samples ?
