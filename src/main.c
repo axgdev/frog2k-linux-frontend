@@ -307,8 +307,9 @@ static void reset_metric_window(void)
  * A core is a statically linked executable on the NOMMU image, so opening a
  * different core starts a fresh process but does not guarantee that every
  * physically indexed cache line left by the previous process has been
- * invalidated.  Flush private executable/data mappings once at the process
- * boundary.  Shared device mappings (framebuffer/GE) are deliberately left
+ * invalidated.  BCACHE covers both the I- and D-cache; flush every private
+ * executable/data mapping once at the process boundary.  Shared device
+ * mappings (framebuffer/GE) are deliberately left
  * alone: they are maintained by their own cache-clean calls and passing a
  * device VMA to cacheflush is not portable across the vendor kernels.
  */
@@ -363,7 +364,7 @@ static void clear_core_open_caches(void)
 		char details[160];
 
 		snprintf(details, sizeof(details),
-			"core_cache_clear=private-maps ranges=%u bytes=%" PRIu64
+			"core_cache_clear=whole-id-private-maps ranges=%u bytes=%" PRIu64
 			" errors=%u\n", ranges, bytes, errors);
 		log_kmsg(details);
 	}
@@ -936,8 +937,9 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	if (direct_raw) {
 		/*
 		 * QPSX's optional raw-VRAM presenter hands us a display window in
-		 * native PS1 ARGB1555.  KSEG0 VRAM is physically linear on the NOMMU
-		 * target, so the GE can convert it directly; no managed staging buffer
+		 * native PS1 BGR555 (red in bits 0..4).  KSEG0 VRAM is physically
+		 * linear on the NOMMU target, so the GE can convert it directly; no
+		 * managed staging buffer
 		 * or CPU RGB conversion is needed.  The final fence below is required
 		 * because the emulator reuses the same VRAM on its next frame.
 		 */
@@ -1164,7 +1166,7 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->destination.config.format = HCGE_DSPF_RGB16;
 	state->destination.config.size.w = (int)host.fb_width;
 	state->destination.config.size.h = (int)host.fb_height;
-	state->source.config.format = direct_raw ? HCGE_DSPF_ARGB1555 :
+	state->source.config.format = direct_raw ? HCGE_DSPF_BGR555 :
 		HCGE_DSPF_RGB16;
 	state->source.config.size.w = (int)width;
 	state->source.config.size.h = (int)height;
@@ -1460,7 +1462,7 @@ static void video(const void *data, unsigned width, unsigned height,
 /*
  * Optional QPSX zero-copy path.  The ordinary libretro pixel-format
  * negotiation remains RGB565 for every core (and for QPSX menus); this narrow
- * entry point labels only a native PS1 VRAM callback as ARGB1555 so the GE
+ * entry point labels only a native PS1 VRAM callback as BGR555 so the GE
  * presenter can submit it without a CPU conversion pass.
  */
 void sf2000_video_vram(const void *data, unsigned width, unsigned height,

@@ -581,6 +581,35 @@ QPSX_PROFILER ?= 0
 # Half-resolution GPU rasterization was tried and reverted (run 384): it
 # degraded the image for a couple of fps, and the full-res scratchpad dynarec
 # inlines delivered far more. Keep the profiler switch for dev A/B.
+# Hash the complete tuning surface into the core's startup record.  The
+# human-readable tag remains useful, but this catches an accidentally reused
+# tag or stale object archive even when two artifacts have different files.
+QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
+	'tag=$(QPSX_BUILD_TAG)' \
+	'platform=$(QPSX_PLATFORM)' 'opt=$(QPSX_OPTIMIZE)' \
+	'gpu_opt=$(QPSX_GPU_OPTIMIZE)' 'dispatch=$(QPSX_DISPATCH_CACHE_ENTRIES)' \
+	'gte_div=$(QPSX_GTE_NATIVE_DIVIDE)' 'gte_o3=$(QPSX_GTE_HOT_O3)' \
+	'psxM_reg=$(QPSX_MIPS_PSMEM_REG)' \
+	'ra=$(QPSX_MIPS_PERSISTENT_RETURN_RA)' 'prefetch=$(QPSX_MIPS_DISPATCH_PREFETCH)' \
+	'gp=$(QPSX_MIPS_DISPATCH_CACHE_GP)' 'gp_abi=$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI)' \
+	'bl=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)' 'frame_bl=$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY)' \
+	'fold=$(QPSX_MIPS_FOLD_DIRECT_JUMPS)/$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)/$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)' \
+	'raw=$(QPSX_GE_RAW_VRAM)' 'telemetry=$(QPSX_RUNTIME_TELEMETRY)' \
+	'profiler=$(QPSX_PROFILER)' 'gpu_fixed=$(QPSX_GPU_FIXED_FAST_PATH)' \
+	'gpu_light=$(QPSX_GPU_FIXED_LIGHTING)' 'linear4=$(QPSX_GPU_LINEAR_4BPP)' \
+	'packed_tile=$(QPSX_GPU_PACKED_TILE_WRITES)' 'packed_sprite=$(QPSX_GPU_PACKED_SPRITE_4BPP)' \
+	'packed_poly=$(QPSX_GPU_PACKED_POLY_WRITES)' 'gflatv=$(QPSX_GPU_4BPP_GOURAUD_FLATV)' \
+	'gflatv_min=$(QPSX_GPU_4BPP_GOURAUD_FLATV_MIN_PIXELS)' \
+	'hot_order=$(QPSX_GPU_HOT_DRIVER_ORDER)' \
+	'flatv=$(QPSX_GPU_4BPP_FLATV)' 'flatv_row=$(QPSX_GPU_4BPP_FLATV_ROW)' \
+	'flatv_min=$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS)' \
+	'flatv_row_min=$(QPSX_GPU_4BPP_FLATV_ROW_MIN_PIXELS)' \
+	'palette_lut=$(QPSX_GPU_4BPP_PALETTE_LUT)' 'mirror=$(QPSX_LINUX_MIRRORING)' \
+	'fast_mem=$(QPSX_MIPS_FAST_MEM_CONVERT)' 'ram_helper=$(QPSX_LINUX_RAM_HELPER_FASTPATH)' \
+	'asm_reads=$(QPSX_MIPS_ASM_MEM_READS)' 'hle_lazy=$(QPSX_HLE_LAZY_EVENT_CHECK)' \
+	'line_flat=$(QPSX_GPU_GOURAUD_LINE_FLATFAST)' 'fuzzy=$(QPSX_MIPS_PROPAGATE_FUZZY_ADDR)' \
+	'rec_align=$(QPSX_RECMEM_ALIGNMENT)' 'gpu_metrics=$(QPSX_GPU_RUNTIME_METRICS)' \
+	| sha256sum | cut -c1-16)
 MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
 	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
@@ -622,6 +651,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_DISPATCH_BRANCH_LIKELY=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY) \
 	-DQPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY) \
 	-DQPSX_BUILD_TAG=\"$(QPSX_BUILD_TAG)\" \
+	-DQPSX_BUILD_FINGERPRINT=\"$(QPSX_BUILD_FINGERPRINT)\" \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES) \
@@ -680,6 +710,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_DISPATCH_BRANCH_LIKELY=%s\n' '$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)'; \
 		printf 'QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=%s\n' '$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY)'; \
 		printf 'QPSX_BUILD_TAG=%s\n' '$(QPSX_BUILD_TAG)'; \
+		printf 'QPSX_BUILD_FINGERPRINT=%s\n' '$(QPSX_BUILD_FINGERPRINT)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)'; \
@@ -951,19 +982,21 @@ qpsx-dev-core:
 		'QPSX_GPU_OPTIMIZE=$(QPSX_GPU_OPTIMIZE)' \
 		'QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2)' \
 		'QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM)' \
+		'QPSX_BUILD_TAG=$(QPSX_BUILD_TAG)' \
+		'QPSX_BUILD_FINGERPRINT=$(QPSX_BUILD_FINGERPRINT)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -1029,14 +1062,14 @@ qpsx-dev-fastest:
 		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
 		QPSX_GPU_PACKED_POLY_WRITES=1
 
-# Experimental GE offload: QPSX submits the native ARGB1555 display window
+# Experimental GE offload: QPSX submits the native BGR555 display window
 # directly from its KSEG0 VRAM and the Linux frontend asks HC15xx to convert
 # and scale it. Keep this separate from qpsx-dev until a physical A/B proves
 # that the extra GE fence beats the CPU conversion on the target firmware.
 qpsx-dev-ge-raw-vram:
 	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
 		QPSX_DEV_PROFILER=0 \
-		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram' \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-bgr555' \
 		QPSX_GE_RAW_VRAM=1 \
 		QPSX_DISPATCH_CACHE_ENTRIES=64 \
 		QPSX_MIPS_PSMEM_REG=1 \
@@ -1054,6 +1087,9 @@ qpsx-dev-ge-raw-vram:
 		QPSX_GPU_PACKED_TILE_WRITES=1 \
 		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
 		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-bgr555-dev'
+	# Keep the historical filename usable, but never make its log identity
+	# ambiguous: the embedded tag/fingerprint above is the authority.
 	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-dev'
 
 qpsx-dev-package: qpsx-dev-mips32r1-audit
