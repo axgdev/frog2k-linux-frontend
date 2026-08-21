@@ -9,6 +9,7 @@ QPSX_PROFILE_ARTIFACT_ROOT ?= build/qpsx-profiles
 QPSX_PROFILE_NAMES := \
 	frontier-production-control \
 	frontier-production-candidate \
+	frontier-layout-pad640 \
 	frontier-tail-control \
 	frontier-tail-candidate
 
@@ -51,6 +52,7 @@ QPSX_PROFILE_FRONTIER_COMMON_ARGS := \
 	QPSX_FASTMEM_BUILD_SUFFIX= QPSX_LINUX_MIRRORING=0 \
 	QPSX_LINUX_RAM_HELPER_FASTPATH=1 QPSX_HLE_LAZY_EVENT_CHECK=0 \
 	QPSX_LAYOUT_PAD_BYTES=0 \
+	QPSX_MIPS_SCRATCHPAD_ARITH_CLASSIFY=0 \
 	QPSX_GE_RAW_VRAM=1 QPSX_GPU_GOURAUD_LINE_FLATFAST=0 \
 	QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=0 \
 	QPSX_GPU_DMA_CHAIN_ADAPTIVE_MIN_PREV_WORK=0 \
@@ -69,11 +71,20 @@ QPSX_PROFILE_FRONTIER_PRODUCTION_CONTROL_ARGS := \
 # scanout (physical runs 524/525 and the QEMU attract visual gate).  Keep the
 # public candidate safe until the helper has a differential ABI/semantic test;
 # do not make a black-screen experiment look production-ready by its name.
-# The candidate instead restores the 0x640 hot-text displacement of run 521
-# without executing its tail metrics, isolating cache colour from diagnostics.
+# Run 529 rejected the 0x640 cache-colour restoration (-0.26% at frame 2700).
+# Keep that exact recipe below for reproduction.  The active candidate uses
+# an exact unsigned interval classification for generated scratchpad word
+# accesses.  It removes one instruction and one dependent branch from this hot
+# path; aliases and hardware-register accesses retain the legacy helper path.
 QPSX_PROFILE_FRONTIER_PRODUCTION_CANDIDATE_ARGS := \
 	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
 	QPSX_PROFILE_ID=frontier-production-candidate \
+	QPSX_BUILD_TAG=qpsx-frontier-prod-scratcharith \
+	SF2000_FRAME_TAIL_METRICS=0 QPSX_MIPS_SCRATCHPAD_ARITH_CLASSIFY=1 \
+	QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
+QPSX_PROFILE_FRONTIER_LAYOUT_PAD640_ARGS := \
+	$(QPSX_PROFILE_FRONTIER_COMMON_ARGS) \
+	QPSX_PROFILE_ID=frontier-layout-pad640 \
 	QPSX_BUILD_TAG=qpsx-frontier-prod-pad640 \
 	SF2000_FRAME_TAIL_METRICS=0 QPSX_LAYOUT_PAD_BYTES=1600 \
 	QPSX_ASM_READS=0 QPSX_MIPS_ASM_MEM_READS=0
@@ -91,15 +102,20 @@ QPSX_PROFILE_FRONTIER_TAIL_CANDIDATE_ARGS := \
 qpsx_profile_args = \
 	$(if $(filter frontier-production-control,$(1)),$(QPSX_PROFILE_FRONTIER_PRODUCTION_CONTROL_ARGS),\
 	$(if $(filter frontier-production-candidate,$(1)),$(QPSX_PROFILE_FRONTIER_PRODUCTION_CANDIDATE_ARGS),\
+	$(if $(filter frontier-layout-pad640,$(1)),$(QPSX_PROFILE_FRONTIER_LAYOUT_PAD640_ARGS),\
 	$(if $(filter frontier-tail-control,$(1)),$(QPSX_PROFILE_FRONTIER_TAIL_CONTROL_ARGS),\
 	$(if $(filter frontier-tail-candidate,$(1)),$(QPSX_PROFILE_FRONTIER_TAIL_CANDIDATE_ARGS),\
-	$(error unknown QPSX profile '$(1)'; choose one of $(QPSX_PROFILE_NAMES))))))
+	$(error unknown QPSX profile '$(1)'; choose one of $(QPSX_PROFILE_NAMES)))))))
 
 qpsx_profile_tail = $(if $(findstring -tail-,$(1)),1,0)
 qpsx_profile_peer = $(if $(findstring -control,$(1)),$(subst -control,-candidate,$(1)),$(subst -candidate,-control,$(1)))
 
 .PHONY: qpsx-profile-list qpsx-profile-build \
 	$(addprefix qpsx-profile-,$(QPSX_PROFILE_NAMES))
+# Every profile ultimately links and copies the same qpsx-dev executable.
+# The source archive lock is insufficient once that lock is released, so
+# parallel named-profile goals must remain sequential through the copy/audit.
+.NOTPARALLEL: $(addprefix qpsx-profile-,$(QPSX_PROFILE_NAMES))
 qpsx-profile-list:
 	@printf '%s\n' $(QPSX_PROFILE_NAMES)
 
@@ -131,15 +147,21 @@ qpsx-profile-build:
 		fi; \
 		profile_stamp=$$(sed -n 's/^QPSX_PROFILE_ID=//p' "$$stamp" | head -n 1); \
 		tail_stamp=$$(sed -n 's/^SF2000_FRAME_TAIL_METRICS=//p' "$$stamp" | head -n 1); \
+		scratch_stamp=$$(sed -n 's/^QPSX_MIPS_SCRATCHPAD_ARITH_CLASSIFY=//p' "$$stamp" | head -n 1); \
 		fingerprint=$$(sed -n 's/^QPSX_BUILD_FINGERPRINT=//p' "$$stamp" | head -n 1); \
 		test "$$profile_stamp" = "$$profile"; \
 		test "$$tail_stamp" = '$(call qpsx_profile_tail,$(QPSX_PROFILE))'; \
+		if test "$$profile" = frontier-production-candidate; then \
+			test "$$scratch_stamp" = 1; \
+		else \
+			test "$$scratch_stamp" = 0; \
+		fi; \
 		test -n "$$fingerprint"; \
 		if grep -Eq '[[:space:]]psxMemRead(8|16|32)_asm([[:space:]]|$$)' "$$map"; then \
 			echo "QPSX safe profile $$profile unexpectedly references quarantined ASM reads" >&2; \
 			exit 1; \
 		fi; \
-		if test "$$profile" = frontier-production-candidate; then \
+		if test "$$profile" = frontier-layout-pad640; then \
 			awk '/^[[:space:]]*\.text\.sf2000_qpsx_layout_pad$$/ { getline; if ($$2 == "0x640") ok=1 } END { exit !ok }' "$$map" || { \
 				echo "QPSX profile $$profile lacks its 0x640 layout pad" >&2; exit 1; }; \
 		fi; \
