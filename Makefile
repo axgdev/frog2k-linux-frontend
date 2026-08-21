@@ -413,7 +413,8 @@ MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-performance.patch \
 	patches/mufrog/qpsx-sf2000-cd-preload.patch \
-	patches/mufrog/qpsx-sf2000-nommu-hot.patch
+	patches/mufrog/qpsx-sf2000-nommu-hot.patch \
+	patches/mufrog/qpsx-sf2000-superblock.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -432,6 +433,16 @@ QPSX_GTE_NATIVE_DIVIDE ?= 1
 # register-cache slot. Linux NOMMU keeps psxM stable for the lifetime of the
 # core, so enable the measured path by default.
 QPSX_MIPS_PSMEM_REG ?= 1
+# Keep the indirect-return target in $ra across helper-free translated blocks;
+# the generated epilogue already reloads it after any C call.  This avoids one
+# stack load per hot block without giving up a guest register-cache slot.
+QPSX_MIPS_PERSISTENT_RETURN_RA ?= 1
+# Fold a bounded chain of short forward direct jumps into one translated
+# superblock. Eight links/1 KiB is the best QEMU hot-scene point; keep both
+# limits configurable for compatibility/per-game A/B testing.
+QPSX_MIPS_FOLD_DIRECT_JUMPS ?= 1
+QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX ?= 8
+QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES ?= 1024
 # Compile only the measured RTPS/RTPT kernels at -O3.  The rest of the core
 # stays at the cache-tested -O2 setting; this measured attribute only affects
 # the two straight-line kernels that dominate GTE time.
@@ -453,6 +464,10 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GTE_HOT_O3=$(QPSX_GTE_HOT_O3) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
+	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
+	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
+	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
+	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES) \
 	-DQPSX_PROFILER_ENABLED=$(QPSX_PROFILER) \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
