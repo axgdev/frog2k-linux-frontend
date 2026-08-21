@@ -556,6 +556,7 @@ QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS ?= 16
 # Optional exact aligned 32-bit pair stores for opaque CF=32 full-window
 # spans. Transparent CLUT entries retain the original per-pixel writes.
 QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES ?= 0
+QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL ?= 0
 # A wrapper A/B target can append a suffix to the fullmask build tag while
 # reusing the exact production recipe. It remains empty for established cores.
 QPSX_FULLMASK_BUILD_SUFFIX ?=
@@ -638,6 +639,7 @@ QPSX_BUILD_FINGERPRINT ?= $(shell printf '%s\n' \
 	'palette_lut=$(QPSX_GPU_4BPP_PALETTE_LUT)' \
 	'fullmask=$(QPSX_GPU_4BPP_FULLMASK)' 'fullmask_min=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)' \
 	'fullmask_pack=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)' \
+	'fullmask_unroll=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)' \
 	'mirror=$(QPSX_LINUX_MIRRORING)' \
 	'fast_mem=$(QPSX_MIPS_FAST_MEM_CONVERT)' 'ram_helper=$(QPSX_LINUX_RAM_HELPER_FASTPATH)' \
 	'asm_reads=$(QPSX_MIPS_ASM_MEM_READS)' 'hle_lazy=$(QPSX_HLE_LAZY_EVENT_CHECK)' \
@@ -670,6 +672,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) \
 	-DQPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) \
 	-DQPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) \
+	-DQPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) \
 	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
 	-DQPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) \
@@ -772,6 +775,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_FULLMASK=%s\n' '$(QPSX_GPU_4BPP_FULLMASK)'; \
 		printf 'QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)'; \
+		printf 'QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=%s\n' '$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
 		printf 'QPSX_LINUX_RAM_HELPER_FASTPATH=%s\n' '$(QPSX_LINUX_RAM_HELPER_FASTPATH)'; \
@@ -900,6 +904,9 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev-ge-raw-vram-overlay-tail-recip10-fullmask-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-packstore-hot \
+	qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-packstore-unroll4-hot \
+	qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-gflatv-packstore-unroll4-hot \
+	qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-packstore-unroll4-hot \
 	qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-gcache-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gcache-hot \
 	sf2000 demo frogui browser \
@@ -1046,20 +1053,21 @@ qpsx-dev-core:
 		'QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK)' \
 		'QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS)' \
 		'QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES)' \
+		'QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL)' \
 		'QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_GPU_OPTIMIZE='$(QPSX_GPU_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) QPSX_GE_RAW_VRAM=$(QPSX_GE_RAW_VRAM) QPSX_GPU_RECIP_TABLE_BITS=$(QPSX_GPU_RECIP_TABLE_BITS) QPSX_GPU_4BPP_FULLMASK=$(QPSX_GPU_4BPP_FULLMASK) QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS=$(QPSX_GPU_4BPP_FULLMASK_MIN_PIXELS) QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=$(QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES) QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=$(QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL) QPSX_GPU_4BPP_GOURAUD_CACHE=$(QPSX_GPU_4BPP_GOURAUD_CACHE) QPSX_BUILD_TAG='$(QPSX_BUILD_TAG)' QPSX_BUILD_FINGERPRINT='$(QPSX_BUILD_FINGERPRINT)' STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -1544,6 +1552,33 @@ qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-packstore-hot:
 		QPSX_FULLMASK_BUILD_SUFFIX=-packstore
 	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-hot-dev' \
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-hot-packstore-dev'
+
+# Four-pixel unrolled pair-store A/B variants. The only changed hot-loop
+# policy relative to the packstore controls is two packed source-byte reads
+# per iteration; CLUT-zero transparency and alignment handling stay exact.
+qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-packstore-unroll4-hot:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-hot \
+		QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=1 \
+		QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=1 \
+		QPSX_FULLMASK_BUILD_SUFFIX=-packstore-unroll4
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-recip8-fullmask-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-recip8-fullmask-hot-packstore-unroll4-dev'
+
+qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-gflatv-packstore-unroll4-hot:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-recip8-fullmask-gflatv-hot \
+		QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=1 \
+		QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=1 \
+		QPSX_FULLMASK_BUILD_SUFFIX=-packstore-unroll4
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-recip8-fullmask-gflatv-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-recip8-fullmask-gflatv-hot-packstore-unroll4-dev'
+
+qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-packstore-unroll4-hot:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-hot \
+		QPSX_GPU_4BPP_FULLMASK_PACKED_WRITES=1 \
+		QPSX_GPU_4BPP_FULLMASK_PACKED_UNROLL=1 \
+		QPSX_FULLMASK_BUILD_SUFFIX=-packstore-unroll4
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-recip8-fullmask-gflatv-hot-packstore-unroll4-dev'
 
 # Gouraud-cache candidate: exact integer lighting semantics with a span-local
 # 16-entry palette. The cache is only enabled on top of the full-window CF=161
