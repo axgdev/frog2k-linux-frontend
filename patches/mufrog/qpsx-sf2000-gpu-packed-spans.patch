@@ -15,7 +15,7 @@ index 2d26190..3dbd46b 100644
  #if QPSX_GPU_RUNTIME_METRICS
  extern u32 qpsx_gpu_poly_span_hist[2048];
  extern u32 qpsx_gpu_poly_pixel_hist[2048];
-@@ -360,6 +366,29 @@ static void gpuTileSpanFn(u16 *pDst, u32 count, u16 data)
+@@ -360,6 +366,39 @@ static void gpuTileSpanFn(u16 *pDst, u32 count, u16 data)
  #endif
  	if (!CF_MASKCHECK && !CF_BLEND) {
  		if (CF_MASKSET) { data = data | 0x8000; }
