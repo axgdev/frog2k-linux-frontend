@@ -1605,7 +1605,7 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192:
 qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev-spu-os:
 	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192 \
 		QPSX_SPU_OPTIMIZE=-Os \
-		QPSX_BUILD_TAG=dispatch64-gp-blikely-packed-gpu-fastmem-asmreads-s7nomove-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-spu-os \
+		QPSX_FASTEST_BUILD_TAG=dispatch64-gp-blikely-packed-gpu-fastmem-asmreads-s7nomove \
 		QPSX_FASTMEM_BUILD_SUFFIX=-dma-prev8192-v7-spu-os
 	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-dev' \
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-prev8192-v7-spu-os-dev'
