@@ -1383,18 +1383,21 @@ static void video(const void *data, unsigned width, unsigned height,
 		if (metrics_cpu_clock_valid &&
 			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_now) == 0)
 			cpu_user_us = timespec_delta_us(&cpu_now, &metrics_cpu_start);
+		/* CLOCK_PROCESS_CPUTIME_ID is a process-total clock on Linux. Keep
+		 * the historical cpu_user_us field for compatibility, but also emit
+		 * an unambiguous process-total field for physical A/B measurements. */
 		cpu_total_us = cpu_user_us + cpu_sys_us;
 		if (elapsed_ms)
 			cpu_pct_milli = (cpu_total_us * 100u) / elapsed_ms;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu cpu_metric=process-clock cpu_user_us=%" PRIu64 " cpu_sys_us=%" PRIu64 " cpu_pct_milli=%" PRIu64 " pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu cpu_metric=process-clock cpu_user_us=%" PRIu64 " cpu_sys_us=%" PRIu64 " cpu_process_us=%" PRIu64 " cpu_pct_milli=%" PRIu64 " pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
 			audio_metrics.peak,
 			host.audio_count, (long)host.audio_delay,
 			host.audio_resample_rate, audio_suppressed, video_callbacks,
-			elapsed_ms, fps_milli, cpu_user_us, cpu_sys_us,
+			elapsed_ms, fps_milli, cpu_user_us, cpu_sys_us, cpu_total_us,
 			cpu_pct_milli,
 			pacer.resets, pacer.interval_late_frames,
 			pacer.interval_max_late_us,
