@@ -525,6 +525,11 @@ QPSX_GPU_4BPP_FLATV ?= 0
 # stay in the compact generic loop so the MIPS I-cache and call overhead do
 # not erase the paired-byte win.
 QPSX_GPU_4BPP_FLATV_MIN_PIXELS ?= 16
+# Broader exact CF=32 flat-V path: keep the texture row fixed even when the
+# texture window is smaller or U wraps. The unit-U/no-wrap subset is paired;
+# all other increments use the exact masked scalar loop.
+QPSX_GPU_4BPP_FLATV_ROW ?= 0
+QPSX_GPU_4BPP_FLATV_ROW_MIN_PIXELS ?= 16
 # Optional 1 KiB packed-byte -> two-CLUT-entry table. It is built lazily after
 # each CLUT selection and is intended for physical A/B testing only.
 QPSX_GPU_4BPP_PALETTE_LUT ?= 0
@@ -572,6 +577,8 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_HOT_DRIVER_ORDER=$(QPSX_GPU_HOT_DRIVER_ORDER) \
 	-DQPSX_GPU_4BPP_FLATV=$(QPSX_GPU_4BPP_FLATV) \
 	-DQPSX_GPU_4BPP_FLATV_MIN_PIXELS=$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS) \
+	-DQPSX_GPU_4BPP_FLATV_ROW=$(QPSX_GPU_4BPP_FLATV_ROW) \
+	-DQPSX_GPU_4BPP_FLATV_ROW_MIN_PIXELS=$(QPSX_GPU_4BPP_FLATV_ROW_MIN_PIXELS) \
 	-DQPSX_GPU_4BPP_PALETTE_LUT=$(QPSX_GPU_4BPP_PALETTE_LUT) \
 	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
@@ -658,6 +665,8 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_GOURAUD_FLATV_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_GOURAUD_FLATV_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_FLATV=%s\n' '$(QPSX_GPU_4BPP_FLATV)'; \
 		printf 'QPSX_GPU_4BPP_FLATV_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS)'; \
+		printf 'QPSX_GPU_4BPP_FLATV_ROW=%s\n' '$(QPSX_GPU_4BPP_FLATV_ROW)'; \
+		printf 'QPSX_GPU_4BPP_FLATV_ROW_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FLATV_ROW_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_PALETTE_LUT=%s\n' '$(QPSX_GPU_4BPP_PALETTE_LUT)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
