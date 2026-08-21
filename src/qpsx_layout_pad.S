@@ -13,7 +13,9 @@
     .globl sf2000_qpsx_layout_pad_start
     .type sf2000_qpsx_layout_pad_start, @function
 sf2000_qpsx_layout_pad_start:
+#if QPSX_LAYOUT_PAD_BYTES > 0
     .space QPSX_LAYOUT_PAD_BYTES
+#endif
     .size sf2000_qpsx_layout_pad_start, .-sf2000_qpsx_layout_pad_start
 
     .section .note.GNU-stack,"",@progbits
