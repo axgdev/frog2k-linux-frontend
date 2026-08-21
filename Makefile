@@ -430,7 +430,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-long.patch \
 	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-unit.patch \
 	patches/mufrog/qpsx-sf2000-gpu-4bpp-palette-lut.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-palette-flatv.patch
+	patches/mufrog/qpsx-sf2000-gpu-4bpp-palette-flatv.patch \
+	patches/mufrog/qpsx-sf2000-ge-tile-fill.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -490,6 +491,11 @@ QPSX_GPU_4BPP_FLATV_MIN_PIXELS ?= 16
 # Optional 1 KiB packed-byte -> two-CLUT-entry table. It is built lazily after
 # each CLUT selection and is intended for physical A/B testing only.
 QPSX_GPU_4BPP_PALETTE_LUT ?= 0
+# Optional HC15xx GE offload for large opaque PSX rectangle primitives.  The
+# platform callback performs synchronous non-coherent cache ownership
+# transfers and falls back to software on hosts without the physical GE.
+QPSX_GPU_GE_TILE_FILL ?= 0
+QPSX_GPU_GE_TILE_FILL_MIN_PIXELS ?= 4096
 # Optional Linux NOMMU virtual mirroring. When the kernel accepts fixed
 # file-backed mappings, this removes the second-level PSX block-pointer LUT
 # and the per-load/store 21-bit RAM mask. The existing QPSX mapper falls back
@@ -531,6 +537,8 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_4BPP_FLATV=$(QPSX_GPU_4BPP_FLATV) \
 	-DQPSX_GPU_4BPP_FLATV_MIN_PIXELS=$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS) \
 	-DQPSX_GPU_4BPP_PALETTE_LUT=$(QPSX_GPU_4BPP_PALETTE_LUT) \
+	-DQPSX_GPU_GE_TILE_FILL=$(QPSX_GPU_GE_TILE_FILL) \
+	-DQPSX_GPU_GE_TILE_FILL_MIN_PIXELS=$(QPSX_GPU_GE_TILE_FILL_MIN_PIXELS) \
 	$(if $(filter 1,$(QPSX_LINUX_MIRRORING)),-DTMPFS_MIRRORING -DTMPFS_DIR=\"/tmp\",) \
 	-DQPSX_GPU_RUNTIME_METRICS=$(QPSX_GPU_RUNTIME_METRICS) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
@@ -602,6 +610,8 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_4BPP_FLATV=%s\n' '$(QPSX_GPU_4BPP_FLATV)'; \
 		printf 'QPSX_GPU_4BPP_FLATV_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_PALETTE_LUT=%s\n' '$(QPSX_GPU_4BPP_PALETTE_LUT)'; \
+		printf 'QPSX_GPU_GE_TILE_FILL=%s\n' '$(QPSX_GPU_GE_TILE_FILL)'; \
+		printf 'QPSX_GPU_GE_TILE_FILL_MIN_PIXELS=%s\n' '$(QPSX_GPU_GE_TILE_FILL_MIN_PIXELS)'; \
 		printf 'QPSX_LINUX_MIRRORING=%s\n' '$(QPSX_LINUX_MIRRORING)'; \
 		printf 'QPSX_MIPS_FAST_MEM_CONVERT=%s\n' '$(QPSX_MIPS_FAST_MEM_CONVERT)'; \
 		printf 'QPSX_GPU_RUNTIME_METRICS=%s\n' '$(QPSX_GPU_RUNTIME_METRICS)'; \
