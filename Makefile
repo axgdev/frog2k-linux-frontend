@@ -420,17 +420,15 @@ QPSX_OPTIMIZE ?= -O2
 # runtime, so the production core compiles it out (-DQPSX_PROFILER_ENABLED=0,
 # zero overhead). The dev core keeps it on for benchmark breakdowns.
 QPSX_PROFILER ?= 0
-# Half-resolution GPU rasterization: skip every other scanline and let the GE
-# upscaler double the compacted frame back to full screen. Halves the native
-# fill cost; set QPSX_HALF_RES=0 to A/B against full resolution.
-QPSX_HALF_RES ?= 1
+# Half-resolution GPU rasterization was tried and reverted (run 384): it
+# degraded the image for a couple of fps, and the full-res scratchpad dynarec
+# inlines delivered far more. Keep the profiler switch for dev A/B.
 MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-Isrc/gpu/gpu_unai -Isrc/gpu/gpulib -Isrc/plugin_lib \
 	-Isrc/port/libretro -Ilibretro/core -Ilibretro/include \
 	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
 	-DQPSX_MIPS32R2_SAFE=1 \
-	$(if $(filter 0,$(QPSX_HALF_RES)),,-DGPU_UNAI_HALF_RES) \
 	-DQPSX_PROFILER_ENABLED=$(QPSX_PROFILER) \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition

@@ -114,58 +114,6 @@ index dc82544..07e5489 100644
  }
  
  bool retro_load_game(const struct retro_game_info *info)
-diff --git a/src/gpu/gpu_unai/gpu.cpp b/src/gpu/gpu_unai/gpu.cpp
-index b4ce7bc..03411f8 100644
---- a/src/gpu/gpu_unai/gpu.cpp
-+++ b/src/gpu/gpu_unai/gpu.cpp
-@@ -108,7 +108,7 @@ static void gpuReset(void)
- 
- 	// Configuration options
- 	gpu_unai.config = gpu_unai_config_ext;
--	gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
-+	gpu_unai.ilace_mask = GpuEffectiveIlaceMask();
- 	gpu_unai.frameskip.skipCount = gpu_unai.config.frameskip_count;
- 
- 	SetupLightLUT();
-@@ -601,14 +601,19 @@ void  GPU_writeStatus(u32 data)
- 					//  480 vertical mode, or, optionally, force it for all video modes)
- 
- 					if (gpu_unai.DisplayArea[3] == 480) {
--						if (gpu_unai.config.ilace_force) {
-+						if (gpu_unai.config.half_res)
-+							gpu_unai.ilace_mask = 1; // Every other field
-+						else if (gpu_unai.config.ilace_force) {
- 							gpu_unai.ilace_mask = 3; // Only need 1/4 of lines
- 						} else {
- 							gpu_unai.ilace_mask = 1; // Only need 1/2 of lines
- 						}
- 					} else {
- 						// Vert resolution changed from 480 to lower one
--						gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
-+						if (gpu_unai.config.half_res)
-+							gpu_unai.ilace_mask = 1; // 240p: skip every other line
-+						else
-+							gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
- 					}
- 				} else {
- 					gpu_unai.ilace_mask = 0;
-diff --git a/src/gpu/gpu_unai/gpu.h b/src/gpu/gpu_unai/gpu.h
-index 624f4e2..0b25237 100644
---- a/src/gpu/gpu_unai/gpu.h
-+++ b/src/gpu/gpu_unai/gpu.h
-@@ -38,6 +38,12 @@ struct gpu_unai_config_t {
- 	                          //  Normally 0. Value '1' will skip rendering
- 	                          //  odd lines.
- 
-+	uint8_t half_res:1;       // QPSX: Render only every other line in 240p
-+	                          //  (and every other field in 480i), halving
-+	                          //  rasterizer fill rate. The host upscaler
-+	                          //  doubles the compacted framebuffer back to
-+	                          //  full screen, so output stays 320x240-ish.
-+
- 	uint8_t pixel_size:2;     // v346: Pixel doubling mode for vout_port ONLY
- 	                          //  0=1x1 (normal), 1=2x1 (line double),
- 	                          //  2=2x2 (pixel double). Separate from ilace_force
 diff --git a/src/gpu/gpu_unai/gpu_raster_polygon.h b/src/gpu/gpu_unai/gpu_raster_polygon.h
 index 1a6e71c..726d857 100644
 --- a/src/gpu/gpu_unai/gpu_raster_polygon.h
@@ -241,209 +189,6 @@ index 1a6e71c..726d857 100644
  	} while (++cur_pass < total_passes);
 +	PROFILE_END(PROF_GPU_POLY);
  }
-diff --git a/src/gpu/gpu_unai/gpu_unai.h b/src/gpu/gpu_unai/gpu_unai.h
-index 8eeff37..6711d9b 100644
---- a/src/gpu/gpu_unai/gpu_unai.h
-+++ b/src/gpu/gpu_unai/gpu_unai.h
-@@ -388,4 +388,16 @@ static inline bool LineSkipEnabled()
- 	return true;
- }
- 
-+/*
-+ * QPSX half-res: the effective line-skip mask for the current config.
-+ * half_res skips every other line/field; ilace_force is the stock
-+ * every-other-line knob. do_cmd_list re-applies this per command list
-+ * (resolution-change events are not reliable on their own), so half_res
-+ * must be folded in here or the rasterizers never see it.
-+ */
-+static inline int GpuEffectiveIlaceMask(void)
-+{
-+	return (gpu_unai.config.half_res || gpu_unai.config.ilace_force) ? 1 : 0;
-+}
-+
- #endif // GPU_UNAI_H
-diff --git a/src/gpu/gpu_unai/gpulib_if.cpp b/src/gpu/gpu_unai/gpulib_if.cpp
-index 162aabf..ea9392a 100644
---- a/src/gpu/gpu_unai/gpulib_if.cpp
-+++ b/src/gpu/gpu_unai/gpulib_if.cpp
-@@ -92,11 +92,17 @@ int renderer_init(void)
-   // Configuration options
-   GPUIF_LOG("Setting config from gpu_unai_config_ext...");
-   gpu_unai.config = gpu_unai_config_ext;
-+#ifdef GPU_UNAI_HALF_RES
-+  // QPSX: half-res rasterization by default on the SF2000 - the host GE
-+  // upscaler doubles the compacted framebuffer back to full screen, so
-+  // this is a pure fill-rate win. Toggle by dropping the define.
-+  gpu_unai.config.half_res = 1;
-+#endif
-   //senquack - disabled, not sure this is needed and would require modifying
-   // sprite-span functions, perhaps unnecessarily. No Abe Oddysey hack was
-   // present in latest PCSX4ALL sources we were using.
-   //gpu_unai.config.enableAbbeyHack = gpu_unai_config_ext.abe_hack;
--  gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
-+  gpu_unai.ilace_mask = GpuEffectiveIlaceMask();
-   GPUIF_LOG("Config set OK");
- 
- #ifdef GPU_UNAI_USE_INT_DIV_MULTINV
-@@ -153,19 +159,27 @@ void renderer_notify_res_change(void)
-     //  480 vertical mode, or, optionally, force it for all video modes)
- 
-     if (gpu.screen.vres == 480) {
--      if (gpu_unai.config.ilace_force) {
-+      if (gpu_unai.config.half_res) {
-+        gpu_unai.ilace_mask = 1; // Every other field (half the lines)
-+      } else if (gpu_unai.config.ilace_force) {
-         gpu_unai.ilace_mask = 3; // Only need 1/4 of lines
-       } else {
-         gpu_unai.ilace_mask = 1; // Only need 1/2 of lines
-       }
-     } else {
-       // Vert resolution changed from 480 to lower one
--      gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
-+      if (gpu_unai.config.half_res)
-+        gpu_unai.ilace_mask = 1; // 240p: skip every other line
-+      else
-+        gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
-     }
-   } else {
-     gpu_unai.ilace_mask = 0;
-   }
- 
-+  /* Let vout_update() compact the same lines the rasterizers skipped. */
-+  gpu_out_ilace_mask = gpu_unai.ilace_mask;
-+
-   /*
-   printf("res change hres: %d   vres: %d   depth: %d   ilace_mask: %d\n",
-       gpu.screen.hres, gpu.screen.vres, gpu.status.rgb24 ? 24 : 15,
-@@ -249,8 +263,9 @@ int do_cmd_list(uint32_t *list, int list_len, int *last_cmd)
-   uint32_t *list_end = list + list_len;
- 
-   //TODO: set ilace_mask when resolution changes instead of every time,
--  // eliminate #ifdef below.
--  gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
-+  // eliminate #ifdef below. QPSX: fold half_res in here too, otherwise
-+  // this per-list reset clobbers the res-change mask before rasterization.
-+  gpu_unai.ilace_mask = GpuEffectiveIlaceMask();
- 
- #ifdef HAVE_PRE_ARMV7 /* XXX */
-   gpu_unai.ilace_mask |= gpu.status.interlace;
-diff --git a/src/gpu/gpulib/vout_port.cpp b/src/gpu/gpulib/vout_port.cpp
-index 5897ad3..efc8c11 100644
---- a/src/gpu/gpulib/vout_port.cpp
-+++ b/src/gpu/gpulib/vout_port.cpp
-@@ -19,6 +19,12 @@
- #include "port.h"
- #include "gpu.h"
- 
-+/* Set by vout_update(): the line-skip mask the rasterizers used and the
-+ * number of compacted output rows written. The port layer presents only
-+ * those rows and the host upscaler doubles them back to full screen. */
-+extern volatile int gpu_out_ilace_mask;
-+extern volatile int gpu_out_height;
-+
- ///////////////////////////////////////////////////////////////////////////////
- // BLITTERS TAKEN FROM gpu_unai/gpu_blit.h
- // GPU Blitting code with rescale and interlace support.
-@@ -444,20 +450,33 @@ void vout_update(void)
- 	int incY = (h0 == 480) ? 2 : 1;
- 	h0 = ((h0 == 480) ? 2048 : 1024);
- 
-+	/* QPSX half-res: the rasterizers skip every other line (ilace_mask),
-+	 * so compact the output rows and let the host upscaler double them.
-+	 * In 480i, incY=2 already yields the full even field, so every row
-+	 * is written and the output stays full height. */
-+	const int li = gpu_out_ilace_mask;
-+	int out_lines = 0;
-+
- 	switch ( w0 )
- 	{
- 		case 256: {
- 			for (int y1=y0+h1; y0<y1; y0+=incY) {
--				GPU_BlitWWDWW(src16 + src16_offs, dst16, isRGB24);
--				dst16 += VIDEO_WIDTH;
-+				if ((y0 & li) == 0) {
-+					GPU_BlitWWDWW(src16 + src16_offs, dst16, isRGB24);
-+					dst16 += VIDEO_WIDTH;
-+					out_lines++;
-+				}
- 				src16_offs = (src16_offs + h0) & src16_offs_msk;
- 			}
- 		} break;
- 
- 		case 368: {
- 			for (int y1=y0+h1; y0<y1; y0+=incY) {
--				GPU_BlitWWWWWWWWS(src16 + src16_offs, dst16, isRGB24, 4);
--				dst16 += VIDEO_WIDTH;
-+				if ((y0 & li) == 0) {
-+					GPU_BlitWWWWWWWWS(src16 + src16_offs, dst16, isRGB24, 4);
-+					dst16 += VIDEO_WIDTH;
-+					out_lines++;
-+				}
- 				src16_offs = (src16_offs + h0) & src16_offs_msk;
- 			}
- 		} break;
-@@ -465,37 +484,53 @@ void vout_update(void)
- 		case 320: {
- 			src16_offs &= ~1;
- 			for (int y1=y0+h1; y0<y1; y0+=incY) {
--				GPU_BlitWW(src16 + src16_offs, dst16, isRGB24);
--				dst16 += VIDEO_WIDTH;
-+				if ((y0 & li) == 0) {
-+					GPU_BlitWW(src16 + src16_offs, dst16, isRGB24);
-+					dst16 += VIDEO_WIDTH;
-+					out_lines++;
-+				}
- 				src16_offs = (src16_offs + h0) & src16_offs_msk;
- 			}
- 		} break;
- 
- 		case 384: {
- 			for (int y1=y0+h1; y0<y1; y0+=incY) {
--				GPU_BlitWWWWWS(src16 + src16_offs, dst16, isRGB24);
--				dst16 += VIDEO_WIDTH;
-+				if ((y0 & li) == 0) {
-+					GPU_BlitWWWWWS(src16 + src16_offs, dst16, isRGB24);
-+					dst16 += VIDEO_WIDTH;
-+					out_lines++;
-+				}
- 				src16_offs = (src16_offs + h0) & src16_offs_msk;
- 			}
- 		} break;
- 
- 		case 512: {
- 			for (int y1=y0+h1; y0<y1; y0+=incY) {
--				GPU_BlitWWSWWSWS(src16 + src16_offs, dst16, isRGB24);
--				dst16 += VIDEO_WIDTH;
-+				if ((y0 & li) == 0) {
-+					GPU_BlitWWSWWSWS(src16 + src16_offs, dst16, isRGB24);
-+					dst16 += VIDEO_WIDTH;
-+					out_lines++;
-+				}
- 				src16_offs = (src16_offs + h0) & src16_offs_msk;
- 			}
- 		} break;
- 
- 		case 640: {
- 			for (int y1=y0+h1; y0<y1; y0+=incY) {
--				GPU_BlitWS(src16 + src16_offs, dst16, isRGB24);
--				dst16 += VIDEO_WIDTH;
-+				if ((y0 & li) == 0) {
-+					GPU_BlitWS(src16 + src16_offs, dst16, isRGB24);
-+					dst16 += VIDEO_WIDTH;
-+					out_lines++;
-+				}
- 				src16_offs = (src16_offs + h0) & src16_offs_msk;
- 			}
- 		} break;
- 	}
- 
-+	/* With line-skipping the output rows are compacted; without it the
-+	 * port presents its full fixed-height buffer exactly as before. */
-+	gpu_out_height = li ? out_lines : 0;
-+
- 	video_flip();
- }
- 
 diff --git a/src/gte.cpp b/src/gte.cpp
 index 75295aa..497d215 100644
 --- a/src/gte.cpp
@@ -517,58 +262,6 @@ index 75295aa..497d215 100644
  }
  
  void gteAVSZ3(void) {
-diff --git a/src/port/libretro/port.cpp b/src/port/libretro/port.cpp
-index 401c4b1..a8c78e2 100644
---- a/src/port/libretro/port.cpp
-+++ b/src/port/libretro/port.cpp
-@@ -36,6 +36,12 @@ extern volatile int skip_video_output;
- /* v295: GPU frame counter - counts ACTUAL rendered frames (not skipped/duped) */
- volatile int gpu_frame_count = 0;
- 
-+/* QPSX half-res: line-skip mask applied by vout_update() and the height of
-+ * the compacted output rows it produced. video_flip() presents only the
-+ * compacted rows; the host upscaler restores full screen size. */
-+volatile int gpu_out_ilace_mask = 0;
-+volatile int gpu_out_height = SCREEN_HEIGHT;
-+
- static unsigned tick_counter = 0;
- 
- unsigned get_ticks(void) { return tick_counter++; }
-@@ -97,12 +103,15 @@ void video_flip(void)
-      * to reuse previous frame. This is faster than sending same data again.
-      * IMPORTANT: We must still call video_cb for profiler timing to work!
-      */
-+    int out_height = gpu_out_height;
-+    if (out_height <= 0 || out_height > SCREEN_HEIGHT)
-+        out_height = SCREEN_HEIGHT;
-     if (skip_video_output) {
--        video_cb(NULL, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
-+        video_cb(NULL, SCREEN_WIDTH, out_height, SCREEN_WIDTH * 2);
-     } else if (SCREEN) {
-         /* v295: Count ACTUAL rendered frames (not skipped) */
-         gpu_frame_count++;
--        video_cb(SCREEN, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
-+        video_cb(SCREEN, SCREEN_WIDTH, out_height, SCREEN_WIDTH * 2);
-     }
- }
- 
-diff --git a/src/port/libretro/port.h b/src/port/libretro/port.h
-index af50db8..913220f 100644
---- a/src/port/libretro/port.h
-+++ b/src/port/libretro/port.h
-@@ -39,6 +39,12 @@ static inline int usleep(unsigned usec) {
- unsigned get_ticks(void);
- void wait_ticks(unsigned s);
- 
-+/* QPSX half-res: line-skip mask the rasterizers used, and the compacted
-+ * output height vout_update() produced. video_flip() presents only the
-+ * compacted rows; the host upscaler restores full screen size. */
-+extern volatile int gpu_out_ilace_mask;
-+extern volatile int gpu_out_height;
-+
- /* Input */
- void pad_update(void);
- unsigned short pad_read(int num);
 diff --git a/src/profiler.h b/src/profiler.h
 index 1d4cfc5..e84826c 100644
 --- a/src/profiler.h
@@ -717,12 +410,160 @@ index 2f62c49..3bb473a 100644
  
  	REC_RTYPE_RD_RT_SA(SRA, _Rd_, _Rt_, _Sa_);
  
+diff --git a/src/recompiler/mips/rec_gte.cpp.h b/src/recompiler/mips/rec_gte.cpp.h
+index 16564dd..9a6cd49 100644
+--- a/src/recompiler/mips/rec_gte.cpp.h
++++ b/src/recompiler/mips/rec_gte.cpp.h
+@@ -606,14 +606,65 @@ static void gen_LWC2_SWC2()
+ 
+ 			if (_fOp_(opcode) == 0x32) {
+ 				// LWC2
+-				JAL(psxMemRead32);                     // Read value from memory
+-				ADDIU(MIPSREG_A0, rs, _fImm_(opcode)); // <BD>
++				// QPSX NOMMU scratchpad fast path: on the SF2000 there is no
++				//  virtual mirror, so this else-branch is what LWC2/SWC2 use,
++				//  and the C-helper call per access is the top remaining cost
++				//  (Ridge Racer streams most of its vertex data through the
++				//  scratchpad via LWC2/SWC2). Mirror the proven rec_lsu fast
++				//  path: divert 0x1f80_0000..0x1f80_03ff to psxH[m] inline;
++				//  everything else (RAM, HW regs, ROM) keeps the helper call
++				//  with identical semantics.
++				{
++					u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++					ADDIU(MIPSREG_A0, rs, _fImm_(opcode)); // eff addr (also helper arg)
++					SRL(TEMP_1, MIPSREG_A0, 16);
++					XORI(TEMP_1, TEMP_1, 0x1f80);          // t == 0x1f80 ?
++					lbl_helper = (u32 *)recMem;
++					BNE(TEMP_1, 0, 0);                     // not scratchpad/hw -> helper
++					ANDI(TEMP_2, MIPSREG_A0, 0xffff);      // <BD> m = addr & 0xffff
++					SLTIU(TEMP_3, TEMP_2, 0x400);           // m < 0x400 (scratchpad)?
++					lbl_hw = (u32 *)recMem;
++					BEQZ(TEMP_3, 0);                       // hardware regs -> helper
++					LUI(TEMP_3, ADR_HI((uptr)psxH));       // <BD> psxH high half
++					ADDU(TEMP_3, TEMP_3, TEMP_2);           // psxH + m
++					LSU_OPCODE(0x8c000000, MIPSREG_V0, TEMP_3, ADR_LO((uptr)psxH)); // LW v0, lo(psxH)(t3)
++					lbl_done = (u32 *)recMem;
++					B(0);                                  // -> done
++					NOP();                                 // <BD>
++					fixup_branch(lbl_helper);
++					fixup_branch(lbl_hw);
++					JAL(psxMemRead32);                     // helper: addr already in $a0
++					NOP();                                 // <BD> (result not ready yet)
++					fixup_branch(lbl_done);
++				}
+ 				emitMTC2(MIPSREG_V0, _fRt_(opcode));   // Move value read to GTE reg
+ 			} else if (_fOp_(opcode) == 0x3a) {
+ 				// SWC2
+ 				emitMFC2(MIPSREG_A1, _fRt_(opcode));   // Get GTE reg value
+-				JAL(psxMemWrite32);                    // Write GTE reg to memory
+-				ADDIU(MIPSREG_A0, rs, _fImm_(opcode)); // <BD>
++				// QPSX NOMMU scratchpad fast path (see LWC2 above).
++				{
++					u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++					ADDIU(MIPSREG_A0, rs, _fImm_(opcode)); // eff addr (also helper arg)
++					SRL(TEMP_1, MIPSREG_A0, 16);
++					XORI(TEMP_1, TEMP_1, 0x1f80);          // t == 0x1f80 ?
++					lbl_helper = (u32 *)recMem;
++					BNE(TEMP_1, 0, 0);                     // not scratchpad/hw -> helper
++					ANDI(TEMP_2, MIPSREG_A0, 0xffff);      // <BD> m = addr & 0xffff
++					SLTIU(TEMP_3, TEMP_2, 0x400);           // m < 0x400 (scratchpad)?
++					lbl_hw = (u32 *)recMem;
++					BEQZ(TEMP_3, 0);                       // hardware regs -> helper
++					LUI(TEMP_3, ADR_HI((uptr)psxH));       // <BD> psxH high half
++					ADDU(TEMP_3, TEMP_3, TEMP_2);           // psxH + m
++					LSU_OPCODE(0xac000000, MIPSREG_A1, TEMP_3, ADR_LO((uptr)psxH)); // SW a1, lo(psxH)(t3)
++					lbl_done = (u32 *)recMem;
++					B(0);                                  // -> done
++					NOP();                                 // <BD>
++					fixup_branch(lbl_helper);
++					fixup_branch(lbl_hw);
++					JAL(psxMemWrite32);                    // helper: $a0=addr, $a1=value
++					NOP();                                 // <BD>
++					fixup_branch(lbl_done);
++				}
+ 			}
+ 		} while (--count);
+ 
 diff --git a/src/recompiler/mips/rec_lsu.cpp.h b/src/recompiler/mips/rec_lsu.cpp.h
-index 584761e..6541177 100644
+index 584761e..5a5cec2 100644
 --- a/src/recompiler/mips/rec_lsu.cpp.h
 +++ b/src/recompiler/mips/rec_lsu.cpp.h
-@@ -1021,9 +1021,33 @@ static void general_loads_stores(const int  count,
- 						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
+@@ -549,6 +549,33 @@ static int count_loads_stores(u32  *pc_of_last_store_in_series,
+ 	return count;
+ }
+ 
++/*
++ * QPSX NOMMU scratchpad fast path for the indirect LSU emission.
++ *
++ * Requires MIPSREG_A0 to already hold the effective address (it is also
++ * the helper-call argument). Emits a range check for the 1KB scratchpad
++ * (0x1f80_0000..0x1f80_03ff, which maps to psxH[addr & 0xffff]); on a hit
++ * TEMP_3 is left as psxH + m and execution continues at the returned label
++ * (the caller emits the actual access there); on a miss execution falls
++ * through to the C helper at '*lbl_helper'/'*lbl_hw' (hardware regs and
++ * everything else keep identical helper semantics, including the RAM
++ * code-cache invalidation).
++ */
++static u32 *emit_scratchpad_fast_check(u32 **lbl_helper, u32 **lbl_hw)
++{
++	SRL(TEMP_1, MIPSREG_A0, 16);         // t = addr >> 16
++	XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++	*lbl_helper = (u32 *)recMem;
++	BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++	ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++	SLTIU(TEMP_3, TEMP_2, 0x400);        // m < 0x400 (scratchpad)?
++	*lbl_hw = (u32 *)recMem;
++	BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++	LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++	ADDU(TEMP_3, TEMP_3, TEMP_2);        // TEMP_3 = psxH + m
++	return (u32 *)recMem;                // caller emits the access here
++}
++
+ /* Emit a series of loads/stores to a common base address.
+  *  If there are stores, code invalidation might also be emitted.
+  *  If 'force_indirect' param is true, only indirect C func calls will
+@@ -1011,31 +1038,102 @@ static void general_loads_stores(const int  count,
+ 				switch (insn)
+ 				{
+ 					case 0xa0000000: // SB
+-						ADDIU(MIPSREG_A0, rs, op_imm);
+-						JAL(write_func[WIDTH_8]);
+-						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
++						// QPSX scratchpad fast path (see the SW case below).
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							emit_scratchpad_fast_check(&lbl_helper, &lbl_hw);
++							LSU_OPCODE(0xa0000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // SB rt, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(write_func[WIDTH_8]);
++							MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
++							fixup_branch(lbl_done);
++						}
+ 						break;
+ 					case 0xa4000000: // SH
+-						ADDIU(MIPSREG_A0, rs, op_imm);
+-						JAL(write_func[WIDTH_16]);
+-						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
++						// QPSX scratchpad fast path (see the SW case below).
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							emit_scratchpad_fast_check(&lbl_helper, &lbl_hw);
++							LSU_OPCODE(0xa4000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // SH rt, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(write_func[WIDTH_16]);
++							MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
++							fixup_branch(lbl_done);
++						}
  						break;
  					case 0xac000000: // SW
 -						ADDIU(MIPSREG_A0, rs, op_imm);
@@ -758,7 +599,205 @@ index 584761e..6541177 100644
  						break;
  					case 0xa8000000: // SWL
  					case 0xb8000000: // SWR
-@@ -1145,10 +1169,31 @@ static void general_loads_stores(const int  count,
+-						ADDIU(MIPSREG_A0, rs, op_imm);
+-#ifdef HAVE_MIPS32R2_EXT_INS
+-						JAL(read_func[WIDTH_32]);       // result in MIPSREG_V0
+-						INS(MIPSREG_A0, 0, 0, 2);       // <BD> clear 2 lower bits of $a0
+-#else
+-						SRL(MIPSREG_A0, MIPSREG_A0, 2);
+-						JAL(read_func[WIDTH_32]);       // result in MIPSREG_V0
+-						SLL(MIPSREG_A0, MIPSREG_A0, 2); // <BD> clear lower 2 bits of $a0
+-#endif
++						// QPSX scratchpad fast path (see the SW case above): inline
++						// the aligned-word read for scratchpad addresses; the
++						// mask/merge tail below is register-only, and the write
++						// half gets its own inline fast path after the merge.
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							// LWL/LWR/SWL/SWR pass the aligned word address to the
++							//  helper (it must read the word containing 'addr').
++							SRL(MIPSREG_A0, MIPSREG_A0, 2);
++							SLL(MIPSREG_A0, MIPSREG_A0, 2);
++							SRL(TEMP_1, MIPSREG_A0, 16);
++							XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++							lbl_helper = (u32 *)recMem;
++							BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++							ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++							SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++							lbl_hw = (u32 *)recMem;
++							BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++							LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++							ANDI(TEMP_2, TEMP_2, 0xfffc);         // m & ~3 (aligned word offset)
++							ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + (m & ~3)
++							LSU_OPCODE(0x8c000000, MIPSREG_V0, TEMP_3, ADR_LO((uptr)psxH)); // LW v0, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(read_func[WIDTH_32]);            // helper: aligned addr in $a0
++							NOP();                               // <BD>
++							fixup_branch(lbl_done);
++						}
+ 
+ 						ADDIU(MIPSREG_A0, rs, op_imm);
+ 
+@@ -1075,8 +1173,34 @@ static void general_loads_stores(const int  count,
+ 						else                    // SWR
+ 							SLLV(TEMP_1, rt, TEMP_3);        // temp_1 = new_data << shift
+ 
+-						JAL(write_func[WIDTH_32]);
+-						OR(MIPSREG_A1, MIPSREG_A1, TEMP_1);  // <BD> $a1 |= temp_1
++						// QPSX scratchpad fast path for the write half (see the
++						//  SW case): $a0 already holds the (aligned) eff addr and
++						//  $a1 must hold the merged value before the check, so the
++						//  OR is emitted once here instead of in the JAL delay slot.
++						OR(MIPSREG_A1, MIPSREG_A1, TEMP_1);  // $a1 |= temp_1
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							SRL(TEMP_1, MIPSREG_A0, 16);
++							XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++							lbl_helper = (u32 *)recMem;
++							BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++							ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++							SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++							lbl_hw = (u32 *)recMem;
++							BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++							LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++							ANDI(TEMP_2, TEMP_2, 0xfffc);         // m & ~3 (aligned word offset)
++							ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + (m & ~3)
++							LSU_OPCODE(0xac000000, MIPSREG_A1, TEMP_3, ADR_LO((uptr)psxH)); // SW a1, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(write_func[WIDTH_32]);           // helper: addr in $a0, value in $a1
++							NOP();                               // <BD>
++							fixup_branch(lbl_done);
++						}
+ 						break;
+ 					default:
+ 						printf("ERROR: unrecognized store opcode in %s: %x\n", __func__, opcode);
+@@ -1107,61 +1231,163 @@ static void general_loads_stores(const int  count,
+ 				switch (insn)
+ 				{
+ 					case 0x80000000: // LB
+-						JAL(read_func[WIDTH_8]);
+-						ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
+-						if (op_rt) {
++						// QPSX scratchpad fast path (see the LW case below).
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							emit_scratchpad_fast_check(&lbl_helper, &lbl_hw);
++							// Native LB already sign-extends, matching psxMemRead8's
++							// caller-side SEB (idempotent, so omitted on this path).
++							LSU_OPCODE(0x80000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // LB rt, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(read_func[WIDTH_8]);
++							ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
++							if (op_rt) {
+ #ifdef HAVE_MIPS32R2_SEB_SEH
+-							SEB(rt, MIPSREG_V0);
++								SEB(rt, MIPSREG_V0);
+ #else
+-							SLL(rt, MIPSREG_V0, 24);
+-							SRA(rt, rt, 24);
++								SLL(rt, MIPSREG_V0, 24);
++								SRA(rt, rt, 24);
+ #endif
++							}
++							fixup_branch(lbl_done);
+ 						}
+ 						break;
+ 					case 0x90000000: // LBU
+-						JAL(read_func[WIDTH_8]);    // result in MIPSREG_V0
+-						ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
+-						if (op_rt) {
+-							MOV(rt, MIPSREG_V0);
++						// QPSX scratchpad fast path (see the LW case below).
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							emit_scratchpad_fast_check(&lbl_helper, &lbl_hw);
++							LSU_OPCODE(0x90000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // LBU rt, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(read_func[WIDTH_8]);    // result in MIPSREG_V0
++							ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
++							if (op_rt) {
++								MOV(rt, MIPSREG_V0);
++							}
++							fixup_branch(lbl_done);
+ 						}
+ 						break;
+ 					case 0x84000000: // LH
+-						JAL(read_func[WIDTH_16]);   // result in MIPSREG_V0
+-						ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
+-						if (op_rt) {
++						// QPSX scratchpad fast path (see the LW case below).
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							emit_scratchpad_fast_check(&lbl_helper, &lbl_hw);
++							// Native LH already sign-extends, matching psxMemRead16's
++							// caller-side SEH (idempotent, so omitted on this path).
++							LSU_OPCODE(0x84000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // LH rt, lo(psxH)(t3)
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(read_func[WIDTH_16]);   // result in MIPSREG_V0
++							ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
++							if (op_rt) {
+ #ifdef HAVE_MIPS32R2_SEB_SEH
+-							SEH(rt, MIPSREG_V0);
++								SEH(rt, MIPSREG_V0);
+ #else
+-							SLL(rt, MIPSREG_V0, 16);
+-							SRA(rt, rt, 16);
++								SLL(rt, MIPSREG_V0, 16);
++								SRA(rt, rt, 16);
+ #endif
++							}
++							fixup_branch(lbl_done);
+ 						}
+ 						break;
+ 					case 0x94000000: // LHU
+-						JAL(read_func[WIDTH_16]);   // result in MIPSREG_V0
+-						ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
+-						if (op_rt) {
+-							ANDI(rt, MIPSREG_V0, 0xffff);
++						// QPSX scratchpad fast path (see the LW case below).
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							emit_scratchpad_fast_check(&lbl_helper, &lbl_hw);
++							LSU_OPCODE(0x94000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // LHU rt, lo(psxH)(t3)
++							if (op_rt) {
++								ANDI(rt, rt, 0xffff);
++							}
++							lbl_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(lbl_helper);
++							fixup_branch(lbl_hw);
++							JAL(read_func[WIDTH_16]);   // result in MIPSREG_V0
++							ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
++							if (op_rt) {
++								ANDI(rt, MIPSREG_V0, 0xffff);
++							}
++							fixup_branch(lbl_done);
  						}
  						break;
  					case 0x8c000000: // LW
@@ -794,3 +833,46 @@ index 584761e..6541177 100644
  						}
  						break;
  					case 0x88000000: // LWL
+ 					case 0x98000000: // LWR
+-						ADDIU(MIPSREG_A0, rs, op_imm);
+-#ifdef HAVE_MIPS32R2_EXT_INS
+-						JAL(read_func[WIDTH_32]);   // result in MIPSREG_V0
+-						INS(MIPSREG_A0, 0, 0, 2);   // <BD> clear 2 lower bits of $a0 (using branch delay slot)
+-#else
++						// QPSX scratchpad fast path (see the LW case above): inline
++						// the aligned-word read for scratchpad addresses; the
++						// mask/merge tail below is register-only.
++						{
++							u32 *lbl_helper = 0, *lbl_hw = 0, *lbl_done = 0;
++						ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++						// LWL/LWR/SWL/SWR pass the aligned word address to the
++						//  helper (it must read the word containing 'addr').
+ 						SRL(MIPSREG_A0, MIPSREG_A0, 2);
+-						JAL(read_func[WIDTH_32]);       // result in MIPSREG_V0
+-						SLL(MIPSREG_A0, MIPSREG_A0, 2); // <BD> clear lower 2 bits of $a0
+-#endif
++						SLL(MIPSREG_A0, MIPSREG_A0, 2);
++						SRL(TEMP_1, MIPSREG_A0, 16);
++						XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++						lbl_helper = (u32 *)recMem;
++						BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++						ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++						SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++						lbl_hw = (u32 *)recMem;
++						BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++						LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++						ANDI(TEMP_2, TEMP_2, 0xfffc);         // m & ~3 (aligned word offset)
++						ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + (m & ~3)
++						LSU_OPCODE(0x8c000000, MIPSREG_V0, TEMP_3, ADR_LO((uptr)psxH)); // LW v0, lo(psxH)(t3)
++						lbl_done = (u32 *)recMem;
++						B(0);                                // b done
++						NOP();                               // <BD>
++						fixup_branch(lbl_helper);
++						fixup_branch(lbl_hw);
++						JAL(read_func[WIDTH_32]);            // helper: aligned addr in $a0
++						NOP();                               // <BD>
++						fixup_branch(lbl_done);
++						}
+ 
+ 						ADDIU(MIPSREG_A0, rs, op_imm);
+ 
