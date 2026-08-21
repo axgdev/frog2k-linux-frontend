@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <poll.h>
 #include <signal.h>
 #include <sound/asound.h>
@@ -24,6 +25,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <ucontext.h>
@@ -156,6 +158,7 @@ static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
 static struct timespec metrics_start;
+static struct rusage metrics_cpu_start;
 static int metrics_fd = -1;
 static struct sf2000_pacer pacer;
 static unsigned interval_max_run_us;
@@ -165,6 +168,8 @@ static unsigned interval_buffered_frames;
 static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
+static unsigned benchmark_frame_limit;
+static unsigned benchmark_frame_count;
 static unsigned audio_suppressed;
 static unsigned audio_sustain_factor = 256u;
 static int audio_last_output;
@@ -172,6 +177,22 @@ static unsigned audio_sustaining;
 #if SF2000_AUDIO_WAVEFORM_METRICS
 static int audio_last_sample;
 #endif
+
+static uint64_t timeval_us(const struct timeval *value)
+{
+	return (uint64_t)value->tv_sec * 1000000u +
+		(uint64_t)value->tv_usec;
+}
+
+static uint64_t rusage_delta_us(const struct timeval *now,
+	const struct timeval *start)
+{
+	uint64_t current = timeval_us(now);
+	uint64_t previous = timeval_us(start);
+
+	return current >= previous ? current - previous : 0;
+}
+
 static unsigned loading_game;
 static int core_watchdog_kmsg_fd = -1;
 static volatile sig_atomic_t core_watchdog_stage;
@@ -269,6 +290,7 @@ static void reset_metric_window(void)
 	previous_xruns = audio_metrics.xruns;
 	sf2000_input_reset_interval(&host.input);
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
+	(void)getrusage(RUSAGE_SELF, &metrics_cpu_start);
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -1114,12 +1136,17 @@ static void video(const void *data, unsigned width, unsigned height,
 		reset_metric_window();
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
+		struct rusage cpu_now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
+		uint64_t cpu_user_us = 0;
+		uint64_t cpu_sys_us = 0;
+		uint64_t cpu_total_us;
+		uint64_t cpu_pct_milli = 0;
 		/* Must fit the whole metric line including the trailing newline:
 		 * a truncated write swallows the '\n', gluing the next record
 		 * (e.g. a mode event) onto this line so sf2000-logd drops it. */
-		char details[768];
+		char details[896];
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1133,15 +1160,25 @@ static void video(const void *data, unsigned width, unsigned height,
 		fps_milli = elapsed_ms ?
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
+		if (getrusage(RUSAGE_SELF, &cpu_now) == 0) {
+			cpu_user_us = rusage_delta_us(&cpu_now.ru_utime,
+				&metrics_cpu_start.ru_utime);
+			cpu_sys_us = rusage_delta_us(&cpu_now.ru_stime,
+				&metrics_cpu_start.ru_stime);
+		}
+		cpu_total_us = cpu_user_us + cpu_sys_us;
+		if (elapsed_ms)
+			cpu_pct_milli = (cpu_total_us * 100u) / elapsed_ms;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu cpu_user_us=%" PRIu64 " cpu_sys_us=%" PRIu64 " cpu_pct_milli=%" PRIu64 " pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
 			audio_metrics.peak,
 			host.audio_count, (long)host.audio_delay,
 			host.audio_resample_rate, audio_suppressed, video_callbacks,
-			elapsed_ms, fps_milli,
+			elapsed_ms, fps_milli, cpu_user_us, cpu_sys_us,
+			cpu_pct_milli,
 			pacer.resets, pacer.interval_late_frames,
 			pacer.interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
@@ -1183,6 +1220,7 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_ge_stage_frames = 0;
 		interval_buffered_frames = 0;
 		sf2000_input_reset_interval(&host.input);
+		(void)getrusage(RUSAGE_SELF, &metrics_cpu_start);
 	}
 }
 
@@ -1824,6 +1862,38 @@ static int cmdline_has_uncapped(void)
 		return 0;
 	return (needle == line || needle[-1] == ' ') &&
 		(needle[17] == '\0' || needle[17] == ' ' || needle[17] == '\n');
+}
+
+/* A fixed guest-frame endpoint makes QEMU cache A/Bs compare the same game
+ * scene instead of whichever point the host reached before a wall-clock
+ * timeout.  The option is diagnostic-only and absent from production boots. */
+static unsigned cmdline_benchmark_frames(void)
+{
+	char line[512];
+	char *needle;
+	char *end;
+	unsigned long value;
+	int fd;
+	ssize_t n;
+
+	fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, line, sizeof(line) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	line[n] = '\0';
+	needle = strstr(line, "SF2000_BENCHMARK_FRAMES=");
+	if (!needle || (needle != line && needle[-1] != ' '))
+		return 0;
+	needle += strlen("SF2000_BENCHMARK_FRAMES=");
+	errno = 0;
+	value = strtoul(needle, &end, 10);
+	if (errno || end == needle || value > UINT_MAX ||
+		(*end != '\0' && *end != ' ' && *end != '\n'))
+		return 0;
+	return (unsigned)value;
 }
 
 static void set_uncapped_mode(unsigned enable)
@@ -2895,8 +2965,15 @@ int main(int argc, char **argv)
 	if (sf2000_performance_begin() != 0)
 		log_kmsg("performance journal acknowledgement timeout\n");
 	start_metrics_logging();
+	benchmark_frame_limit = cmdline_benchmark_frames();
+	benchmark_frame_count = 0;
 	if (cmdline_has_uncapped()) {
-		log_kmsg("cmdline uncapped=1 enabling benchmark mode\n");
+		char details[128];
+
+		snprintf(details, sizeof(details),
+			"cmdline uncapped=1 enabling benchmark mode frames=%u\n",
+			benchmark_frame_limit);
+		log_kmsg(details);
 		set_uncapped_mode(1);
 	}
 	signal(SIGINT, stop_signal);
@@ -2920,6 +2997,7 @@ int main(int argc, char **argv)
 		retro_run();
 		(void)alarm(0);
 		core_watchdog_stage = 0;
+		benchmark_frame_count++;
 		if (state_resume_probe_frames) {
 			char details[96];
 			unsigned completed = 3u - state_resume_probe_frames;
@@ -2939,6 +3017,11 @@ int main(int argc, char **argv)
 		}
 		audio_refill_sustain();
 		save_ram_poll();
+		if (benchmark_frame_limit &&
+			benchmark_frame_count >= benchmark_frame_limit) {
+			log_kmsg("benchmark frame limit reached\n");
+			stopping = 1;
+		}
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);
 			continue;
