@@ -411,7 +411,8 @@ MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
 # production builds cannot silently fall back to the old cache-heavy core.
 # Fold it into QPSX_DEP_REV once that revision is available from the fork.
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
-	patches/mufrog/qpsx-sf2000-performance.patch
+	patches/mufrog/qpsx-sf2000-performance.patch \
+	patches/mufrog/qpsx-sf2000-cd-preload.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -648,20 +649,21 @@ qpsx-dev-core:
 		'CXX=$(SF2000_CXX)' \
 		'AR=$(CROSS_COMPILE)ar' \
 		'QPSX_PLATFORM=$(QPSX_PLATFORM)' \
+		'QPSX_OPTIMIZE=$(QPSX_OPTIMIZE)' \
 		'QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2)' \
 		'CFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS)' \
 		'CXXFLAGS=$(MUFROG_CORE_CFLAGS) $(MUFROG_CORE_INCLUDES) $(MUFROG_qpsx_EXTRA_CFLAGS) $(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
 	} > '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	if ! cmp -s '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)' 2>/dev/null; then \
 		$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 RECOMPILER=mips \
+			platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 RECOMPILER=mips \
 			TARGET='$(abspath $(QPSX_DEV_RAW))'; \
 		mv '$(QPSX_DEV_FLAGS_STAMP).tmp' '$(QPSX_DEV_FLAGS_STAMP)'; \
 	else \
 		rm -f '$(QPSX_DEV_FLAGS_STAMP).tmp'; \
 	fi
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro \
-		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
+		platform=unix QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' QPSX_ENABLE_MIPS32R2=$(QPSX_DEV_R2) QPSX_PROFILER=$(QPSX_DEV_PROFILER) STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $(QPSX_DEV_RAW))' \
 		CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' AR='$(CROSS_COMPILE)ar' \
 		CFLAGS='$(MUFROG_CORE_CFLAGS) \
@@ -707,7 +709,7 @@ qpsx-dev-package: qpsx-dev-mips32r1-audit
 
 qpsx-dev-clean:
 	$(MAKE) -C '$(QPSX_DEV_SOURCE)' -f Makefile.libretro clean \
-		platform=unix STATIC_LINKING=1 RECOMPILER=mips \
+		platform=unix QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)' STATIC_LINKING=1 RECOMPILER=mips \
 		TARGET='$(abspath $(QPSX_DEV_RAW))'
 	rm -rf build/qpsx-dev '$(QPSX_DEV_EXECUTABLE)'
 
@@ -1286,7 +1288,7 @@ build/mufrog/raw/$(1).a: build/mufrog/src/$(1)/.source Makefile  $(TOOLCHAIN_STA
 	rm -f '$$@'
 	$(MAKE) -C 'build/mufrog/src/$(1)/$(MUFROG_$(call mufrog_key,$(1))_WORKDIR)' \
 		-f '$(MUFROG_$(call mufrog_key,$(1))_MAKEFILE)' \
-		platform=unix $(if $(filter qpsx,$(1)),QPSX_PLATFORM=$(QPSX_PLATFORM),) \
+		platform=unix $(if $(filter qpsx,$(1)),QPSX_PLATFORM=$(QPSX_PLATFORM) QPSX_OPTIMIZE='$(QPSX_OPTIMIZE)',) \
 		STATIC_LINKING=1 STATIC_LINKING_LINK=1 fpic=-fPIC \
 		TARGET='$(abspath $$@)' CC='$(SF2000_CC)' CXX='$(SF2000_CXX)' \
 		AR='$(CROSS_COMPILE)ar' \

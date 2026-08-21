@@ -365,3 +365,127 @@ index a83d76c3532867c845b3d29b47a5cc8eff2acb3c..906a5895707aa0091bf4960e49879678
 +		rec_dispatch_cache_clear();
 @@ -1871,0 +2069 @@ static void recReset()
 +	rec_dispatch_cache_clear();
+diff --git a/src/cdriso.cpp b/src/cdriso.cpp
+index 2a70591..70a9103 100644
+--- a/src/cdriso.cpp
++++ b/src/cdriso.cpp
+@@ -204,6 +204,78 @@ static boolean multifile = FALSE;
+ static unsigned char cdbuffer[CD_FRAMESIZE_RAW];
+ static unsigned char subbuffer[SUB_FRAMESIZE];
+ 
++/*
++ * The SF2000 has a 16 KiB D-cache and a slow SD-backed filesystem.  A normal
++ * PSX data request is one 2352-byte sector, which used to perform a seek and
++ * fread for every sector even when the guest was reading a sequential run.
++ * Keep only four sectors here: the 9408-byte data window fits below one
++ * D-cache, and a miss turns four filesystem operations into one without
++ * competing with the emulator's larger hot buffers.  The cache is also used
++ * for 2048-byte mode-1 images; the stride is part of the key so the two
++ * layouts can never alias.
++ */
++#ifndef QPSX_CD_READ_CACHE_SECTORS
++#define QPSX_CD_READ_CACHE_SECTORS 4
++#endif
++#define QPSX_CD_READ_CACHE_BYTES \
++	(QPSX_CD_READ_CACHE_SECTORS * CD_FRAMESIZE_RAW)
++
++static unsigned char cdread_cache[QPSX_CD_READ_CACHE_BYTES]
++	__attribute__((aligned(16)));
++static FILE *cdread_cache_file;
++static unsigned int cdread_cache_base;
++static unsigned int cdread_cache_stride;
++static int cdread_cache_first;
++static int cdread_cache_count;
++
++static void cdread_cache_invalidate(void)
++{
++	cdread_cache_file = NULL;
++	cdread_cache_base = 0;
++	cdread_cache_stride = 0;
++	cdread_cache_first = 0;
++	cdread_cache_count = 0;
++}
++
++static int cdread_cached(FILE *f, unsigned int base, void *dest,
++	unsigned int stride, int sector)
++{
++	int first;
++	size_t want;
++	size_t got;
++	int count;
++
++	if (sector < 0 || stride == 0 || stride > CD_FRAMESIZE_RAW)
++		return -1;
++
++	first = (sector / QPSX_CD_READ_CACHE_SECTORS) * QPSX_CD_READ_CACHE_SECTORS;
++	if (cdread_cache_file != f || cdread_cache_base != base ||
++		cdread_cache_stride != stride || sector < cdread_cache_first ||
++		sector >= cdread_cache_first + cdread_cache_count) {
++		want = (size_t)QPSX_CD_READ_CACHE_SECTORS * stride;
++		if (fseek(f, base + (unsigned int)first * stride, SEEK_SET) == -1) {
++			cdread_cache_invalidate();
++			return -1;
++		}
++
++		got = fread(cdread_cache, 1, want, f);
++		count = (int)(got / stride);
++		cdread_cache_file = f;
++		cdread_cache_base = base;
++		cdread_cache_stride = stride;
++		cdread_cache_first = first;
++		cdread_cache_count = count;
++	}
++
++	if (sector < cdread_cache_first ||
++		sector >= cdread_cache_first + cdread_cache_count)
++		return 0;
++
++	memcpy(dest, cdread_cache +
++		(size_t)(sector - cdread_cache_first) * stride, stride);
++	return (int)stride;
++}
++
+ static unsigned char sndbuffer[CD_FRAMESIZE_RAW * 10];
+ 
+ unsigned char *(*CDR_getBuffer)(void);
+@@ -1570,9 +1642,7 @@ static int opensbifile(const char *isoname) {
+ 
+ static int cdread_normal(FILE *f, unsigned int base, void *dest, int sector)
+ {
+-	if (fseek(f, base + sector * CD_FRAMESIZE_RAW, SEEK_SET) == -1)
+-		return -1;
+-	return fread(dest, 1, CD_FRAMESIZE_RAW, f);
++	return cdread_cached(f, base, dest, CD_FRAMESIZE_RAW, sector);
+ }
+ 
+ static int cdread_sub_mixed(FILE *f, unsigned int base, void *dest, int sector)
+@@ -1699,10 +1769,9 @@ static int cdread_2048(FILE *f, unsigned int base, void *dest, int sector)
+ {
+ 	int ret;
+ 
+-	if (fseek(f, base + sector * 2048, SEEK_SET) == -1)
+-		return -1;
+-
+-	ret = fread((char *)dest + 12 * 2, 1, 2048, f);
++	ret = cdread_cached(f, base, (char *)dest + 12 * 2, 2048, sector);
++	if (ret < 0)
++		return ret;
+ 
+ 	// not really necessary, fake mode 2 header
+ 	memset(cdbuffer, 0, 12 * 2);
+@@ -1745,6 +1814,7 @@ long CDR_open(void) {
+ 	if (cdHandle != NULL) {
+ 		return 0; // it's already open
+ 	}
++	cdread_cache_invalidate();
+ 
+ 	cdHandle = fopen(GetIsoFile(), "rb");
+ 	if (cdHandle == NULL) {
+@@ -1916,6 +1986,7 @@ long CDR_close(void) {
+ 	UnloadSBI();
+ 	memset(cdbuffer, 0, sizeof(cdbuffer));
+ 	CDR_getBuffer = CDR_getBuffer_norm;
++	cdread_cache_invalidate();
+ 
+ 	return 0;
+ }
