@@ -475,6 +475,11 @@ QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI ?= 0
 # annul otherwise-empty delay slots. Keep disabled until physical timing is
 # confirmed.
 QPSX_MIPS_DISPATCH_BRANCH_LIKELY ?= 0
+# Select the frame-complete branch independently from the cache probes. The
+# cache branch-likely form moves miss-only work out of the hit path, while the
+# frame check has a different taken/not-taken balance and can be slower on an
+# in-order MIPS32r1 when its annul penalty exceeds one nop.
+QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY ?= 0
 # Fold a bounded chain of short forward direct jumps into one translated
 # superblock. Eight links/1 KiB is the best QEMU hot-scene point; keep both
 # limits configurable for compatibility/per-game A/B testing.
@@ -568,6 +573,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_DISPATCH_CACHE_GP=$(QPSX_MIPS_DISPATCH_CACHE_GP) \
 	-DQPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI) \
 	-DQPSX_MIPS_DISPATCH_BRANCH_LIKELY=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY) \
+	-DQPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY) \
 	-DQPSX_BUILD_TAG=\"$(QPSX_BUILD_TAG)\" \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
@@ -625,6 +631,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_DISPATCH_CACHE_GP=%s\n' '$(QPSX_MIPS_DISPATCH_CACHE_GP)'; \
 		printf 'QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=%s\n' '$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI)'; \
 		printf 'QPSX_MIPS_DISPATCH_BRANCH_LIKELY=%s\n' '$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)'; \
+		printf 'QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=%s\n' '$(QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY)'; \
 		printf 'QPSX_BUILD_TAG=%s\n' '$(QPSX_BUILD_TAG)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX)'; \
