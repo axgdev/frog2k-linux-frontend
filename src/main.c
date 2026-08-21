@@ -127,6 +127,21 @@ static unsigned audio_native_rate(unsigned rate)
 #define PAUSE_WIDTH 320u
 #define PAUSE_HEIGHT 240u
 
+/*
+ * Tail-latency diagnostics are deliberately a separate frontend build. The
+ * normal core already pays one monotonic clock read per frame for pacing; a
+ * diagnostic build adds one start/end measurement and two tiny histogram
+ * updates per frame. Keeping this out of production avoids turning the
+ * measurement itself into an I-cache/D-cache experiment on the 16 KiB target.
+ */
+#ifndef SF2000_FRAME_TAIL_METRICS
+#define SF2000_FRAME_TAIL_METRICS 0
+#endif
+#if SF2000_FRAME_TAIL_METRICS
+#define FRAME_TAIL_BUCKETS 1024u
+#define FRAME_TAIL_BUCKET_US 1000u
+#endif
+
 struct host {
 	int fb_fd;
 	uint16_t *fb;
@@ -214,6 +229,65 @@ static int audio_last_output;
 static unsigned audio_sustaining;
 #if SF2000_AUDIO_WAVEFORM_METRICS
 static int audio_last_sample;
+#endif
+
+#if SF2000_FRAME_TAIL_METRICS
+/* A 1 ms bucket gives useful p99.9 resolution while keeping the two
+ * diagnostic histograms at 4 KiB total (uint16_t counts are sufficient for a
+ * 300-frame reporting interval). Frames longer than one second saturate in
+ * the final bucket instead of corrupting the percentile calculation. */
+static uint16_t frame_tail_hist[FRAME_TAIL_BUCKETS];
+static uint16_t core_tail_hist[FRAME_TAIL_BUCKETS];
+static uint64_t frame_tail_sum_us;
+static uint64_t core_tail_sum_us;
+static unsigned frame_tail_samples;
+static unsigned core_tail_samples;
+
+static void frame_tail_hist_reset(void)
+{
+	memset(frame_tail_hist, 0, sizeof(frame_tail_hist));
+	memset(core_tail_hist, 0, sizeof(core_tail_hist));
+	frame_tail_sum_us = 0;
+	core_tail_sum_us = 0;
+	frame_tail_samples = 0;
+	core_tail_samples = 0;
+}
+
+static void frame_tail_hist_add(uint16_t *hist, unsigned *samples,
+	uint64_t *sum_us, uint64_t elapsed_us)
+{
+	unsigned bucket = elapsed_us >=
+		(uint64_t)FRAME_TAIL_BUCKETS * FRAME_TAIL_BUCKET_US ?
+		FRAME_TAIL_BUCKETS - 1u :
+		(unsigned)(elapsed_us / FRAME_TAIL_BUCKET_US);
+
+	if (hist[bucket] != UINT16_MAX)
+		hist[bucket]++;
+	if (*samples != UINT_MAX)
+		(*samples)++;
+	if (*sum_us <= UINT64_MAX - elapsed_us)
+		*sum_us += elapsed_us;
+}
+
+static unsigned frame_tail_percentile(const uint16_t *hist,
+	unsigned samples, unsigned permille)
+{
+	uint64_t target;
+	unsigned i;
+	unsigned seen = 0;
+
+	if (!samples)
+		return 0;
+	target = ((uint64_t)samples * permille + 999u) / 1000u;
+	if (!target)
+		target = 1;
+	for (i = 0; i < FRAME_TAIL_BUCKETS; i++) {
+		seen += hist[i];
+		if (seen >= target)
+			return i * FRAME_TAIL_BUCKET_US + FRAME_TAIL_BUCKET_US - 1u;
+	}
+	return FRAME_TAIL_BUCKETS * FRAME_TAIL_BUCKET_US - 1u;
+}
 #endif
 
 static uint64_t timespec_delta_us(const struct timespec *now,
@@ -330,6 +404,9 @@ static void reset_metric_window(void)
 	interval_buffered_frames = 0;
 	previous_xruns = audio_metrics.xruns;
 	sf2000_input_reset_interval(&host.input);
+#if SF2000_FRAME_TAIL_METRICS
+	frame_tail_hist_reset();
+#endif
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
 	metrics_cpu_clock_valid =
 		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
@@ -1551,9 +1628,42 @@ static void video(const void *data, unsigned width, unsigned height,
 		/* Must fit the whole metric line including the trailing newline:
 		 * a truncated write swallows the '\n', gluing the next record
 		 * (e.g. a mode event) onto this line so sf2000-logd drops it. */
-		char details[1024];
+		char details[1280];
 		long cpu_khz = current_cpu_khz();
 		long temperature_mc = current_temperature_mc();
+#if SF2000_FRAME_TAIL_METRICS
+		unsigned frame_tail_p95 = 0;
+		unsigned frame_tail_p98 = 0;
+		unsigned frame_tail_p99 = 0;
+		unsigned frame_tail_p999 = 0;
+		unsigned core_tail_p95 = 0;
+		unsigned core_tail_p98 = 0;
+		unsigned core_tail_p99 = 0;
+		unsigned core_tail_p999 = 0;
+		unsigned frame_tail_avg = 0;
+		unsigned core_tail_avg = 0;
+
+		frame_tail_p95 = frame_tail_percentile(frame_tail_hist,
+			frame_tail_samples, 950u);
+		frame_tail_p98 = frame_tail_percentile(frame_tail_hist,
+			frame_tail_samples, 980u);
+		frame_tail_p99 = frame_tail_percentile(frame_tail_hist,
+			frame_tail_samples, 990u);
+		frame_tail_p999 = frame_tail_percentile(frame_tail_hist,
+			frame_tail_samples, 999u);
+		core_tail_p95 = frame_tail_percentile(core_tail_hist,
+			core_tail_samples, 950u);
+		core_tail_p98 = frame_tail_percentile(core_tail_hist,
+			core_tail_samples, 980u);
+		core_tail_p99 = frame_tail_percentile(core_tail_hist,
+			core_tail_samples, 990u);
+		core_tail_p999 = frame_tail_percentile(core_tail_hist,
+			core_tail_samples, 999u);
+		frame_tail_avg = frame_tail_samples ?
+			(unsigned)(frame_tail_sum_us / frame_tail_samples) : 0u;
+		core_tail_avg = core_tail_samples ?
+			(unsigned)(core_tail_sum_us / core_tail_samples) : 0u;
+#endif
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1620,6 +1730,24 @@ static void video(const void *data, unsigned width, unsigned height,
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
 		}
+#if SF2000_FRAME_TAIL_METRICS
+		{
+			char tail_details[384];
+
+			snprintf(tail_details, sizeof(tail_details),
+				"frame-tail samples=%u avg_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u core_samples=%u core_avg_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u\n",
+				frame_tail_samples, frame_tail_avg,
+				frame_tail_p95, frame_tail_p98, frame_tail_p99,
+				frame_tail_p999, core_tail_samples, core_tail_avg,
+				core_tail_p95, core_tail_p98, core_tail_p99,
+				core_tail_p999);
+			if (metrics_fd >= 0 &&
+				write(metrics_fd, tail_details,
+					strlen(tail_details)) < 0) {
+				/* best-effort tail metrics spool */
+			}
+		}
+#endif
 #ifdef __mips__
 		(void)hc15xx_retained_mark(
 			(volatile struct hc15xx_retained_log *)(uintptr_t)
@@ -1639,6 +1767,9 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_ge_stage_frames = 0;
 		interval_buffered_frames = 0;
 		sf2000_input_reset_interval(&host.input);
+#if SF2000_FRAME_TAIL_METRICS
+		frame_tail_hist_reset();
+#endif
 		metrics_cpu_clock_valid =
 			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
 	}
@@ -3479,6 +3610,9 @@ int main(int argc, char **argv)
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
 		struct timespec run_start;
+#if SF2000_FRAME_TAIL_METRICS
+		struct timespec core_end;
+#endif
 		struct timespec now;
 		int profile_sample;
 
@@ -3489,13 +3623,20 @@ int main(int argc, char **argv)
 		 */
 		profile_sample = (++profile_frame_counter %
 			(uncapped_mode ? 300u : 60u)) == 0;
+#if SF2000_FRAME_TAIL_METRICS
+		(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
+#else
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
+#endif
 		core_watchdog_stage = 3;
 		(void)alarm(CORE_RUN_TIMEOUT_SECONDS);
 		retro_run();
 		(void)alarm(0);
 		core_watchdog_stage = 0;
+#if SF2000_FRAME_TAIL_METRICS
+		(void)clock_gettime(CLOCK_MONOTONIC, &core_end);
+#endif
 		benchmark_frame_count++;
 		if (state_resume_probe_frames) {
 			char details[96];
@@ -3521,11 +3662,27 @@ int main(int argc, char **argv)
 			log_kmsg("benchmark frame limit reached\n");
 			stopping = 1;
 		}
+#if SF2000_FRAME_TAIL_METRICS
+		/* The normal pacer already needs this timestamp. In the tail-metrics
+		 * build it also closes the per-frame sample, including audio/save
+		 * maintenance after retro_run(). Keep this before the uncapped branch
+		 * so deterministic benchmark runs get the same distribution. */
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		frame_tail_hist_add(core_tail_hist, &core_tail_samples,
+			&core_tail_sum_us, timespec_delta_us(&core_end, &run_start));
+		frame_tail_hist_add(frame_tail_hist, &frame_tail_samples,
+			&frame_tail_sum_us, timespec_delta_us(&now, &run_start));
+		if (uncapped_mode) {
+			sf2000_pacer_invalidate(&pacer);
+			continue;
+		}
+	#else
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);
 			continue;
 		}
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+	#endif
 		if (profile_sample) {
 			uint64_t run_us =
 				(uint64_t)(now.tv_sec - run_start.tv_sec) * 1000000u;

@@ -229,9 +229,19 @@ COMMON_SOURCES := $(filter-out streams/trans_stream_zlib.c,$(COMMON_SOURCES))
 COMMON_OBJECTS := $(addprefix build/common/,$(COMMON_SOURCES:.c=.o)) build/utf8_compat.o
 LIBRETRO_COMMON := build/libretro-common-linux.a
 CFLAGS := -Os -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
+SF2000_FRAME_TAIL_METRICS ?= 0
 SF2000_CFLAGS := $(CFLAGS) -march=mips32 -mabi=32 -msoft-float \
 	-fPIC -mabicalls \
+	-DSF2000_FRAME_TAIL_METRICS=$(SF2000_FRAME_TAIL_METRICS) \
 	-I$(GE_DIR) -I$(AUDIO_DIR) -I$(SF2000_LINUX_DIR)/include
+SF2000_HOST_FLAGS_STAMP := build/host.compiler.flags
+
+$(SF2000_HOST_FLAGS_STAMP): FORCE Makefile
+	mkdir -p '$(@D)'
+	@set -eu; \
+	tmp='$@.tmp'; \
+	printf 'SF2000_FRAME_TAIL_METRICS=%s\n' '$(SF2000_FRAME_TAIL_METRICS)' > "$$tmp"; \
+	if cmp -s "$$tmp" '$@' 2>/dev/null; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
 FROG_TOOLCHAIN_GCC_VERSION ?= 16.2.0
 SF2000_SYSROOT ?= $(TOOLCHAIN_DIR)/$(FROG_TOOLCHAIN_TUPLE)/sysroot
 SF2000_CRT_DIR ?= $(SF2000_SYSROOT)/usr/lib
@@ -843,7 +853,8 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 .PHONY: all clean check elf-audit gpsp-pic-audit qpsx-mips32r1-audit \
 	qpsx-production-sweep \
 	qpsx-dev qpsx-dev-core qpsx-dev-clean qpsx-dev-mips32r1-audit qpsx-dev-fastest qpsx-dev-ge-raw-vram qpsx-dev-package \
-	qpsx-dev-ge-raw-vram-overlay-cache \
+	qpsx-dev-ge-raw-vram-overlay-cache qpsx-dev-ge-raw-vram-overlay-fastmem-hot \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
 	sf2000 demo frogui browser \
 	gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 \
 	stella2014 gearboy pce-fast mufrog-cores core-packages integrated \
@@ -1120,6 +1131,66 @@ qpsx-dev-ge-raw-vram-overlay-cache:
 		QPSX_GPU_PACKED_POLY_WRITES=1
 	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-cache-dev'
 
+# Combine the two previously measured CPU-side wins (folded NOMMU address
+# conversion and hot polygon-driver ordering) with the raw GE presenter. The
+# existing overlay-cache artifact intentionally remains unchanged so this is
+# an attributable A/B rather than a silent replacement.
+qpsx-dev-ge-raw-vram-overlay-fastmem-hot:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		SF2000_FRAME_TAIL_METRICS=0 \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-fastmem-hot' \
+		QPSX_GE_RAW_VRAM=1 \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_FAST_MEM_CONVERT=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_HOT_DRIVER_ORDER=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-fastmem-hot-dev'
+
+# Same performance configuration with the per-frame histogram enabled. It is
+# a diagnostic artifact: compare its p95/p99 values against the production
+# companion above, but do not use its FPS as a clean speed claim because the
+# extra monotonic clock calls are intentionally measurable on this CPU.
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot:
+	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
+		SF2000_FRAME_TAIL_METRICS=1 \
+		QPSX_DEV_PROFILER=0 \
+		QPSX_BUILD_TAG='$(QPSX_FASTEST_BUILD_TAG)-ge-raw-vram-overlay-tail-fastmem-hot' \
+		QPSX_GE_RAW_VRAM=1 \
+		QPSX_DISPATCH_CACHE_ENTRIES=64 \
+		QPSX_MIPS_PSMEM_REG=1 \
+		QPSX_MIPS_FAST_MEM_CONVERT=1 \
+		QPSX_MIPS_PERSISTENT_RETURN_RA=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP=1 \
+		QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=0 \
+		QPSX_MIPS_DISPATCH_BRANCH_LIKELY=1 \
+		QPSX_MIPS_DISPATCH_FRAME_BRANCH_LIKELY=0 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS=1 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=8 \
+		QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=1024 \
+		QPSX_RECMEM_ALIGNMENT=16 \
+		QPSX_LINUX_RAM_HELPER_FASTPATH=1 \
+		QPSX_MIPS_ASM_MEM_READS=1 \
+		QPSX_GPU_HOT_DRIVER_ORDER=1 \
+		QPSX_GPU_PACKED_TILE_WRITES=1 \
+		QPSX_GPU_PACKED_SPRITE_4BPP=1 \
+		QPSX_GPU_PACKED_POLY_WRITES=1
+	cp '$(QPSX_DEV_EXECUTABLE)' 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev'
+
 qpsx-dev-package: qpsx-dev-mips32r1-audit
 	mkdir -p build/core-packages/licenses
 	cp '$(QPSX_DEV_EXECUTABLE)' build/core-packages/sf2000-qpsx
@@ -1371,7 +1442,7 @@ core-packages: gambatte gpsp fceumm quicknes prosystem snes9x2005 snes9x2002 ste
 	cp $(MUFROG_SOURCE_ROOT)/libretro-fceumm-prosty/Copying build/core-packages/licenses/fceumm-prosty-Copying
 
 build/host-main.o: src/main.c include/libretro_min.h include/sf2000_input.h  $(TOOLCHAIN_STAMP) \
-		include/sf2000_browser_ui.h include/sf2000_log.h
+		include/sf2000_browser_ui.h include/sf2000_log.h $(SF2000_HOST_FLAGS_STAMP)
 	mkdir -p build
 	$(SF2000_CC) $(SF2000_CFLAGS) -c -o $@ $<
 
