@@ -468,6 +468,9 @@ QPSX_MIPS_DISPATCH_PREFETCH ?= 0
 # removes one stack load per block without consuming a guest register-cache
 # slot; leave disabled until a physical A/B confirms the ABI-safe path.
 QPSX_MIPS_DISPATCH_CACHE_GP ?= 0
+# Trust the o32 PIC ABI's callee-saved $gp contract after psxBranchTest and
+# recRecompile, removing two cold-path defensive reloads. Requires GP=1.
+QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI ?= 0
 # Use MIPS32r1 branch-likely forms in the hot dispatch-cache hit test to
 # annul otherwise-empty delay slots. Keep disabled until physical timing is
 # confirmed.
@@ -563,6 +566,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
 	-DQPSX_MIPS_DISPATCH_PREFETCH=$(QPSX_MIPS_DISPATCH_PREFETCH) \
 	-DQPSX_MIPS_DISPATCH_CACHE_GP=$(QPSX_MIPS_DISPATCH_CACHE_GP) \
+	-DQPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI) \
 	-DQPSX_MIPS_DISPATCH_BRANCH_LIKELY=$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY) \
 	-DQPSX_BUILD_TAG=\"$(QPSX_BUILD_TAG)\" \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
@@ -619,6 +623,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_PSMEM_REG=%s\n' '$(QPSX_MIPS_PSMEM_REG)'; \
 		printf 'QPSX_MIPS_PERSISTENT_RETURN_RA=%s\n' '$(QPSX_MIPS_PERSISTENT_RETURN_RA)'; \
 		printf 'QPSX_MIPS_DISPATCH_CACHE_GP=%s\n' '$(QPSX_MIPS_DISPATCH_CACHE_GP)'; \
+		printf 'QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI=%s\n' '$(QPSX_MIPS_DISPATCH_CACHE_GP_TRUST_ABI)'; \
 		printf 'QPSX_MIPS_DISPATCH_BRANCH_LIKELY=%s\n' '$(QPSX_MIPS_DISPATCH_BRANCH_LIKELY)'; \
 		printf 'QPSX_BUILD_TAG=%s\n' '$(QPSX_BUILD_TAG)'; \
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS)'; \
