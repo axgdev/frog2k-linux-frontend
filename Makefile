@@ -506,6 +506,9 @@ QPSX_GPU_LINEAR_4BPP ?= 0
 # fall back to the original loops for all other primitive/texture cases.
 QPSX_GPU_PACKED_TILE_WRITES ?= 0
 QPSX_GPU_PACKED_SPRITE_4BPP ?= 0
+# Exact opaque untextured polygon fill path: aligned 32-bit stores write two
+# identical RGB555 pixels at once. Other polygon modes retain the generic loop.
+QPSX_GPU_PACKED_POLY_WRITES ?= 0
 # Put the four measured polygon drivers first in the renderer text. This is
 # an I-cache locality experiment; the dispatch table and all fallbacks stay
 # unchanged.
@@ -559,6 +562,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_GPU_LINEAR_4BPP=$(QPSX_GPU_LINEAR_4BPP) \
 	-DQPSX_GPU_PACKED_TILE_WRITES=$(QPSX_GPU_PACKED_TILE_WRITES) \
 	-DQPSX_GPU_PACKED_SPRITE_4BPP=$(QPSX_GPU_PACKED_SPRITE_4BPP) \
+	-DQPSX_GPU_PACKED_POLY_WRITES=$(QPSX_GPU_PACKED_POLY_WRITES) \
 	-DQPSX_GPU_HOT_DRIVER_ORDER=$(QPSX_GPU_HOT_DRIVER_ORDER) \
 	-DQPSX_GPU_4BPP_FLATV=$(QPSX_GPU_4BPP_FLATV) \
 	-DQPSX_GPU_4BPP_FLATV_MIN_PIXELS=$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS) \
@@ -643,6 +647,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_GPU_LINEAR_4BPP=%s\n' '$(QPSX_GPU_LINEAR_4BPP)'; \
 		printf 'QPSX_GPU_PACKED_TILE_WRITES=%s\n' '$(QPSX_GPU_PACKED_TILE_WRITES)'; \
 		printf 'QPSX_GPU_PACKED_SPRITE_4BPP=%s\n' '$(QPSX_GPU_PACKED_SPRITE_4BPP)'; \
+		printf 'QPSX_GPU_PACKED_POLY_WRITES=%s\n' '$(QPSX_GPU_PACKED_POLY_WRITES)'; \
 		printf 'QPSX_GPU_4BPP_FLATV=%s\n' '$(QPSX_GPU_4BPP_FLATV)'; \
 		printf 'QPSX_GPU_4BPP_FLATV_MIN_PIXELS=%s\n' '$(QPSX_GPU_4BPP_FLATV_MIN_PIXELS)'; \
 		printf 'QPSX_GPU_4BPP_PALETTE_LUT=%s\n' '$(QPSX_GPU_4BPP_PALETTE_LUT)'; \
