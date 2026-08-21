@@ -412,12 +412,30 @@ MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
 # Fold it into QPSX_DEP_REV once that revision is available from the fork.
 MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-performance.patch \
-	patches/mufrog/qpsx-sf2000-cd-preload.patch
+	patches/mufrog/qpsx-sf2000-cd-preload.patch \
+	patches/mufrog/qpsx-sf2000-nommu-hot.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
 endif
 QPSX_OPTIMIZE ?= -O2
+# The Linux NOMMU dispatcher uses a small guest-PC->host-code cache because
+# recRAM cannot be mirrored.  Keep the default small for the 16 KiB D-cache;
+# this knob is exposed for device/QEMU A/B measurements.
+QPSX_DISPATCH_CACHE_ENTRIES ?= 64
+# The table-based GTE divider is accurate but occupies 64 KiB in the tiny
+# data-cache. Keep the native MIPS divider as the default; this is a measured
+# A/B switch only.
+QPSX_GTE_NATIVE_DIVIDE ?= 1
+# Reserve callee-saved $s7 for the allocated 2 MiB psxM base.  This removes
+# one pointer load from each dynamic RAM access at the cost of one guest
+# register-cache slot. Linux NOMMU keeps psxM stable for the lifetime of the
+# core, so enable the measured path by default.
+QPSX_MIPS_PSMEM_REG ?= 1
+# Compile only the measured RTPS/RTPT kernels at -O3.  The rest of the core
+# stays at the cache-tested -O2 setting; this measured attribute only affects
+# the two straight-line kernels that dominate GTE time.
+QPSX_GTE_HOT_O3 ?= 1
 # The emulated-cycle profiler costs ~1/3 of frame time even when disabled at
 # runtime, so the production core compiles it out (-DQPSX_PROFILER_ENABLED=0,
 # zero overhead). The dev core keeps it on for benchmark breakdowns.
@@ -431,6 +449,10 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DSF2000 -DGPU_UNAI -DSPU_PCSXREARMED -D__LIBRETRO__ -DHAVE_LIBRETRO \
 	-DPSXREC -Dmips -DUSE_GPULIB -DHLE_BIOS -DXA_HACK -DNO_THREADS -DNO_ZLIB \
 	-DQPSX_MIPS32R2_SAFE=1 \
+	-DQPSX_MIPS_DISPATCH_CACHE_ENTRIES=$(QPSX_DISPATCH_CACHE_ENTRIES) \
+	-DQPSX_GTE_HOT_O3=$(QPSX_GTE_HOT_O3) \
+	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
+	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_PROFILER_ENABLED=$(QPSX_PROFILER) \
 	-include$(abspath src/mufrog_qpsx_config.h) $(QPSX_OPTIMIZE) -mtune=24kc \
 	-fno-semantic-interposition
