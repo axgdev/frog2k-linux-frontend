@@ -453,6 +453,10 @@ QPSX_MIPS_PSMEM_REG ?= 1
 # the generated epilogue already reloads it after any C call.  This avoids one
 # stack load per hot block without giving up a guest register-cache slot.
 QPSX_MIPS_PERSISTENT_RETURN_RA ?= 1
+# Optional MIPS32r1 load-prefetch hint for the NOMMU dispatch cache.  It can
+# hide direct-mapped D-cache misses on the physical HC15xx, but is disabled by
+# default because a cache hit makes the hint unnecessary work.
+QPSX_MIPS_DISPATCH_PREFETCH ?= 0
 # Fold a bounded chain of short forward direct jumps into one translated
 # superblock. Eight links/1 KiB is the best QEMU hot-scene point; keep both
 # limits configurable for compatibility/per-game A/B testing.
@@ -537,6 +541,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_MIPS_FAST_MEM_CONVERT=$(QPSX_MIPS_FAST_MEM_CONVERT) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
+	-DQPSX_MIPS_DISPATCH_PREFETCH=$(QPSX_MIPS_DISPATCH_PREFETCH) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS=$(QPSX_MIPS_FOLD_DIRECT_JUMPS) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_MAX=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX) \
 	-DQPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES) \
