@@ -957,6 +957,9 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	unsigned source_index;
 	unsigned y;
 	int direct_raw;
+	int raw_batch_active = 0;
+	hcge_batch raw_batch;
+	uint32_t raw_batch_nodes[64];
 
 	if (!host.ge || !host.ge_buffers || width > GE_SOURCE_MAX_WIDTH ||
 			height > GE_SOURCE_MAX_HEIGHT ||
@@ -1243,19 +1246,36 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
 	state->src.phys = source_phys;
 	state->src.pitch = direct_raw ? pitch : width * sizeof(uint16_t);
+	/*
+	 * The panel has one physical scanout buffer.  Submit the raw BGR555
+	 * stretch and its optional FPS strips as one GE command batch, so the
+	 * kernel sees one queue doorbell instead of exposing the tiny overlay
+	 * blits as a separate update.  This also removes two ioctl round trips
+	 * from every raw frame while keeping all pixel work on the GE.
+	 */
+	if (direct_raw && raw_overlay_count &&
+		hcge_batch_begin(host.ge, &raw_batch, raw_batch_nodes,
+			(unsigned)(sizeof(raw_batch_nodes) / sizeof(raw_batch_nodes[0]))) == 0)
+		raw_batch_active = 1;
 	source = (HCGERectangle){ 0, 0, (int)width, (int)height };
 	if (width == out_w && height == out_h) {
 		state->accel = HCGE_DFXL_BLIT;
 		hcge_set_state(host.ge, state, state->accel);
-		if (!hcge_blit(host.ge, &source, (int)left, (int)top))
+		if (!hcge_blit(host.ge, &source, (int)left, (int)top)) {
+			if (raw_batch_active)
+				(void)hcge_batch_end(&raw_batch, 0);
 			return -1;
+		}
 	} else {
 		state->accel = HCGE_DFXL_STRETCHBLIT;
 		hcge_set_state(host.ge, state, state->accel);
 		destination = (HCGERectangle){ (int)left, (int)top,
 			(int)out_w, (int)out_h };
-		if (!hcge_stretch_blit(host.ge, &source, &destination))
+		if (!hcge_stretch_blit(host.ge, &source, &destination)) {
+			if (raw_batch_active)
+				(void)hcge_batch_end(&raw_batch, 0);
 			return -1;
+		}
 	}
 	if (direct_raw && raw_overlay_count) {
 		unsigned overlay_index;
@@ -1264,6 +1284,8 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 			overlay_index++)
 			ge_submit_overlay(&raw_overlays[overlay_index]);
 	}
+	if (raw_batch_active && hcge_batch_end(&raw_batch, 0) < 0)
+		return -1;
 	if (!first_frame)
 		log_kmsg("GE first present submitted\n");
 	host.ge_pending++;
