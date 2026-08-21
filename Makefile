@@ -1004,7 +1004,7 @@ qpsx-dev-mips32r1-audit: qpsx-dev
 # as a target makes the next A/B a one-line command and, importantly, keeps
 # profiler code out of the performance core while retaining the startup
 # fingerprint and shutdown telemetry.
-QPSX_FASTEST_BUILD_TAG ?= dispatch64-gp-blikely-packed-gpu-fastmem-asmreads-s7
+QPSX_FASTEST_BUILD_TAG ?= dispatch64-gp-blikely-packed-gpu-fastmem-asmreads-s7nomove
 qpsx-dev-fastest:
 	$(MAKE) --no-print-directory qpsx-dev-mips32r1-audit \
 		QPSX_DEV_PROFILER=0 \
