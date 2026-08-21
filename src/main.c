@@ -111,6 +111,11 @@ static unsigned audio_native_rate(unsigned rate)
 #define GE_SOURCE_MAX_WIDTH 512u
 #define GE_SOURCE_MAX_HEIGHT 320u
 #define GE_SOURCE_STRIDE (GE_SOURCE_MAX_WIDTH * sizeof(uint16_t))
+#define GE_FPS_LEFT_WIDTH 48u
+#define GE_FPS_LEFT_HEIGHT 11u
+#define GE_FPS_RIGHT_WIDTH 36u
+#define GE_FPS_RIGHT_HEIGHT 21u
+#define GE_FPS_OVERLAY_ALIGN 32u
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
@@ -134,6 +139,15 @@ struct host {
 	uint32_t ge_source_phys[GE_SOURCE_BUFFERS];
 	uint32_t ge_source_handle[GE_SOURCE_BUFFERS];
 	size_t ge_source_bytes;
+	/* The raw QPSX FPS strips live in the tail of the same contiguous GE
+	 * allocation as the staging surfaces. They are cleaned only when their
+	 * once-per-second contents change, not once per frame. */
+	uint16_t *ge_fps_overlay[2];
+	uint32_t ge_fps_overlay_phys[2];
+	uint32_t ge_fps_overlay_hash[2];
+	unsigned ge_fps_overlay_width[2];
+	unsigned ge_fps_overlay_height[2];
+	int ge_fps_overlay_valid[2];
 	unsigned ge_width, ge_height, ge_buffers, ge_next, ge_pending;
 	int pcm_fd;
 	unsigned audio_channels;
@@ -156,6 +170,7 @@ struct host {
  * full-frame CPU conversion is needed. */
 struct ge_overlay_request {
 	const void *data;
+	uint32_t source_phys;
 	unsigned width;
 	unsigned height;
 	size_t pitch;
@@ -166,6 +181,7 @@ struct ge_overlay_request {
 static struct ge_overlay_request raw_overlays[2];
 static unsigned raw_overlay_count;
 static unsigned ge_fps_overlay_logged;
+static unsigned ge_fps_overlay_source_logged;
 
 static struct host host = { .fb_fd = -1, .pcm_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
@@ -852,6 +868,71 @@ static uint32_t frame_hash(const void *data, unsigned height, size_t pitch)
 	return hash ^ (uint32_t)length;
 }
 
+/* The diagnostic strips are tiny, but cache-cleaning their original core
+ * mappings through an ioctl on every frame is not.  Hash only the visible
+ * pixels (not any caller padding), then refresh the persistent GE-managed
+ * copy when the once-per-second counter changes. */
+static uint32_t ge_overlay_data_hash(const void *data, unsigned width,
+	unsigned height, size_t pitch)
+{
+	const uint8_t *row = data;
+	uint32_t hash = 2166136261u;
+	unsigned y;
+	unsigned x;
+	unsigned bytes = width * sizeof(uint16_t);
+
+	for (y = 0; y < height; y++) {
+		for (x = 0; x < bytes; x++) {
+			hash ^= row[x];
+			hash *= 16777619u;
+		}
+		row += pitch;
+	}
+	return hash ^ (width * 65537u + height);
+}
+
+static int ge_prepare_fps_overlay(unsigned slot, const void *data,
+	unsigned width, unsigned height, size_t pitch,
+	struct ge_overlay_request *request)
+{
+	uint32_t hash;
+	unsigned y;
+	unsigned row_bytes;
+
+	if (slot >= 2u || !data || !width || !height ||
+		pitch < (size_t)width * sizeof(uint16_t) ||
+		!host.ge_fps_overlay[slot] ||
+		width > (slot == 0u ? GE_FPS_LEFT_WIDTH : GE_FPS_RIGHT_WIDTH) ||
+		height > (slot == 0u ? GE_FPS_LEFT_HEIGHT : GE_FPS_RIGHT_HEIGHT))
+		return 0;
+	row_bytes = width * sizeof(uint16_t);
+	hash = ge_overlay_data_hash(data, width, height, pitch);
+	if (!host.ge_fps_overlay_valid[slot] ||
+		host.ge_fps_overlay_hash[slot] != hash ||
+		host.ge_fps_overlay_width[slot] != width ||
+		host.ge_fps_overlay_height[slot] != height) {
+		uint8_t *destination = (uint8_t *)host.ge_fps_overlay[slot];
+		const uint8_t *source = data;
+
+		for (y = 0; y < height; y++) {
+			memcpy(destination, source, row_bytes);
+			destination += row_bytes;
+			source += pitch;
+		}
+		if (hcge_linux_cache_clean(host.ge,
+			(void *)host.ge_fps_overlay[slot], row_bytes * height) < 0)
+			return -1;
+		host.ge_fps_overlay_hash[slot] = hash;
+		host.ge_fps_overlay_width[slot] = width;
+		host.ge_fps_overlay_height[slot] = height;
+		host.ge_fps_overlay_valid[slot] = 1;
+	}
+	*request = (struct ge_overlay_request){
+		host.ge_fps_overlay[slot], host.ge_fps_overlay_phys[slot], width,
+		height, row_bytes, 0u, 0u };
+	return 1;
+}
+
 static void cpu_present(const void *data, unsigned width, unsigned height,
 	size_t pitch, unsigned out_w, unsigned out_h, unsigned left, unsigned top)
 {
@@ -912,10 +993,16 @@ static void ge_submit_overlay(const struct ge_overlay_request *overlay)
 	if (source_bytes / overlay->height != overlay->pitch ||
 		source_bytes > UINT_MAX)
 		return;
-	source_phys = hcge_linux_cached_phys(overlay->data);
-	if (!source_phys || hcge_linux_cache_clean(host.ge,
-			(void *)overlay->data, (unsigned)source_bytes) < 0)
-		return;
+	source_phys = overlay->source_phys;
+	if (!source_phys) {
+		source_phys = hcge_linux_cached_phys(overlay->data);
+		if (!source_phys || hcge_linux_cache_clean(host.ge,
+				(void *)overlay->data, (unsigned)source_bytes) < 0)
+			return;
+	} else if (!ge_fps_overlay_source_logged) {
+		log_kmsg("GE FPS overlay source=managed-cache");
+		ge_fps_overlay_source_logged = 1;
+	}
 	state = &host.ge->state;
 	memset(state, 0, sizeof(*state));
 	state->render_options = HCGE_DSRO_NONE;
@@ -1582,15 +1669,27 @@ void sf2000_video_vram_fps(const void *data, unsigned width, unsigned height,
 
 	raw_overlay_count = 0;
 	if (left && left_width && left_height) {
-		raw_overlays[raw_overlay_count++] =
-		(struct ge_overlay_request){ left, left_width, left_height,
-		left_pitch, 2u, 2u };
+		struct ge_overlay_request request;
+
+		if (ge_prepare_fps_overlay(0u, left, left_width, left_height,
+			left_pitch, &request) <= 0)
+			request = (struct ge_overlay_request){ left, 0u, left_width,
+				left_height, left_pitch, 2u, 2u };
+		request.x = 2u;
+		request.y = 2u;
+		raw_overlays[raw_overlay_count++] = request;
 	}
 	if (right && right_width && right_height) {
-		raw_overlays[raw_overlay_count++] =
-		(struct ge_overlay_request){ right, right_width, right_height,
-		right_pitch, host.fb_width > right_width + 2u ?
-		host.fb_width - right_width - 2u : 0u, 2u };
+		struct ge_overlay_request request;
+
+		if (ge_prepare_fps_overlay(1u, right, right_width, right_height,
+			right_pitch, &request) <= 0)
+			request = (struct ge_overlay_request){ right, 0u, right_width,
+				right_height, right_pitch, 0u, 2u };
+		request.x = host.fb_width > right_width + 2u ?
+			host.fb_width - right_width - 2u : 0u;
+		request.y = 2u;
+		raw_overlays[raw_overlay_count++] = request;
 	}
 	host.format = RETRO_PIXEL_FORMAT_0RGB1555;
 	video(data, width, height, pitch);
@@ -3121,11 +3220,24 @@ static int open_platform(void)
 		uint32_t allocation_phys;
 		uint32_t allocation_handle;
 		size_t allocation_bytes;
+		size_t overlay_offset;
+		size_t overlay_left_bytes;
+		size_t overlay_right_bytes;
 
 		host.ge = &host.ge_storage;
 		host.ge_source_bytes = (size_t)GE_SOURCE_MAX_WIDTH *
 			GE_SOURCE_MAX_HEIGHT * sizeof(uint16_t);
-		allocation_bytes = host.ge_source_bytes * GE_SOURCE_BUFFERS;
+		overlay_left_bytes = GE_FPS_LEFT_WIDTH * GE_FPS_LEFT_HEIGHT *
+			sizeof(uint16_t);
+		overlay_right_bytes = GE_FPS_RIGHT_WIDTH * GE_FPS_RIGHT_HEIGHT *
+			sizeof(uint16_t);
+		overlay_offset = host.ge_source_bytes * GE_SOURCE_BUFFERS;
+		/* Keep the tail on a separate cache-line boundary so cache-cleaning a
+		 * strip never flushes the neighbouring staging surface. */
+		overlay_offset = (overlay_offset + GE_FPS_OVERLAY_ALIGN - 1u) &
+			~(size_t)(GE_FPS_OVERLAY_ALIGN - 1u);
+		allocation_bytes = overlay_offset + overlay_left_bytes +
+			overlay_right_bytes;
 		allocation = hcge_linux_alloc_buffer(host.ge,
 			(unsigned int)allocation_bytes, &allocation_phys,
 			&allocation_handle);
@@ -3139,6 +3251,14 @@ static int open_platform(void)
 				host.ge_source_phys[i] = allocation_phys +
 					i * (uint32_t)host.ge_source_bytes;
 			}
+			host.ge_fps_overlay[0] = (uint16_t *)((uint8_t *)allocation +
+				overlay_offset);
+			host.ge_fps_overlay[1] = (uint16_t *)((uint8_t *)
+				host.ge_fps_overlay[0] + overlay_left_bytes);
+			host.ge_fps_overlay_phys[0] = allocation_phys +
+				(uint32_t)overlay_offset;
+			host.ge_fps_overlay_phys[1] = host.ge_fps_overlay_phys[0] +
+				(uint32_t)overlay_left_bytes;
 			host.ge_source_handle[0] = allocation_handle;
 			host.ge_buffers = GE_SOURCE_BUFFERS;
 		} else {
