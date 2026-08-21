@@ -957,6 +957,7 @@ JS2300_SCRIPT := build/core-packages/js2300-cores/chip8.js
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v2-fast \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v3-fast \
 	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v4-fast \
+	qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v5-fast \
 	qpsx-dev-ge-raw-vram-overlay-layout-sweep \
 	qpsx-dev-ge-raw-vram-overlay-recip8-hot qpsx-dev-ge-raw-vram-overlay-recip10-hot \
 	qpsx-dev-ge-raw-vram-overlay-tail-recip10-hot \
@@ -1517,6 +1518,14 @@ qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v4-fast:
 		QPSX_FASTMEM_BUILD_SUFFIX=-dma-chain-v4-fast
 	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
 		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v4-fast-dev'
+
+qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v5-fast:
+	$(MAKE) --no-print-directory qpsx-dev-ge-raw-vram-overlay-tail-fastmem-hot \
+		QPSX_GPU_POLY_2043_FAST=0 QPSX_GPU_DMA_CHAIN_FAST=1 \
+		QPSX_HOT_LAYOUT=0 QPSX_FASTMEM_HOT_ORDER=1 \
+		QPSX_FASTMEM_BUILD_SUFFIX=-dma-chain-v5-fast
+	cp 'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dev' \
+		'build/sf2000-qpsx-ge-raw-vram-overlay-tail-fastmem-hot-dma-chain-v5-fast-dev'
 
 # A single serialized entry point avoids the shared qpsx-dev object/archive
 # race that occurs when make -j is given independent A/B wrapper targets.
