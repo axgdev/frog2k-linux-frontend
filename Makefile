@@ -416,7 +416,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-nommu-hot.patch \
 	patches/mufrog/qpsx-sf2000-superblock.patch \
 	patches/mufrog/qpsx-sf2000-telemetry.patch \
-	patches/mufrog/qpsx-sf2000-runtime-report.patch
+	patches/mufrog/qpsx-sf2000-runtime-report.patch \
+	patches/mufrog/qpsx-sf2000-fixed-fast-path.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
@@ -449,6 +450,10 @@ QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES ?= 1024
 # stays at the cache-tested -O2 setting; this measured attribute only affects
 # the two straight-line kernels that dominate GTE time.
 QPSX_GTE_HOT_O3 ?= 1
+# Linux production leaves fast lighting/blending enabled.  Make that stable
+# choice compile-time so the pixel loops do not reload mutable option bits on
+# every pixel; set to 0 for the compatibility/runtime-toggle build.
+QPSX_GPU_FIXED_FAST_PATH ?= 1
 # Emit one startup build-fingerprint line and shutdown-only block compilation
 # counters.  No per-instruction hooks are enabled; this is deliberately much
 # cheaper than the emulated-cycle profiler and makes physical A/B logs
@@ -469,6 +474,7 @@ MUFROG_qpsx_EXTRA_CFLAGS = -Isrc/ -Isrc/spu/spu_pcsxrearmed \
 	-DQPSX_MIPS32R2_SAFE=1 \
 	-DQPSX_MIPS_DISPATCH_CACHE_ENTRIES=$(QPSX_DISPATCH_CACHE_ENTRIES) \
 	-DQPSX_GTE_HOT_O3=$(QPSX_GTE_HOT_O3) \
+	-DQPSX_GPU_FIXED_FAST_PATH=$(QPSX_GPU_FIXED_FAST_PATH) \
 	-DQPSX_GTE_NATIVE_DIVIDE=$(QPSX_GTE_NATIVE_DIVIDE) \
 	-DQPSX_MIPS_PSMEM_REG=$(QPSX_MIPS_PSMEM_REG) \
 	-DQPSX_MIPS_PERSISTENT_RETURN_RA=$(QPSX_MIPS_PERSISTENT_RETURN_RA) \
@@ -529,6 +535,7 @@ $(QPSX_PROD_FLAGS_STAMP): FORCE Makefile $(TOOLCHAIN_STAMP)
 		printf 'QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES=%s\n' '$(QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES)'; \
 		printf 'QPSX_RUNTIME_TELEMETRY=%s\n' '$(QPSX_RUNTIME_TELEMETRY)'; \
 		printf 'QPSX_GTE_HOT_O3=%s\n' '$(QPSX_GTE_HOT_O3)'; \
+		printf 'QPSX_GPU_FIXED_FAST_PATH=%s\n' '$(QPSX_GPU_FIXED_FAST_PATH)'; \
 		printf 'QPSX_PROFILER=%s\n' '$(QPSX_PROFILER)'; \
 		printf 'CFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CFLAGS)'; \
 		printf 'CXXFLAGS=%s\n' '$(MUFROG_qpsx_EXTRA_CXXFLAGS)'; \
