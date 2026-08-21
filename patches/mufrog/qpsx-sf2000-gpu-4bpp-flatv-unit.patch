@@ -1,0 +1,26 @@
+diff --git a/src/gpu/gpu_unai/gpu_inner.h b/src/gpu/gpu_unai/gpu_inner.h
+--- a/src/gpu/gpu_unai/gpu_inner.h
++++ b/src/gpu/gpu_unai/gpu_inner.h
+@@ -101,7 +101,12 @@ qpsx_gpu_poly_span_4bpp_flatv(const gpu_unai_t &gpu_unai, u16 *pDst, u32 count)
+ 
+ 	const u32 l_u = gpu_unai.u & full_mask;
+ 	const s32 u_inc = gpu_unai.u_inc;
+-	if (count > 1) {
++	const bool unit_u = (u_inc == (1 << FIXED_BITS));
++	if (unit_u) {
++		const u32 tu = l_u >> FIXED_BITS;
++		if (tu >= 256u || count > 256u - tu)
++			return false;
++	} else if (count > 1) {
+		const u32 steps = count - 1;
+		if (u_inc > 0) {
+			const unsigned long long distance =
+@@ -121,7 +126,7 @@ qpsx_gpu_poly_span_4bpp_flatv(const gpu_unai_t &gpu_unai, u16 *pDst, u32 count)
+ 				(((gpu_unai.v & full_mask) >> FIXED_BITS) << 11);
+ 	const u16 *cba = gpu_unai.CBA;
+ 	u32 tex_u = l_u;
+-	if (u_inc == (1 << FIXED_BITS)) {
++	if (unit_u) {
+ 		u32 tu = l_u >> FIXED_BITS;
+ 		u8 *packed_row = (u8 *)row + (tu >> 1);
+ 		if (tu & 1u) {

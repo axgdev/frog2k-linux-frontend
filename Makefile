@@ -427,7 +427,8 @@ MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
 	patches/mufrog/qpsx-sf2000-fast-mem-fingerprint.patch \
 	patches/mufrog/qpsx-sf2000-fast-mem-convert.patch \
 	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-long.patch
+	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-long.patch \
+	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-unit.patch
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
