@@ -13,7 +13,9 @@ QPSX_PROFILE_NAMES := \
 	frontier-tail-control \
 	frontier-tail-candidate
 
-QPSX_PROFILE_PATCH_ID := $(shell sha256sum $(MUFROG_qpsx_PATCHES) | sha256sum | cut -c1-16)
+# Hash of the local qpsx patch queue, or a fixed token when the core builds
+# clean from the public repository with no patch stack.
+QPSX_PROFILE_PATCH_ID := $(if $(strip $(MUFROG_qpsx_PATCHES)),$(shell sha256sum $(MUFROG_qpsx_PATCHES) | sha256sum | cut -c1-16),no-local-patches)
 
 # This is the exact current fastmem frontier recipe.  Every QPSX knob that
 # reaches the core is named here, including diagnostic and code-layout knobs;

@@ -328,8 +328,8 @@ $(foreach spec,$(MUFROG_CORE_SPECS),$(eval $(call MUFROG_CORE_REGISTER,$(word 1,
 # Keep the source pins local so this frontend has no dependency on another
 # project checkout.
 # Format: id|checkout-directory|upstream-url|pinned-commit
-QPSX_DEP_REF ?= public_main
-QPSX_DEP_REV ?= f1f4d6add9dcfb36eaed7aae198ddbc44b12b9c1
+QPSX_DEP_REF ?= main
+QPSX_DEP_REV ?= 051c7e29eaba194a78633288d8da444e50acb3d3
 MUFROG_CORE_CLONES := \
 	gpsp-multicore|gpsp_multicore|https://github.com/tzubertowski/gpsp_multicore.git|63dd94953c27bb2664872331bbc7f212a088db4b \
 	picodrive|picodrive|https://github.com/libretro/picodrive.git|f0d4a0118a9733a1f10bce5a4ac772c474f9300d \
@@ -418,31 +418,12 @@ MUFROG_picodrive_EXTRA_CFLAGS += -O3
 # the shared libretro-common libchdr module on the include path.
 MUFROG_picodrive_PATCHES := patches/mufrog/picodrive-no-chd.patch
 MUFROG_picodrive_EXTRA_ARGS := NO_CD_MEDIA=1
-# The public qpsx commit pinned in QPSX_DEP_REV predates the complete SF2000
-# port.  Carry the reviewed delta through qpsx commit 42d3171 as one patch so
-# production builds cannot silently fall back to the old cache-heavy core.
-# Fold it into QPSX_DEP_REV once that revision is available from the fork.
-MUFROG_qpsx_PATCHES := patches/mufrog/qpsx-sf2000-extins-noprofiler.patch \
-	patches/mufrog/qpsx-sf2000-performance.patch \
-	patches/mufrog/qpsx-sf2000-cd-preload.patch \
-	patches/mufrog/qpsx-sf2000-nommu-hot.patch \
-	patches/mufrog/qpsx-sf2000-superblock.patch \
-	patches/mufrog/qpsx-sf2000-telemetry.patch \
-	patches/mufrog/qpsx-sf2000-runtime-report.patch \
-	patches/mufrog/qpsx-sf2000-fixed-fast-path.patch \
-	patches/mufrog/qpsx-sf2000-gpu-metrics.patch \
-	patches/mufrog/qpsx-sf2000-gpu-lighting-knob.patch \
-	patches/mufrog/qpsx-sf2000-gpu-span-metrics.patch \
-	patches/mufrog/qpsx-sf2000-gpu-linear4bpp.patch \
-	patches/mufrog/qpsx-sf2000-gpu-packed-spans.patch \
-	patches/mufrog/qpsx-sf2000-mirror-safety.patch \
-	patches/mufrog/qpsx-sf2000-fast-mem-fingerprint.patch \
-	patches/mufrog/qpsx-sf2000-fast-mem-convert.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-long.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-flatv-unit.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-palette-lut.patch \
-	patches/mufrog/qpsx-sf2000-gpu-4bpp-palette-flatv.patch
+# The public qpsx commit pinned in QPSX_DEP_REV is the consolidated main
+# branch: the SF2000 Linux port (QPSX_PLATFORM=linux), the UniFrog runtime
+# hooks, and all SF2000 GPU/recompiler optimizations are baked in upstream,
+# so the qpsx core builds clean from the public repository with no local
+# patch queue.
+MUFROG_qpsx_PATCHES :=
 QPSX_PLATFORM ?= linux
 ifneq ($(QPSX_PLATFORM),linux)
 $(error sf2000_linux_frontend requires QPSX_PLATFORM=linux)
