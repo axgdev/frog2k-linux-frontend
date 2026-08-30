@@ -1,0 +1,489 @@
+diff --git a/.gitignore b/.gitignore
+index c049a00..b7f215c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -17,3 +17,4 @@ Thumbs.db
+ 
+ # Logs
+ *.log
++.qpsx-build-config
+diff --git a/Makefile.libretro b/Makefile.libretro
+index 83f7c49..0ba0f85 100644
+--- a/Makefile.libretro
++++ b/Makefile.libretro
+@@ -83,7 +83,7 @@ MORE_CFLAGS = -Os -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
+ 	-D$(shell echo $(GPU) | tr a-z A-Z) \
+ 	-D$(shell echo $(SPU) | tr a-z A-Z)
+ else
+-MORE_CFLAGS = -g -O2 -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
++MORE_CFLAGS = -O2 -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
+ 	-Isrc/plugin_lib \
+ 	-Isrc/port/$(PORT) \
+ 	-Ilibretro/core -Ilibretro/include \
+@@ -180,16 +180,20 @@ OBJS += \
+ 	src/gpu/gpulib/gpu.o \
+ 	src/gpu/gpulib/vout_port.o
+ 
+-# QPSX v091: MIPS32 Assembly optimizations (SF2000 only)
++# QPSX v091: MIPS32 Assembly optimizations (SF2000 bare-metal only)
+ # QPSX v099: Added psxmem_asm.o for memory write optimization
+ ifeq ($(platform), sf2000)
+ OBJS += \
+ 	src/gte_asm.o \
+ 	src/psxmem_asm.o
++endif
++# HC15xx-safe MIPS32r2 GPU inner loops (EXT/INS/MOVZ/PREF only, see
++# gpu_inner_mips32.h): built for every MIPS frontend that licenses the safe
++# subset.  These ops are confirmed working on the physical HC15xx while the
++# buggy r2 encodings (ROTR/SEB/SEH/WSBH/SYNCI/JR.HB) are never emitted.
+ ifeq ($(QPSX_ENABLE_MIPS32R2), 1)
+ OBJS += src/gpu/$(GPU)/gpu_inner_mips32.o
+ endif
+-endif
+ 
+ # SPU - pcsxrearmed with libretro audio backend
+ OBJS += \
+diff --git a/libretro/core/libretro-core.cpp b/libretro/core/libretro-core.cpp
+index dc82544..07e5489 100644
+--- a/libretro/core/libretro-core.cpp
++++ b/libretro/core/libretro-core.cpp
+@@ -38,6 +38,7 @@
+ 
+ #include "libretro.h"
+ #include "port.h"
++
+ #include "profiler.h"
+ #include "cdriso.h"  /* v258: CDDA conversion functions */
+ #include "plugin_lib/plugin_lib.h"  /* QPSX_280: For pl_init() */
+@@ -3622,6 +3623,9 @@ void retro_init(void)
+     /* v377b: Reset average FPS tracking */
+     fps_history_idx = 0;
+     fps_history_count = 0;
++
++    profiler_init();
++    profiler_set_enabled(1);
+     fps_avg_x100 = 0;
+     for (int i = 0; i < FPS_AVG_SAMPLES; i++) fps_history[i] = 0;
+ 
+@@ -3854,13 +3858,17 @@ void retro_run(void)
+ 
+     if (g_target_speed >= 100) {
+         /* Normal speed - no throttling, just execute */
++        profiler_frame_start();
+         psxCpu->Execute();
++        profiler_frame_end();
+     } else {
+         frame_throttle_acc += g_target_speed;
+         if (frame_throttle_acc >= 100) {
+             frame_throttle_acc -= 100;
+             /* Emulate this frame */
++            profiler_frame_start();
+             psxCpu->Execute();
++            profiler_frame_end();
+         } else {
+             /* Skip emulation - frame dupe (output previous frame buffer) */
+             if (SCREEN && real_video_cb) {
+@@ -3868,6 +3876,30 @@ void retro_run(void)
+             }
+         }
+     }
++
++    /* v<prof>: dump the emulated-cycle breakdown every 60 frames */
++    if ((run_frame_count % 60) == 0) {
++        const ProfilerData *pd = profiler_get_data();
++        if (pd && pd->enabled && pd->frame_count > 0) {
++            XLOG("PROF f=%d total=%.2fms cpu=%.1f%% gte=%.1f%% gpu=%.1f%% (poly=%.1f%% spr=%.1f%% vram=%.1f%%) spu=%.1f%% cd=%.1f%% video=%.1f%%",
++                run_frame_count,
++                pd->avg_ms[PROF_FRAME_TOTAL],
++                pd->pct[PROF_CPU_TOTAL], pd->pct[PROF_GTE_TOTAL],
++                pd->pct[PROF_GPU_TOTAL],
++                pd->pct[PROF_GPU_POLY], pd->pct[PROF_GPU_SPRITE], pd->pct[PROF_GPU_VRAM],
++                pd->pct[PROF_SPU_TOTAL],
++                pd->pct[PROF_CDROM_TOTAL], pd->pct[PROF_VIDEO_OUTPUT]);
++            XLOG("PROF rtp=%u rtps=%u mvmva=%u nclip=%u",
++                pd->cycles[PROF_GTE_RTPT] / pd->frame_count,
++                pd->cycles[PROF_GTE_RTPS] / pd->frame_count,
++                pd->cycles[PROF_GTE_MVMVA] / pd->frame_count,
++                pd->cycles[PROF_GTE_NCLIP] / pd->frame_count);
++            XLOG("PROF cpu comp=%.1f%% memr=%.1f%% memw=%.1f%% exc=%.1f%% bios=%.1f%% icache=%.1f%%",
++                pd->pct[PROF_CPU_COMPILE], pd->pct[PROF_CPU_MEM_READ],
++                pd->pct[PROF_CPU_MEM_WRITE], pd->pct[PROF_CPU_EXCEPTION],
++                pd->pct[PROF_CPU_BIOS], pd->pct[PROF_CPU_ICACHE]);
++        }
++    }
+ }
+ 
+ bool retro_load_game(const struct retro_game_info *info)
+diff --git a/src/gpu/gpu_unai/gpu_raster_polygon.h b/src/gpu/gpu_unai/gpu_raster_polygon.h
+index 1a6e71c..726d857 100644
+--- a/src/gpu/gpu_unai/gpu_raster_polygon.h
++++ b/src/gpu/gpu_unai/gpu_raster_polygon.h
+@@ -18,6 +18,8 @@
+ *   51 Franklin Street, Fifth Floor, Boston, MA 02111-1307 USA.           *
+ ***************************************************************************/
+ 
++#include "profiler.h"
++
+ //senquack - NOTE: GPU Unai poly routines have been rewritten/adapted
+ // from DrHell routines to fix multiple issues. See README_senquack.txt
+ 
+@@ -214,6 +216,7 @@ gpuDrawPolyF - Flat-shaded, untextured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyF(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	// Set up bgr555 color to be used across calls in inner driver
+ 	gpu_unai.PixelData = GPU_RGB16(packet.U4[0]);
+ 
+@@ -358,6 +361,7 @@ void gpuDrawPolyF(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -365,6 +369,7 @@ gpuDrawPolyFT - Flat-shaded, textured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyFT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	// r8/g8/b8 used if texture-blending & dithering is applied (24-bit light)
+ 	gpu_unai.r8 = packet.U1[0];
+ 	gpu_unai.g8 = packet.U1[1];
+@@ -691,6 +696,7 @@ void gpuDrawPolyFT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_qua
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -698,6 +704,7 @@ gpuDrawPolyG - Gouraud-shaded, untextured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyG(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	PolyVertex vbuf[4];
+ 	polyInitVertexBuffer(vbuf, packet, POLYTYPE_G, is_quad);
+ 
+@@ -1039,6 +1046,7 @@ void gpuDrawPolyG(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -1046,6 +1054,7 @@ gpuDrawPolyGT - Gouraud-shaded, textured poly
+ ----------------------------------------------------------------------*/
+ void gpuDrawPolyGT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_quad)
+ {
++	PROFILE_START(PROF_GPU_POLY);
+ 	PolyVertex vbuf[4];
+ 	polyInitVertexBuffer(vbuf, packet, POLYTYPE_GT, is_quad);
+ 
+@@ -1445,4 +1454,5 @@ void gpuDrawPolyGT(const PtrUnion packet, const PP gpuPolySpanDriver, u32 is_qua
+ 			}
+ 		}
+ 	} while (++cur_pass < total_passes);
++	PROFILE_END(PROF_GPU_POLY);
+ }
+diff --git a/src/gte.cpp b/src/gte.cpp
+index 75295aa..497d215 100644
+--- a/src/gte.cpp
++++ b/src/gte.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "gte.h"
+ #include "psxmem.h"
++#include "profiler.h"
+ 
+ // MIPS platforms have hardware divider, faster than 64KB LUT + UNR algo
+ #if defined(__mips__)
+@@ -402,6 +403,7 @@ void gteRTPS(void) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE RTPS\n");
+ #endif
++	PROFILE_START(PROF_GTE_RTPS);
+ 	gteFLAG = 0;
+ 
+ 	gteMAC1 = A1((((s64)gteTRX << 12) + (gteR11 * gteVX0) + (gteR12 * gteVY0) + (gteR13 * gteVZ0)) >> 12);
+@@ -427,6 +429,7 @@ void gteRTPS(void) {
+ 	s64 tmp = (s64)gteDQB + ((s64)gteDQA * quotient);
+ 	gteMAC0 = F(tmp);
+ 	gteIR0 = limH(tmp >> 12);
++	PROFILE_END(PROF_GTE_RTPS);
+ }
+ 
+ void gteRTPT(void) {
+@@ -437,6 +440,7 @@ void gteRTPT(void) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE RTPT\n");
+ #endif
++	PROFILE_START(PROF_GTE_RTPT);
+ 	gteFLAG = 0;
+ 
+ 	gteSZ0 = gteSZ3;
+@@ -460,6 +464,7 @@ void gteRTPT(void) {
+ 	s64 tmp = (s64)gteDQB + ((s64)gteDQA * quotient);
+ 	gteMAC0 = F(tmp);
+ 	gteIR0 = limH(tmp >> 12);
++	PROFILE_END(PROF_GTE_RTPT);
+ }
+ 
+ // NOTE: 'gteop' parameter is instruction opcode shifted right 10 places.
+@@ -476,6 +481,7 @@ void gteMVMVA(u32 gteop) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE MVMVA\n");
+ #endif
++	PROFILE_START(PROF_GTE_MVMVA);
+ 	gteFLAG = 0;
+ 
+ 	gteMAC1 = A1((((s64)CV1(cv) << 12) + (MX11(mx) * vx) + (MX12(mx) * vy) + (MX13(mx) * vz)) >> shift);
+@@ -485,17 +491,20 @@ void gteMVMVA(u32 gteop) {
+ 	gteIR1 = limB1(gteMAC1, lm);
+ 	gteIR2 = limB2(gteMAC2, lm);
+ 	gteIR3 = limB3(gteMAC3, lm);
++	PROFILE_END(PROF_GTE_MVMVA);
+ }
+ 
+ void gteNCLIP(void) {
+ #ifdef GTE_LOG
+ 	GTE_LOG("GTE NCLIP\n");
+ #endif
++	PROFILE_START(PROF_GTE_NCLIP);
+ 	gteFLAG = 0;
+ 
+ 	gteMAC0 = F((s64)gteSX0 * (gteSY1 - gteSY2) +
+ 				gteSX1 * (gteSY2 - gteSY0) +
+ 				gteSX2 * (gteSY0 - gteSY1));
++	PROFILE_END(PROF_GTE_NCLIP);
+ }
+ 
+ void gteAVSZ3(void) {
+diff --git a/src/profiler.h b/src/profiler.h
+index 1d4cfc5..e84826c 100644
+--- a/src/profiler.h
++++ b/src/profiler.h
+@@ -27,9 +27,12 @@
+ /*
+  * v368: PROFILER MASTER SWITCH
+  * Set to 1 to enable profiling (adds overhead to every mem access)
+- * Set to 0 for production builds (zero overhead)
++ * Set to 0 for production builds (zero overhead). The frontend build
++ * overrides this with -DQPSX_PROFILER_ENABLED=0 for the production core.
+  */
+-#define QPSX_PROFILER_ENABLED 0
++#ifndef QPSX_PROFILER_ENABLED
++#define QPSX_PROFILER_ENABLED 1
++#endif
+ 
+ #include <stdint.h>
+ 
+diff --git a/src/recompiler/mips/host_asm.S b/src/recompiler/mips/host_asm.S
+index e0e2166..2354ca6 100644
+--- a/src/recompiler/mips/host_asm.S
++++ b/src/recompiler/mips/host_asm.S
+@@ -22,8 +22,16 @@
+  * along with it.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
+-// Mips32r2 introduced useful instructions:
+-#if (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
++// Mips32r2 introduced useful instructions.
++//
++// HC15xx (SF2000/GB300) is MIPS32r1 with only a subset of r2 working
++// (EXT/INS/CLZ/CLO/MOVN/MOVZ/madd; NOT rotr/seb/seh/wsbh/synci/jr.hb).
++// The host build uses -march=mips32, so __mips_isa_rev is 1 below and no
++// CACHE_OPS (synci) code is emitted.  QPSX_MIPS32R2_SAFE licenses the
++// proven-good EXT/INS encodings only; CACHE_OPS must stay off.
++#if defined(QPSX_MIPS32R2_SAFE)
++#define HAVE_MIPS32R2_EXT_INS
++#elif (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
+     (defined(_MIPS_ARCH_MIPS32R2) || defined(_MIPS_ARCH_MIPS32R3) || \
+      defined(_MIPS_ARCH_MIPS32R5) || defined(_MIPS_ARCH_MIPS32R6))
+ #define HAVE_MIPS32R2_EXT_INS
+diff --git a/src/recompiler/mips/mips_codegen.h b/src/recompiler/mips/mips_codegen.h
+index 4432c05..2d901e3 100644
+--- a/src/recompiler/mips/mips_codegen.h
++++ b/src/recompiler/mips/mips_codegen.h
+@@ -112,8 +112,18 @@ typedef enum {
+ /* XXX: encoding of 3-op MUL changed in MIPS32r6, but hasn't been updated here. */
+ #define HAVE_MIPS32_3OP_MUL
+ 
+-// MIPS32r2 introduced useful instructions:
+-#if (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
++// MIPS32r2 introduced useful instructions.
++//
++// The HC15xx (SF2000/GB300) CPU implements MIPS32r1 and only a subset of
++// r2.  Field report from physical hardware (frog-toolchain PR #3): EXT, INS,
++// CLZ, CLO, MOVN, MOVZ and the multiply-accumulate ops work, while ROTR/
++// ROTRV, SEB/SEH, WSBH, SYNCI and JR.HB/JALR.HB raise exceptions.  The host
++// is always compiled with -march=mips32 (r1) so GCC never emits a buggy op;
++// QPSX_MIPS32R2_SAFE additionally licenses the proven-good EXT/INS encodings
++// emitted by this code generator (EXT/INS macros write raw words).
++#if defined(QPSX_MIPS32R2_SAFE)
++ #define HAVE_MIPS32R2_EXT_INS
++#elif (defined(__mips_isa_rev) && (__mips_isa_rev >= 2)) || \
+     (defined(_MIPS_ARCH_MIPS32R2) || defined(_MIPS_ARCH_MIPS32R3) || \
+      defined(_MIPS_ARCH_MIPS32R5) || defined(_MIPS_ARCH_MIPS32R6))
+  #define HAVE_MIPS32R2_EXT_INS
+diff --git a/src/recompiler/mips/rec_alu.cpp.h b/src/recompiler/mips/rec_alu.cpp.h
+index 2f62c49..3bb473a 100644
+--- a/src/recompiler/mips/rec_alu.cpp.h
++++ b/src/recompiler/mips/rec_alu.cpp.h
+@@ -8,10 +8,16 @@
+  * Options that can be disabled for debugging: *
+  ***********************************************/
+ 
+-/* Convert various MIPS I opcode sequences to a modern opcode */
++/* Convert various MIPS I opcode sequences to a modern opcode.  The
++ * SEB/SEH sign-extension conversions require HAVE_MIPS32R2_SEB_SEH, which
++ * is buggy on the HC15xx r1 core; the EXT/INS conversions only need the
++ * working EXT/INS pair, so they are gated separately. */
+ #if defined(HAVE_MIPS32R2_EXT_INS) && defined(HAVE_MIPS32R2_SEB_SEH)
+ #define USE_MIPS32R2_ALU_OPCODE_CONVERSION
+ #endif
++#if defined(HAVE_MIPS32R2_EXT_INS)
++#define USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
++#endif
+ 
+ 
+ /* NOTE: There's no need to do zero register optimizations since we have
+@@ -416,6 +422,13 @@ static void recSLL()
+ 			// Success.. we're done
+ 			return;
+ 		}
++	}
++#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION (SEB/SEH conversion needs buggy SEB/SEH)
++
++#ifdef USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
++	if (!branch)
++	{
++		const u32 next_opcode = OPCODE_AT(pc);
+ 
+ 		// If next opcode is SRL, see if we can convert this SLL,SRL sequence
+ 		//  into a newer MIPS32r2 'INS' instruction instead (inserting 0s).
+@@ -461,7 +474,7 @@ static void recSLL()
+ 			return;
+ 		}
+ 	}
+-#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#endif // USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 
+ 	REC_RTYPE_RD_RT_SA(SLL, _Rd_, _Rt_, _Sa_);
+ 
+@@ -475,7 +488,7 @@ static void recSRL()
+ 
+ 	const bool set_const = IsConst(_Rt_);
+ 
+-#ifdef USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#ifdef USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 	if (!branch)
+ 	{
+ 		const u32 next_opcode = OPCODE_AT(pc);
+@@ -579,7 +592,7 @@ static void recSRL()
+ 			return;
+ 		}
+ 	}
+-#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#endif // USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 
+ 	REC_RTYPE_RD_RT_SA(SRL, _Rd_, _Rt_, _Sa_);
+ 
+@@ -594,7 +607,7 @@ static void recSRA()
+ 
+ 	const bool set_const = IsConst(_Rt_);
+ 
+-#ifdef USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#ifdef USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 	if (!branch)
+ 	{
+ 		const u32 next_opcode = OPCODE_AT(pc);
+@@ -643,7 +656,7 @@ static void recSRA()
+ 			return;
+ 		}
+ 	}
+-#endif // USE_MIPS32R2_ALU_OPCODE_CONVERSION
++#endif // USE_MIPS32R2_ALU_OPCODE_EXT_INS_CONVERSION
+ 
+ 	REC_RTYPE_RD_RT_SA(SRA, _Rd_, _Rt_, _Sa_);
+ 
+diff --git a/src/recompiler/mips/rec_lsu.cpp.h b/src/recompiler/mips/rec_lsu.cpp.h
+index 584761e..6541177 100644
+--- a/src/recompiler/mips/rec_lsu.cpp.h
++++ b/src/recompiler/mips/rec_lsu.cpp.h
+@@ -1021,9 +1021,33 @@ static void general_loads_stores(const int  count,
+ 						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
+ 						break;
+ 					case 0xac000000: // SW
+-						ADDIU(MIPSREG_A0, rs, op_imm);
+-						JAL(write_func[WIDTH_32]);
+-						MOV(MIPSREG_A1, rt); // <BD> Branch delay slot
++						// QPSX scratchpad fast path: 0x1f80_0000..0x1f80_03ff maps
++						// to psxH[addr & 0xffff] (scratchpad is the hot GPU-FIFO
++						// region for PS1 3D games). The helper-call fallback below
++						// still handles hardware registers and mirror regions.
++						{
++							u32 *label_slow_1 = 0, *label_slow_2 = 0, *label_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							SRL(TEMP_1, MIPSREG_A0, 16);         // t = addr >> 16
++							XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++							label_slow_1 = (u32 *)recMem;
++							BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++							ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++							SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++							label_slow_2 = (u32 *)recMem;
++							BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++							LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++							ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + m
++							LSU_OPCODE(0xac000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // SW rt, lo(psxH)(temp_3)
++							label_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(label_slow_1);
++							fixup_branch(label_slow_2);
++							JAL(write_func[WIDTH_32]);           // helper: addr already in $a0
++							MOV(MIPSREG_A1, rt);                 // <BD> value arg
++							fixup_branch(label_done);
++						}
+ 						break;
+ 					case 0xa8000000: // SWL
+ 					case 0xb8000000: // SWR
+@@ -1145,10 +1169,31 @@ static void general_loads_stores(const int  count,
+ 						}
+ 						break;
+ 					case 0x8c000000: // LW
+-						JAL(read_func[WIDTH_32]);   // result in MIPSREG_V0
+-						ADDIU(MIPSREG_A0, rs, op_imm); // <BD> Branch delay slot
+-						if (op_rt) {
+-							MOV(rt, MIPSREG_V0);
++						// QPSX scratchpad fast path (see the SW case above).
++						{
++							u32 *label_slow_1 = 0, *label_slow_2 = 0, *label_done = 0;
++							ADDIU(MIPSREG_A0, rs, op_imm);       // eff addr (also the helper arg)
++							SRL(TEMP_1, MIPSREG_A0, 16);         // t = addr >> 16
++							XORI(TEMP_1, TEMP_1, 0x1f80);        // t == 0x1f80 ?
++							label_slow_1 = (u32 *)recMem;
++							BNE(TEMP_1, 0, 0);                   // not the scratchpad/hw region
++							ANDI(TEMP_2, MIPSREG_A0, 0xffff);    // <BD> m = addr & 0xffff
++							SLTIU(TEMP_3, TEMP_2, 0x400);         // m < 0x400 (scratchpad)?
++							label_slow_2 = (u32 *)recMem;
++							BEQZ(TEMP_3, 0);                     // hardware regs -> helper
++							LUI(TEMP_3, ADR_HI((uptr)psxH));     // <BD> psxH high half
++							ADDU(TEMP_3, TEMP_3, TEMP_2);         // psxH + m
++							LSU_OPCODE(0x8c000000, rt, TEMP_3, ADR_LO((uptr)psxH)); // LW rt, lo(psxH)(temp_3)
++							label_done = (u32 *)recMem;
++							B(0);                                // b done
++							NOP();                               // <BD>
++							fixup_branch(label_slow_1);
++							fixup_branch(label_slow_2);
++							JAL(read_func[WIDTH_32]);            // helper: addr already in $a0
++							NOP();                               // <BD> (result not ready yet)
++							if (op_rt)
++								MOV(rt, MIPSREG_V0);
++							fixup_branch(label_done);
+ 						}
+ 						break;
+ 					case 0x88000000: // LWL

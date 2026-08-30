@@ -1,0 +1,151 @@
+--- a/src/r3000a.cpp
++++ b/src/r3000a.cpp
+@@ -35,12 +35,58 @@
+ 
+ extern "C" void xlog(const char *fmt, ...);
+ 
++/* These defaults keep the generic QPSX tree buildable outside the SF2000
++ * frontend.  The frontend overrides them in its production flag set and the
++ * resulting values are printed once so a physical-device log identifies the
++ * exact A/B candidate that produced it. */
++#ifndef QPSX_MIPS_DISPATCH_CACHE_ENTRIES
++#define QPSX_MIPS_DISPATCH_CACHE_ENTRIES 64
++#endif
++#ifndef QPSX_GTE_NATIVE_DIVIDE
++#define QPSX_GTE_NATIVE_DIVIDE 0
++#endif
++#ifndef QPSX_GTE_HOT_O3
++#define QPSX_GTE_HOT_O3 0
++#endif
++#ifndef QPSX_MIPS_PSMEM_REG
++#define QPSX_MIPS_PSMEM_REG 0
++#endif
++#ifndef QPSX_MIPS_PERSISTENT_RETURN_RA
++#define QPSX_MIPS_PERSISTENT_RETURN_RA 0
++#endif
++#ifndef QPSX_MIPS_FOLD_DIRECT_JUMPS
++#define QPSX_MIPS_FOLD_DIRECT_JUMPS 0
++#endif
++#ifndef QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX
++#define QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX 0
++#endif
++#ifndef QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES
++#define QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES 0
++#endif
++#ifndef QPSX_PROFILER_ENABLED
++#define QPSX_PROFILER_ENABLED 0
++#endif
++#ifndef QPSX_RUNTIME_TELEMETRY
++#define QPSX_RUNTIME_TELEMETRY 0
++#endif
++
++#ifdef PSXREC
++extern "C" void recLogTelemetry(void);
++#endif
++
+ PcsxConfig Config;
+ R3000Acpu *psxCpu=NULL;
+ psxRegisters psxRegs;
+ 
+ int psxInit() {
+ 	printf("Running PCSX Version %s (%s).\n", PACKAGE_VERSION, __DATE__);
++	xlog("QPSX: build knobs dispatch_cache=%d psxM_reg=%d gte_native_div=%d "
++	     "gte_hot_o3=%d return_ra=%d fold=%d/%d/%d profiler=%d telemetry=%d",
++	     QPSX_MIPS_DISPATCH_CACHE_ENTRIES, QPSX_MIPS_PSMEM_REG,
++	     QPSX_GTE_NATIVE_DIVIDE, QPSX_GTE_HOT_O3,
++	     QPSX_MIPS_PERSISTENT_RETURN_RA, QPSX_MIPS_FOLD_DIRECT_JUMPS,
++	     QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX, QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES,
++	     QPSX_PROFILER_ENABLED, QPSX_RUNTIME_TELEMETRY);
+ 
+ #ifdef PSXREC
+ 	#ifndef interpreter_none
+@@ -108,6 +154,13 @@
+ void psxShutdown() {
+ 	// Shutdown CPU *before* calling psxMemShutdown(), to allow it to unmap
+ 	//  psxM,psxH etc, if it has done so.
++#ifdef PSXREC
++	/* This is intentionally once per emulator lifetime: counters are updated
++	 * only when a block is compiled, so this log has no steady-state cost. */
++	#if QPSX_RUNTIME_TELEMETRY
++	recLogTelemetry();
++	#endif
++#endif
+ 	psxCpu->Shutdown();
+ 
+ 	psxMemShutdown();
+--- a/src/recompiler/mips/recompiler.cpp
++++ b/src/recompiler/mips/recompiler.cpp
+@@ -339,6 +339,16 @@
+ static u32  host_v0_reg_constval;
+ static bool host_ra_reg_has_block_retaddr; /* Indirect-return address is cached in $ra. */
+ 
++#if QPSX_RUNTIME_TELEMETRY
++/* Compile-time counters only.  Keeping these off the ExecuteBlock path makes
++ * the production diagnostic observable without turning the old profiler back
++ * on (the profiler adds a measurable cost to every translated instruction). */
++static unsigned rec_telemetry_blocks;
++static unsigned rec_telemetry_bytes;
++static unsigned rec_telemetry_folds;
++static unsigned rec_telemetry_resets;
++#endif
++
+ 
+ #ifdef WITH_DISASM
+ char	disasm_buffer[512];
+@@ -650,6 +660,14 @@
+ 
+ 	DISASM_HOST();
+ 	clear_insn_cache(recMemStart, recMem, 0);
++
++#if QPSX_RUNTIME_TELEMETRY
++	rec_telemetry_blocks++;
++	rec_telemetry_bytes += (unsigned)((u8 *)recMem - (u8 *)recMemStart);
++#if QPSX_MIPS_FOLD_DIRECT_JUMPS
++	rec_telemetry_folds += direct_jump_fold_count;
++#endif
++#endif
+ }
+ 
+ 
+@@ -659,6 +677,13 @@
+ 
+ 	recMem = (u32*)recMemBase;
+ 
++#if QPSX_RUNTIME_TELEMETRY
++	rec_telemetry_blocks = 0;
++	rec_telemetry_bytes = 0;
++	rec_telemetry_folds = 0;
++	rec_telemetry_resets = 0;
++#endif
++
+	// Init code buffer, to allocate the RAM we need in advance. Filling with
+	//  all-1's should force an exception on any accidental non-code execution.
+	{
+@@ -2169,6 +2194,9 @@
+ 
+ static void recReset()
+ {
++#if QPSX_RUNTIME_TELEMETRY
++	rec_telemetry_resets++;
++#endif
+ 	memset(code_pages, 0, sizeof(code_pages));
+ 	rec_dispatch_cache_clear();
+ 	memset(recRAM, 0, REC_RAM_SIZE);
+@@ -2182,6 +2210,17 @@
+ 	rec_set_options();
+ }
+ 
++#if QPSX_RUNTIME_TELEMETRY
++extern "C" void recLogTelemetry(void)
++{
++	const unsigned cache_used = (unsigned)((u8 *)recMem - recMemBase);
++	xlog("QPSX: rec telemetry blocks=%u code_bytes=%u folds=%u "
++	     "cache_used=%u cache_resets=%u",
++	     rec_telemetry_blocks, rec_telemetry_bytes, rec_telemetry_folds,
++	     cache_used, rec_telemetry_resets);
++}
++#endif
++
+ 
+ R3000Acpu psxRec =
+ {

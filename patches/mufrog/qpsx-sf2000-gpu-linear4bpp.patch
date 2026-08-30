@@ -1,0 +1,117 @@
+diff --git a/src/gpu/gpu_unai/gpu_inner.h b/src/gpu/gpu_unai/gpu_inner.h
+index fc2f686..2d26190 100644
+--- a/src/gpu/gpu_unai/gpu_inner.h
++++ b/src/gpu/gpu_unai/gpu_inner.h
+@@ -43,6 +43,9 @@
+ #ifndef QPSX_GPU_RUNTIME_METRICS
+ #define QPSX_GPU_RUNTIME_METRICS 0
+ #endif
++#ifndef QPSX_GPU_LINEAR_4BPP
++#define QPSX_GPU_LINEAR_4BPP 0
++#endif
+ #if QPSX_GPU_RUNTIME_METRICS
+ extern u32 qpsx_gpu_poly_span_hist[2048];
+ extern u32 qpsx_gpu_poly_pixel_hist[2048];
+@@ -74,6 +77,60 @@ extern u32 qpsx_gpu_poly_flat_v_pixels;
+ // QPSX v091: MIPS32 Assembly optimizations
+ #include "gpu_inner_mips32.h"
+ 
++#if QPSX_GPU_LINEAR_4BPP
++/*
++ * A large Ridge Racer workload uses the unlit 4bpp polygon driver (CF=32).
++ * When a span walks one texel at a time along a constant texture row, two
++ * texels share one source byte.  The normal loop recomputes the fixed-point
++ * address and reloads that byte for every pixel.  This helper handles only
++ * the provable linear/no-wrap case and returns false for every other texture
++ * window, so correctness falls back to the normal renderer.
++ */
++static inline bool qpsx_gpu_poly_span_4bpp_linear(const gpu_unai_t &gpu_unai,
++                                                  u16 *pDst, u32 count)
++{
++	const u32 full_mask = ((255u << FIXED_BITS) | fixed_LOMASK);
++	const s32 unit_u = (1 << FIXED_BITS);
++	const u32 l_u = gpu_unai.u & gpu_unai.u_msk;
++	const u32 l_v = gpu_unai.v & gpu_unai.v_msk;
++	if (gpu_unai.u_msk != full_mask || gpu_unai.v_msk != full_mask ||
++		gpu_unai.u_inc != unit_u || gpu_unai.v_inc != 0 ||
++		(l_u >> FIXED_BITS) + count > 256)
++		return false;
++
++	const u8 *row = ((const u8 *)gpu_unai.TBA) +
++				((l_v << 1) & (0xffu << 11));
++	const u16 *cba = gpu_unai.CBA;
++	u32 tu = l_u >> FIXED_BITS;
++
++	/* Consume an odd starting texel before the paired byte loop. */
++	if (count && (tu & 1)) {
++		u16 src = cba[*row >> 4];
++		if (src) *pDst = src;
++		++pDst;
++		++tu;
++		--count;
++		++row;
++	}
++
++	while (count >= 2) {
++		const u8 packed = *row++;
++		u16 src = cba[packed & 0x0f];
++		if (src) pDst[0] = src;
++		src = cba[packed >> 4];
++		if (src) pDst[1] = src;
++		pDst += 2;
++		tu += 2;
++		count -= 2;
++	}
++	if (count) {
++		u16 src = cba[*row & 0x0f];
++		if (src) *pDst = src;
++	}
++	return true;
++}
++#endif
++
+ // If defined, Gouraud colors are fixed-point 5.11, otherwise they are 8.16
+ // This is only for debugging/verification of low-precision colors in C.
+ // Low-precision Gouraud is intended for use by SIMD-optimized inner drivers
+@@ -548,6 +605,10 @@ static void gpuPolySpanFn(const gpu_unai_t &gpu_unai, u16 *pDst, u32 count)
+ 		++qpsx_gpu_poly_flat_v_spans;
+ 		qpsx_gpu_poly_flat_v_pixels += count;
+ 	}
++#endif
++#if QPSX_GPU_LINEAR_4BPP
++	if (CF == 32 && qpsx_gpu_poly_span_4bpp_linear(gpu_unai, pDst, count))
++		return;
+ #endif
+ 	// Blend func can save an operation if it knows uSrc MSB is unset.
+ 	//  Untextured prims can always skip this (src color MSB is always 0).
+diff --git a/src/r3000a.cpp b/src/r3000a.cpp
+index db14ea9..74feead 100644
+--- a/src/r3000a.cpp
++++ b/src/r3000a.cpp
+@@ -78,6 +78,9 @@ extern "C" void xlog(const char *fmt, ...);
+ #ifndef QPSX_GPU_RUNTIME_METRICS
+ #define QPSX_GPU_RUNTIME_METRICS 0
+ #endif
++#ifndef QPSX_GPU_LINEAR_4BPP
++#define QPSX_GPU_LINEAR_4BPP 0
++#endif
+ 
+ #ifdef PSXREC
+ extern "C" void recLogTelemetry(void);
+@@ -91,13 +94,14 @@ int psxInit() {
+ 	printf("Running PCSX Version %s (%s).\n", PACKAGE_VERSION, __DATE__);
+ 	xlog("QPSX: build knobs dispatch_cache=%d psxM_reg=%d gte_native_div=%d "
+ 	     "gte_hot_o3=%d return_ra=%d fold=%d/%d/%d profiler=%d telemetry=%d "
+-	     "gpu_fixed=%d gpu_light_fast=%d gpu_metrics=%d",
++	     "gpu_fixed=%d gpu_light_fast=%d gpu_linear4=%d gpu_metrics=%d",
+ 	     QPSX_MIPS_DISPATCH_CACHE_ENTRIES, QPSX_MIPS_PSMEM_REG,
+ 	     QPSX_GTE_NATIVE_DIVIDE, QPSX_GTE_HOT_O3,
+ 	     QPSX_MIPS_PERSISTENT_RETURN_RA, QPSX_MIPS_FOLD_DIRECT_JUMPS,
+ 	     QPSX_MIPS_FOLD_DIRECT_JUMPS_MAX, QPSX_MIPS_FOLD_DIRECT_JUMPS_BYTES,
+ 	     QPSX_PROFILER_ENABLED, QPSX_RUNTIME_TELEMETRY,
+ 	     QPSX_GPU_FIXED_FAST_PATH, QPSX_GPU_FIXED_LIGHTING,
++	     QPSX_GPU_LINEAR_4BPP,
+ 	     QPSX_GPU_RUNTIME_METRICS);
+ 
+ #ifdef PSXREC
+

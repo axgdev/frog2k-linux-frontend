@@ -1,0 +1,134 @@
+diff --git a/src/gpu/gpu_unai/gpu_inner.h b/src/gpu/gpu_unai/gpu_inner.h
+index 2d26190..3dbd46b 100644
+--- a/src/gpu/gpu_unai/gpu_inner.h
++++ b/src/gpu/gpu_unai/gpu_inner.h
+@@ -46,6 +46,12 @@
+ #ifndef QPSX_GPU_LINEAR_4BPP
+ #define QPSX_GPU_LINEAR_4BPP 0
+ #endif
++#ifndef QPSX_GPU_PACKED_TILE_WRITES
++#define QPSX_GPU_PACKED_TILE_WRITES 0
++#endif
++#ifndef QPSX_GPU_PACKED_SPRITE_4BPP
++#define QPSX_GPU_PACKED_SPRITE_4BPP 0
++#endif
+ #if QPSX_GPU_RUNTIME_METRICS
+ extern u32 qpsx_gpu_poly_span_hist[2048];
+ extern u32 qpsx_gpu_poly_pixel_hist[2048];
+@@ -360,6 +366,39 @@ static void gpuTileSpanFn(u16 *pDst, u32 count, u16 data)
+ #endif
+ 	if (!CF_MASKCHECK && !CF_BLEND) {
+ 		if (CF_MASKSET) { data = data | 0x8000; }
++		/* CF=0 is the overwhelmingly common opaque tile fill.  The normal
++		 * eight-halfword unroll still spends one store instruction per pixel.
++		 * On the little-endian SF2000 framebuffer, align once and write two
++		 * identical pixels with one 32-bit store.  The odd-pixel prefix/suffix
++		 * keeps this exact for every x alignment and the option is disabled for
++		 * other ports by default. */
++#if QPSX_GPU_PACKED_TILE_WRITES
++		if (CF == 0 && !CF_MASKSET) {
++			if (count && ((uintptr_t)pDst & 2u)) {
++				*pDst++ = data;
++				--count;
++			}
++			const u32 packed = (u32)data | ((u32)data << 16);
++			u32 *pDst32 = (u32 *)pDst;
++			/* Keep the branch rate of the old eight-pixel unroll while
++			 * retaining the two-pixels-per-store reduction. */
++			while (count >= 8) {
++				pDst32[0] = packed;
++				pDst32[1] = packed;
++				pDst32[2] = packed;
++				pDst32[3] = packed;
++				pDst32 += 4;
++				count -= 8;
++			}
++			while (count >= 2) {
++				*pDst32++ = packed;
++				count -= 2;
++			}
++			pDst = (u16 *)pDst32;
++			if (count) *pDst = data;
++			return;
++		}
++#endif
+ 		// QPSX v089: 8x loop unroll for tile fills - significant speedup
+ 		while (count >= 8) {
+ 			pDst[0] = data; pDst[1] = data;
+@@ -469,6 +498,41 @@ static void gpuSpriteSpanFn(u16 *pDst, u32 count, u8* pTxt, u32 u0)
+ 
+ 	const u16 *CBA_; if (CF_TEXTMODE!=3) CBA_ = gpu_unai.CBA;
+ 
++#if QPSX_GPU_PACKED_SPRITE_4BPP
++	/* Most sprites in the Ridge Racer scene are opaque, unlit 4bpp (CF=32).
++	 * With the default texture window, two adjacent texels share one byte.
++	 * Handle only a complete, non-wrapping run so transparent texels and all
++	 * texture-window corner cases retain the generic renderer's behavior. */
++	if (CF == 0x20 && u0_mask == 255u && u0 <= 255u &&
++		count <= 256u - u0) {
++		u32 tu = u0;
++		if (tu & 1u) {
++			const u8 packed = pTxt[tu >> 1];
++			const u16 src = CBA_[packed >> 4];
++			if (src) *pDst = src;
++			++pDst;
++			++tu;
++			--count;
++		}
++		while (count >= 2) {
++			const u8 packed = pTxt[tu >> 1];
++			const u16 src0 = CBA_[packed & 0x0f];
++			const u16 src1 = CBA_[packed >> 4];
++			if (src0) pDst[0] = src0;
++			if (src1) pDst[1] = src1;
++			pDst += 2;
++			tu += 2;
++			count -= 2;
++		}
++		if (count) {
++			const u8 packed = pTxt[tu >> 1];
++			const u16 src = CBA_[packed & 0x0f];
++			if (src) *pDst = src;
++		}
++		return;
++	}
++#endif
++
+ 	do
+ 	{
+ 		if (CF_MASKCHECK || CF_BLEND) { uDst = *pDst; }
+diff --git a/src/r3000a.cpp b/src/r3000a.cpp
+index 74feead..a195268 100644
+--- a/src/r3000a.cpp
++++ b/src/r3000a.cpp
+@@ -81,6 +81,12 @@ extern "C" void xlog(const char *fmt, ...);
+ #ifndef QPSX_GPU_LINEAR_4BPP
+ #define QPSX_GPU_LINEAR_4BPP 0
+ #endif
++#ifndef QPSX_GPU_PACKED_TILE_WRITES
++#define QPSX_GPU_PACKED_TILE_WRITES 0
++#endif
++#ifndef QPSX_GPU_PACKED_SPRITE_4BPP
++#define QPSX_GPU_PACKED_SPRITE_4BPP 0
++#endif
+ 
+ #ifdef PSXREC
+ extern "C" void recLogTelemetry(void);
+@@ -94,7 +100,8 @@ int psxInit() {
+ 	printf("Running PCSX Version %s (%s).\n", PACKAGE_VERSION, __DATE__);
+ 	xlog("QPSX: build knobs dispatch_cache=%d psxM_reg=%d gte_native_div=%d "
+ 	     "gte_hot_o3=%d return_ra=%d fold=%d/%d/%d profiler=%d telemetry=%d "
+-	     "gpu_fixed=%d gpu_light_fast=%d gpu_linear4=%d gpu_metrics=%d",
++	     "gpu_fixed=%d gpu_light_fast=%d gpu_linear4=%d gpu_tile32=%d "
++	     "gpu_sprite4=%d gpu_metrics=%d",
+ 	     QPSX_MIPS_DISPATCH_CACHE_ENTRIES, QPSX_MIPS_PSMEM_REG,
+ 	     QPSX_GTE_NATIVE_DIVIDE, QPSX_GTE_HOT_O3,
+ 	     QPSX_MIPS_PERSISTENT_RETURN_RA, QPSX_MIPS_FOLD_DIRECT_JUMPS,
+@@ -102,6 +109,7 @@ int psxInit() {
+ 	     QPSX_PROFILER_ENABLED, QPSX_RUNTIME_TELEMETRY,
+ 	     QPSX_GPU_FIXED_FAST_PATH, QPSX_GPU_FIXED_LIGHTING,
+ 	     QPSX_GPU_LINEAR_4BPP,
++	     QPSX_GPU_PACKED_TILE_WRITES, QPSX_GPU_PACKED_SPRITE_4BPP,
+ 	     QPSX_GPU_RUNTIME_METRICS);
+ 
+ #ifdef PSXREC

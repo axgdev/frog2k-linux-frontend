@@ -1,0 +1,320 @@
+diff --git a/Makefile.libretro b/Makefile.libretro
+index 0ba0f85946429a27668241fb3099cf4f427a98f8..2290c347d2b5eb571ed0de75489dfe8ae1bf2959 100644
+--- a/Makefile.libretro
++++ b/Makefile.libretro
+@@ -21,6 +21,10 @@ endif
+ QPSX_PLATFORM_UNIFROG := $(if $(filter unifrog,$(QPSX_PLATFORM)),1,0)
+ QPSX_PLATFORM_LINUX := $(if $(filter linux,$(QPSX_PLATFORM)),1,0)
+ QPSX_ENABLE_MIPS32R2 ?= 0
++# Keep optimization selectable for the NOMMU target.  The HC15xx has only a
++# 16 KiB, 2-way I-cache; size-oriented builds can beat -O2 when the complete
++# GPU/recompiler text no longer fits in the hot instruction working set.
++QPSX_OPTIMIZE ?= -O2
+ 
+ QPSX_PLATFORM_CFLAGS := \
+ 	-DQPSX_PLATFORM_UNIFROG=$(QPSX_PLATFORM_UNIFROG) \
+@@ -83,7 +87,7 @@ MORE_CFLAGS = -Os -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
+ 	-D$(shell echo $(GPU) | tr a-z A-Z) \
+ 	-D$(shell echo $(SPU) | tr a-z A-Z)
+ else
+-MORE_CFLAGS = -O2 -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
++MORE_CFLAGS = $(QPSX_OPTIMIZE) -Isrc/ -Isrc/spu/$(SPU) -Isrc/gpu/$(GPU) \
+ 	-Isrc/plugin_lib \
+ 	-Isrc/port/$(PORT) \
+ 	-Ilibretro/core -Ilibretro/include \
+diff --git a/libretro/core/libretro-core.cpp b/libretro/core/libretro-core.cpp
+index 07e54891d02eb37444c1390812db17532c5bb3a5..5bba8e6ec1eb327a58058b1eeb825dbf4bd82a59 100644
+--- a/libretro/core/libretro-core.cpp
++++ b/libretro/core/libretro-core.cpp
+@@ -3859,7 +3859,9 @@ void retro_run(void)
+     if (g_target_speed >= 100) {
+         /* Normal speed - no throttling, just execute */
+         profiler_frame_start();
++        PROFILE_START(PROF_CPU_TOTAL);
+         psxCpu->Execute();
++        PROFILE_END(PROF_CPU_TOTAL);
+         profiler_frame_end();
+     } else {
+         frame_throttle_acc += g_target_speed;
+@@ -3867,7 +3869,9 @@ void retro_run(void)
+             frame_throttle_acc -= 100;
+             /* Emulate this frame */
+             profiler_frame_start();
++            PROFILE_START(PROF_CPU_TOTAL);
+             psxCpu->Execute();
++            PROFILE_END(PROF_CPU_TOTAL);
+             profiler_frame_end();
+         } else {
+             /* Skip emulation - frame dupe (output previous frame buffer) */
+diff --git a/src/gte.cpp b/src/gte.cpp
+index 497d2159c2492d8f7d3c0fe0a743971b4b2a1640..944eb6435511ef85c0bbcedcbfa8c319e5809685 100644
+--- a/src/gte.cpp
++++ b/src/gte.cpp
+@@ -23,8 +23,12 @@
+ #include "psxmem.h"
+ #include "profiler.h"
+ 
+-// MIPS platforms have hardware divider, faster than 64KB LUT + UNR algo
+-#if defined(__mips__)
++// MIPS platforms have hardware divider, faster than 64KB LUT + UNR algo.
++// Keep a build switch for device A/B tests; native divide remains default.
++#ifndef QPSX_GTE_NATIVE_DIVIDE
++#define QPSX_GTE_NATIVE_DIVIDE 1
++#endif
++#if defined(__mips__) && QPSX_GTE_NATIVE_DIVIDE
+ #define GTE_USE_NATIVE_DIVIDE
+ #endif
+ 
+@@ -37,6 +41,20 @@
+ #define PARANOID_OVERFLOW_CHECKING
+ #endif
+ 
++/* RTPS/RTPT dominate the measured GTE time on the HC15xx.  Keep the rest of
++ * the core at the cache-friendly -O2 setting, but allow a benchmarked build
++ * to give only these two straight-line kernels GCC's stronger register
++ * allocation.  The attribute is ignored unless the frontend explicitly
++ * enables QPSX_GTE_HOT_O3. */
++#ifndef QPSX_GTE_HOT_O3
++#define QPSX_GTE_HOT_O3 0
++#endif
++#if QPSX_GTE_HOT_O3 && defined(__GNUC__)
++#define QPSX_GTE_HOT __attribute__((optimize("O3")))
++#else
++#define QPSX_GTE_HOT
++#endif
++
+ #define VX(n) (n < 3 ? psxRegs.CP2D.p[n << 1].sw.l : psxRegs.CP2D.p[9].sw.l)
+ #define VY(n) (n < 3 ? psxRegs.CP2D.p[n << 1].sw.h : psxRegs.CP2D.p[10].sw.l)
+ #define VZ(n) (n < 3 ? psxRegs.CP2D.p[(n << 1) + 1].sw.l : psxRegs.CP2D.p[11].sw.l)
+@@ -397,7 +415,7 @@ void gteSWC2(void) {
+ 	psxMemWrite32(_oB_, gtecalcMFC2(_Rt_));
+ }
+ 
+-void gteRTPS(void) {
++QPSX_GTE_HOT void gteRTPS(void) {
+ 	int quotient;
+ 
+ #ifdef GTE_LOG
+@@ -432,7 +450,7 @@ void gteRTPS(void) {
+ 	PROFILE_END(PROF_GTE_RTPS);
+ }
+ 
+-void gteRTPT(void) {
++QPSX_GTE_HOT void gteRTPT(void) {
+ 	int quotient;
+ 	int v;
+ 	s32 vx, vy, vz;
+diff --git a/src/recompiler/mips/mips_codegen.h b/src/recompiler/mips/mips_codegen.h
+index 2d901e3548deb6b94ef9e2238042efb45c2c9858..039f6dc43317850fb6d6e6d237dccebb794cdad0 100644
+--- a/src/recompiler/mips/mips_codegen.h
++++ b/src/recompiler/mips/mips_codegen.h
+@@ -50,7 +50,8 @@
+  *                  Reduces redundant loads from stack in exit code.
+  *                  -> A jump to C code via JAL() invalidates cached value.
+  *
+- * MIPSREG_S0..S7  Reserved for reg allocator.
++ * MIPSREG_S0..S7  Reserved for reg allocator, except that the Linux NOMMU
++ *                  cache-aware build can reserve S7 for the psxM base.
+  *
+  * MIPSREG_S8      Holds pointer to psxRegs struct, a.k.a. PERM_REG_1.
+  */
+@@ -104,6 +105,16 @@ typedef enum {
+ /* PERM_REG_1 is pointer to psxRegs struct */
+ #define PERM_REG_1           MIPSREG_S8
+ 
++/* A generated RAM access normally reloads psxM from psxRegs for every load
++ * or store series.  On the NOMMU target, S7 is callee-saved and can safely
++ * hold that base across generated blocks and C helper calls. */
++#ifndef QPSX_MIPS_PSMEM_REG
++#define QPSX_MIPS_PSMEM_REG 0
++#endif
++#if QPSX_MIPS_PSMEM_REG
++#define PERM_REG_2           MIPSREG_S7
++#endif
++
+ 
+ /* NOTE: it is assumed the platform has basic MIPS32r1 ISA, i.e. it has at
+  *       minimum CLZ,MOVN,MOVZ,MUL.
+diff --git a/src/recompiler/mips/rec_lsu.cpp.h b/src/recompiler/mips/rec_lsu.cpp.h
+index 65411772d0812e627048e74c1c2cd801aa552e1a..1927d720709dbacab4c436681a39b1b7cb061a72 100644
+--- a/src/recompiler/mips/rec_lsu.cpp.h
++++ b/src/recompiler/mips/rec_lsu.cpp.h
+@@ -269,7 +269,12 @@ static u32 emitAddressConversion(const u32 op_rs,
+ 		//            handle the three 2MB PS1 RAM mirrors. Caller knows it can
+ 		//            only use the converted base reg to access PS1 RAM.
+ 
++		#if QPSX_MIPS_PSMEM_REG
++		/* Copy the stable base; tmp_reg is filled by the mask below. */
++		MOV(desired_reg, PERM_REG_2);
++		#else
+ 		LW(desired_reg, PERM_REG_1, off(psxM));
++		#endif
+ #ifdef HAVE_MIPS32R2_EXT_INS
+ 		EXT(tmp_reg, rs, 0, 21);  // tmp_reg = rs & 0x001f_ffff
+ #else
+@@ -1044,7 +1048,11 @@ static void general_loads_stores(const int  count,
+ 							NOP();                               // <BD>
+ 							fixup_branch(label_slow_1);
+ 							fixup_branch(label_slow_2);
+-							JAL(write_func[WIDTH_32]);           // helper: addr already in $a0
++						/* The preceding tests prove a real 0x1f80xxxx hardware
++						 * address (not scratchpad).  Bypass psxMemWrite32's
++						 * duplicate region/LUT dispatch; psxHwWrite32 also handles
++						 * the ROM/cache-control cases used by the recompiler. */
++							JAL(psxHwWrite32);                  // addr already in $a0
+ 							MOV(MIPSREG_A1, rt);                 // <BD> value arg
+ 							fixup_branch(label_done);
+ 						}
+@@ -1189,7 +1197,10 @@ static void general_loads_stores(const int  count,
+ 							NOP();                               // <BD>
+ 							fixup_branch(label_slow_1);
+ 							fixup_branch(label_slow_2);
+-							JAL(read_func[WIDTH_32]);            // helper: addr already in $a0
++							/* As in the SW path, this is known 0x1f80xxxx
++							 * hardware, so avoid psxMemRead32's second region
++							 * dispatch and LUT lookup. */
++							JAL(psxHwRead32);                    // addr already in $a0
+ 							NOP();                               // <BD> (result not ready yet)
+ 							if (op_rt)
+ 								MOV(rt, MIPSREG_V0);
+diff --git a/src/recompiler/mips/recompiler.cpp b/src/recompiler/mips/recompiler.cpp
+index 906a5895707aa0091bf4960e49879678eb08c482..21940fd026f1c343947a8406a66a210c3e842852 100644
+--- a/src/recompiler/mips/recompiler.cpp
++++ b/src/recompiler/mips/recompiler.cpp
+@@ -75,6 +75,10 @@ extern "C" void xlog(const char *fmt, ...);
+  */
+ #define USE_DIRECT_FASTPATH_BLOCK_RETURN_JUMPS
+ 
++#ifndef QPSX_MIPS_PSMEM_REG
++#define QPSX_MIPS_PSMEM_REG 0
++#endif
++
+ /* Const propagation is applied to addresses */
+ #if defined(QPSX_ENABLE_MIPS_CONST_MEM) && QPSX_ENABLE_MIPS_CONST_MEM
+ #define USE_CONST_ADDRESSES
+@@ -146,19 +150,30 @@ static uptr psxRecLUT[0x10000];
+ 
+ #if defined(QPSX_ENABLE_MIPS_PIC_ASM_DISPATCH) && \
+     QPSX_ENABLE_MIPS_PIC_ASM_DISPATCH
++#ifndef QPSX_MIPS_DISPATCH_CACHE_ENTRIES
++#define QPSX_MIPS_DISPATCH_CACHE_ENTRIES 64
++#endif
++#if (QPSX_MIPS_DISPATCH_CACHE_ENTRIES < 1) || \
++    ((QPSX_MIPS_DISPATCH_CACHE_ENTRIES & \
++      (QPSX_MIPS_DISPATCH_CACHE_ENTRIES - 1)) != 0) || \
++    (QPSX_MIPS_DISPATCH_CACHE_ENTRIES > 2048)
++#error "QPSX_MIPS_DISPATCH_CACHE_ENTRIES must be a power of two <= 2048"
++#endif
++#define QPSX_MIPS_DISPATCH_CACHE_INDEX_MASK \
++	((QPSX_MIPS_DISPATCH_CACHE_ENTRIES - 1) * 4)
+ /*
+  * The NOMMU Linux port cannot mirror recRAM into the guest address space, so
+  * every block dispatch otherwise reads both psxRecLUT and a widely scattered
+- * recRAM slot. Keep recent PC-to-host-code translations in four HC15xx cache
+- * lines (512 bytes, at most 3.1% of a 16 KiB D-cache). recClear() and
+- * recReset() invalidate it alongside the authoritative block-pointer arrays.
++ * recRAM slot. Keep recent PC-to-host-code translations in a small direct-
++ * mapped cache. recClear() and recReset() invalidate it alongside the
++ * authoritative block-pointer arrays.
+  */
+ struct rec_dispatch_entry {
+ 	u32 pc;
+ 	u32 code;
+ };
+ 
+-static struct rec_dispatch_entry rec_dispatch_cache[64]
++static struct rec_dispatch_entry rec_dispatch_cache[QPSX_MIPS_DISPATCH_CACHE_ENTRIES]
+ 	__attribute__((aligned(128)));
+ 
+ static inline void rec_dispatch_cache_clear()
+@@ -723,6 +738,9 @@ __attribute__((noinline)) static void recFunc(void *fn)
+ 	__asm__ __volatile__ (
+ 		"addiu  $sp, $sp, -24                   \n"
+ 		"la     $fp, %[psxRegs]                 \n" // $fp = &psxRegs
++#if QPSX_MIPS_PSMEM_REG
++		"lw     $s7, 0(%[psxM_ptr])             \n" // $s7 = psxM base
++#endif
+ 		"lw     $v0, %[psxRegs_pc_off]($fp)     \n" // Blocks expect $v0 to contain PC val on entry
+ 		"la     $ra, block_return_addr%=        \n" // Load $ra with block_return_addr
+ 		"sw     $ra, 16($sp)                    \n" // Put 'block_return_addr' on stack
+@@ -738,6 +756,9 @@ __attribute__((noinline)) static void recFunc(void *fn)
+ 		: // Input
+ 		  [fn]                   "r" (fn),
+ 		  [psxRegs]              "i" (&psxRegs),
++#if QPSX_MIPS_PSMEM_REG
++		  [psxM_ptr]             "d" (&psxM),
++#endif
+ 		  [psxRegs_pc_off]       "i" (off(pc)),   // Offset of psxRegs.pc in psxRegs
+ 		  [psxRegs_cycle_off]    "i" (off(cycle)) // Offset of psxRegs.cycle in psxRegs
+ 		: // Clobber - No need to list anything but 'saved' regs
+@@ -793,6 +814,9 @@ __asm__ __volatile__ (
+ 
+ // $fp/$s8 remains set to &psxRegs across all calls to blocks
+ "move  $fp, %[psxRegs]                        \n"
++#if QPSX_MIPS_PSMEM_REG
++"lw    $s7, 0(%[psxM_ptr])                    \n" // $s7 = psxM base
++#endif
+ 
+ // Set up our own stack frame. Should have 8-byte alignment, and have 16 bytes
+ // empty at 0($sp) for use by functions called from within recompiled code.
+@@ -858,7 +882,7 @@ __asm__ __volatile__ (
+ // Infinite loop, blocks return here
+ "loop%=:                                      \n"
+ "lw    $t3, %[psxRegs_cycle_off]($fp)         \n" // $t3 = psxRegs.cycle
+-"andi  $t2, $v0, 0x00fc                       \n" // 64-entry cache index
++"andi  $t2, $v0, %[dispatch_index_mask]       \n" // cache index
+ "sll   $t2, $t2, 1                            \n" // eight bytes per entry
+ "lw    $t1, f_off_dispatch_cache($sp)         \n"
+ "addu  $t6, $t1, $t2                          \n" // $t6 = cache entry
+@@ -958,6 +982,9 @@ __asm__ __volatile__ (
+ : // Output
+ : // Input
+   [psxRegs]                    "d" (&psxRegs),
++#if QPSX_MIPS_PSMEM_REG
++  [psxM_ptr]                   "d" (&psxM),
++#endif
+   [psxRegs_pc_off]             "i" (off(pc)),
+   [psxRegs_cycle_off]          "i" (off(cycle)),
+   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
+@@ -966,6 +993,7 @@ __asm__ __volatile__ (
+   [recRAM]                     "d" (recRAM),
+   [recROM]                     "d" (recROM),
+   [dispatch_cache]             "d" (rec_dispatch_cache),
++  [dispatch_index_mask]        "i" (QPSX_MIPS_DISPATCH_CACHE_INDEX_MASK),
+   [emu_frame_complete]         "d" (&emu_frame_complete)
+ : // Clobber - No need to list anything but 'saved' regs
+   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
+@@ -1633,6 +1661,9 @@ __attribute__((noinline)) static void recExecuteBlock(unsigned target_pc)
+ 		"sw    %[recRAM], block_off_recRAM($sp)         \n"
+ 		"sw    %[recROM], block_off_recROM($sp)         \n"
+ 		"move  $fp, %[psxRegs]                          \n"
++#if QPSX_MIPS_PSMEM_REG
++		"lw    $s7, 0(%[psxM_ptr])                      \n" // $s7 = psxM base
++#endif
+ 
+ 		// Derive the nested dispatcher's return address without a text relocation.
+ 		"bal   block_setup_return%=                     \n"
+@@ -1713,6 +1744,9 @@ __attribute__((noinline)) static void recExecuteBlock(unsigned target_pc)
+ 		:
+ 		: [target_pc]                "d" (target_pc),
+ 		  [psxRegs]                  "d" (&psxRegs),
++#if QPSX_MIPS_PSMEM_REG
++		  [psxM_ptr]                 "d" (&psxM),
++#endif
+ 		  [psxRegs_pc_off]           "i" (off(pc)),
+ 		  [psxRegs_cycle_off]        "i" (off(cycle)),
+ 		  [psxRegs_io_cycle_ctr_off] "i" (off(io_cycle_counter)),
+diff --git a/src/recompiler/mips/regcache.h b/src/recompiler/mips/regcache.h
+index e05c8484ad10d1ef1b1b0ec323e3f14b0b26a5e4..62b1e5b438c5ede205d75fb3ac9a07db69cdcd27 100644
+--- a/src/recompiler/mips/regcache.h
++++ b/src/recompiler/mips/regcache.h
+@@ -1,5 +1,9 @@
+ #define REG_CACHE_START		MIPSREG_S0
++#if QPSX_MIPS_PSMEM_REG
++#define REG_CACHE_END		MIPSREG_S7
++#else
+ #define REG_CACHE_END		(MIPSREG_S7+1)
++#endif
+ 
+ #define REG_LOAD		0
+ #define REG_FIND		1

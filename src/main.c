@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <poll.h>
 #include <signal.h>
 #include <sound/asound.h>
@@ -41,6 +42,8 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_DROP_SAMPLES 1024u
 #define AUDIO_CONVERT_SAMPLES 1024u
 #define AUDIO_OUTPUT_RATE 32000u
+_Static_assert((AUDIO_SUSTAIN_SAMPLES & (AUDIO_SUSTAIN_SAMPLES - 1u)) == 0,
+	"AUDIO_SUSTAIN_SAMPLES must be a power of two");
 /*
  * When a slow core cannot keep the DMA ring at its target delay, the
  * frontend sustains by repeating the most recent audio.  Sustains fire
@@ -54,6 +57,17 @@ extern int cacheflush(void *address, int bytes, int cache);
 #define AUDIO_SUSTAIN_DECAY 160u
 #define AUDIO_SUSTAIN_FLOOR 32u
 #define AUDIO_DECLICK_SAMPLES 64u
+
+/*
+ * Full waveform diagnostics require two extra passes over every sample sent
+ * to the mono DAC.  They are useful while diagnosing crackle, but are not
+ * part of playback and become material when a slow core also needs several
+ * million sustained samples.  Keep the counters in the metric ABI, while
+ * compiling the sample-by-sample analysis out of production builds.
+ */
+#ifndef SF2000_AUDIO_WAVEFORM_METRICS
+#define SF2000_AUDIO_WAVEFORM_METRICS 0
+#endif
 
 /*
  * Rates the HC15xx SND0 APLL/I2S can generate natively (vendor libauddrv
@@ -93,10 +107,15 @@ static unsigned audio_native_rate(unsigned rate)
 #define CORE_RUN_TIMEOUT_SECONDS 10u
 #define AUDIO_CONVERT_CAPACITY (AUDIO_CONVERT_SAMPLES * 8u)
 #define AUDIO_WRITE_CHUNK 1024u
-#define GE_SOURCE_BUFFERS 2u
+#define GE_SOURCE_BUFFERS 3u
 #define GE_SOURCE_MAX_WIDTH 512u
 #define GE_SOURCE_MAX_HEIGHT 320u
 #define GE_SOURCE_STRIDE (GE_SOURCE_MAX_WIDTH * sizeof(uint16_t))
+#define GE_FPS_LEFT_WIDTH 48u
+#define GE_FPS_LEFT_HEIGHT 11u
+#define GE_FPS_RIGHT_WIDTH 36u
+#define GE_FPS_RIGHT_HEIGHT 21u
+#define GE_FPS_OVERLAY_ALIGN 32u
 #define CORE_OPTIONS_MAX 48u
 #define CORE_OPTION_VALUES_MAX 16u
 #define CORE_OPTION_TEXT_MAX 64u
@@ -107,6 +126,21 @@ static unsigned audio_native_rate(unsigned rate)
 #define SAVE_RAM_FLUSH_US 2000000u
 #define PAUSE_WIDTH 320u
 #define PAUSE_HEIGHT 240u
+
+/*
+ * Tail-latency diagnostics are deliberately a separate frontend build. The
+ * normal core already pays one monotonic clock read per frame for pacing; a
+ * diagnostic build adds one start/end measurement and two tiny histogram
+ * updates per frame. Keeping this out of production avoids turning the
+ * measurement itself into an I-cache/D-cache experiment on the 16 KiB target.
+ */
+#ifndef SF2000_FRAME_TAIL_METRICS
+#define SF2000_FRAME_TAIL_METRICS 0
+#endif
+#if SF2000_FRAME_TAIL_METRICS
+#define FRAME_TAIL_BUCKETS 1024u
+#define FRAME_TAIL_BUCKET_US 1000u
+#endif
 
 struct host {
 	int fb_fd;
@@ -120,6 +154,15 @@ struct host {
 	uint32_t ge_source_phys[GE_SOURCE_BUFFERS];
 	uint32_t ge_source_handle[GE_SOURCE_BUFFERS];
 	size_t ge_source_bytes;
+	/* The raw QPSX FPS strips live in the tail of the same contiguous GE
+	 * allocation as the staging surfaces. They are cleaned only when their
+	 * once-per-second contents change, not once per frame. */
+	uint16_t *ge_fps_overlay[2];
+	uint32_t ge_fps_overlay_phys[2];
+	uint32_t ge_fps_overlay_hash[2];
+	unsigned ge_fps_overlay_width[2];
+	unsigned ge_fps_overlay_height[2];
+	int ge_fps_overlay_valid[2];
 	unsigned ge_width, ge_height, ge_buffers, ge_next, ge_pending;
 	int pcm_fd;
 	unsigned audio_channels;
@@ -137,12 +180,43 @@ struct host {
 	struct sf2000_input input;
 };
 
+/* Optional GE-composited diagnostic strips supplied by the QPSX core.  They
+ * remain valid for the duration of sf2000_video_vram_fps(), so no copy or
+ * full-frame CPU conversion is needed. */
+struct ge_overlay_request {
+	const void *data;
+	uint32_t source_phys;
+	unsigned width;
+	unsigned height;
+	size_t pitch;
+	unsigned x;
+	unsigned y;
+};
+
+static struct ge_overlay_request raw_overlays[2];
+static unsigned raw_overlay_count;
+static unsigned ge_fps_overlay_logged;
+static unsigned ge_fps_overlay_source_logged;
+
 static struct host host = { .fb_fd = -1, .pcm_fd = -1,
 	.format = RETRO_PIXEL_FORMAT_0RGB1555, .fps = 60.0 };
 static volatile sig_atomic_t stopping;
 static int first_frame;
 static unsigned video_callbacks;
+static unsigned run_frames;
+/* Monotonic retro_run sequence used to key diagnostic windows.  The legacy
+ * run_frames field is reset with the ordinary metric interval, so it cannot
+ * identify which frames a rolling tail sample actually covered. */
+static uint64_t retro_run_total;
 static struct timespec metrics_start;
+/*
+ * uClibc's MIPS getrusage wrapper is not ABI-compatible with the kernel on
+ * the SF2000 image: the timeval fields can be read with the wrong word
+ * width, producing wrapped multi-exabyte CPU times.  Keep the wall-clock
+ * interval above, but measure this process with the kernel's CPU clock.
+ */
+static struct timespec metrics_cpu_start;
+static int metrics_cpu_clock_valid;
 static int metrics_fd = -1;
 static struct sf2000_pacer pacer;
 static unsigned interval_max_run_us;
@@ -152,11 +226,167 @@ static unsigned interval_buffered_frames;
 static unsigned previous_xruns;
 static unsigned profile_frame_counter;
 static unsigned uncapped_mode;
+static unsigned benchmark_frame_limit;
+static unsigned benchmark_frame_count;
 static unsigned audio_suppressed;
 static unsigned audio_sustain_factor = 256u;
 static int audio_last_output;
 static unsigned audio_sustaining;
+#if SF2000_AUDIO_WAVEFORM_METRICS
 static int audio_last_sample;
+#endif
+
+#if SF2000_FRAME_TAIL_METRICS
+/* A 1 ms bucket gives useful p99.9 resolution while keeping the two
+ * diagnostic histograms at 4 KiB total (uint16_t counts are sufficient for a
+ * 300-retro_run reporting interval). Frames longer than one second saturate
+ * in the final bucket instead of corrupting the percentile calculation. */
+static uint16_t frame_tail_hist[FRAME_TAIL_BUCKETS];
+static uint16_t core_tail_hist[FRAME_TAIL_BUCKETS];
+static uint64_t frame_tail_sum_us;
+static uint64_t core_tail_sum_us;
+static unsigned frame_tail_max_us;
+static unsigned core_tail_max_us;
+static unsigned frame_tail_samples;
+static unsigned core_tail_samples;
+static unsigned frame_tail_runs;
+
+static void frame_tail_hist_reset(void)
+{
+	memset(frame_tail_hist, 0, sizeof(frame_tail_hist));
+	memset(core_tail_hist, 0, sizeof(core_tail_hist));
+	frame_tail_sum_us = 0;
+	core_tail_sum_us = 0;
+	frame_tail_max_us = 0;
+	core_tail_max_us = 0;
+	frame_tail_samples = 0;
+	core_tail_samples = 0;
+}
+
+static void frame_tail_hist_add(uint16_t *hist, unsigned *samples,
+	uint64_t *sum_us, uint64_t elapsed_us)
+{
+	unsigned bucket = elapsed_us >=
+		(uint64_t)FRAME_TAIL_BUCKETS * FRAME_TAIL_BUCKET_US ?
+		FRAME_TAIL_BUCKETS - 1u :
+		(unsigned)(elapsed_us / FRAME_TAIL_BUCKET_US);
+
+	if (hist[bucket] != UINT16_MAX)
+		hist[bucket]++;
+	if (*samples != UINT_MAX)
+		(*samples)++;
+	if (*sum_us <= UINT64_MAX - elapsed_us)
+		*sum_us += elapsed_us;
+}
+
+static void frame_tail_max_update(unsigned *max_us, uint64_t elapsed_us)
+{
+	if (elapsed_us > *max_us)
+		*max_us = elapsed_us > UINT_MAX ? UINT_MAX : (unsigned)elapsed_us;
+}
+
+static unsigned frame_tail_percentile(const uint16_t *hist,
+	unsigned samples, unsigned permille)
+{
+	uint64_t target;
+	unsigned i;
+	unsigned seen = 0;
+
+	if (!samples)
+		return 0;
+	target = ((uint64_t)samples * permille + 999u) / 1000u;
+	if (!target)
+		target = 1;
+	for (i = 0; i < FRAME_TAIL_BUCKETS; i++) {
+		seen += hist[i];
+		if (seen >= target)
+			return i * FRAME_TAIL_BUCKET_US + FRAME_TAIL_BUCKET_US - 1u;
+	}
+	return FRAME_TAIL_BUCKETS * FRAME_TAIL_BUCKET_US - 1u;
+}
+
+static void frame_tail_emit(void)
+{
+	uint64_t window_start;
+	uint64_t end_frame;
+	unsigned frame_tail_p95;
+	unsigned frame_tail_p98;
+	unsigned frame_tail_p99;
+	unsigned frame_tail_p999;
+	unsigned core_tail_p95;
+	unsigned core_tail_p98;
+	unsigned core_tail_p99;
+	unsigned core_tail_p999;
+	unsigned frame_tail_avg;
+	unsigned core_tail_avg;
+	unsigned frame_tail_p999_valid;
+	unsigned core_tail_p999_valid;
+	char details[512];
+
+	if (!frame_tail_runs)
+		return;
+	end_frame = retro_run_total;
+	window_start = end_frame >= frame_tail_samples ?
+		end_frame - frame_tail_samples + 1u : 0u;
+	frame_tail_p95 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 950u);
+	frame_tail_p98 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 980u);
+	frame_tail_p99 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 990u);
+	frame_tail_p999 = frame_tail_percentile(frame_tail_hist,
+		frame_tail_samples, 999u);
+	core_tail_p95 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 950u);
+	core_tail_p98 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 980u);
+	core_tail_p99 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 990u);
+	core_tail_p999 = frame_tail_percentile(core_tail_hist,
+		core_tail_samples, 999u);
+	/* At the fixed 300-run window p999 is the maximum order statistic, not
+	 * a statistically meaningful 99.9th percentile; retain it but flag it. */
+	frame_tail_p999_valid = frame_tail_samples >= 1000u;
+	core_tail_p999_valid = core_tail_samples >= 1000u;
+	frame_tail_avg = frame_tail_samples ?
+		(unsigned)(frame_tail_sum_us / frame_tail_samples) : 0u;
+	core_tail_avg = core_tail_samples ?
+		(unsigned)(core_tail_sum_us / core_tail_samples) : 0u;
+	snprintf(details, sizeof(details),
+		"frame-tail window_start=%" PRIu64 " end_frame=%" PRIu64 " window_samples=%u run_frames=%u video_frames=%u samples=%u avg_us=%u max_us=%u p95_us=%u p98_us=%u p99_us=%u p999_us=%u p999_valid=%u p999_min_samples=1000 core_samples=%u core_avg_us=%u core_max_us=%u core_p95_us=%u core_p98_us=%u core_p99_us=%u core_p999_us=%u core_p999_valid=%u core_p999_min_samples=1000\n",
+		window_start, end_frame, frame_tail_samples, frame_tail_runs,
+		video_callbacks, frame_tail_samples,
+		frame_tail_avg, frame_tail_max_us, frame_tail_p95, frame_tail_p98,
+		frame_tail_p99, frame_tail_p999,
+		frame_tail_p999_valid, core_tail_samples, core_tail_avg,
+		core_tail_max_us, core_tail_p95, core_tail_p98, core_tail_p99,
+		core_tail_p999, core_tail_p999_valid);
+	if (metrics_fd >= 0 && write(metrics_fd, details,
+		strlen(details)) < 0) {
+		/* best-effort tail metrics spool */
+	}
+	frame_tail_hist_reset();
+	frame_tail_runs = 0;
+}
+#endif
+
+static uint64_t timespec_delta_us(const struct timespec *now,
+	const struct timespec *start)
+{
+	uint64_t current;
+	uint64_t previous;
+
+	if (now->tv_sec < start->tv_sec ||
+		(now->tv_sec == start->tv_sec && now->tv_nsec < start->tv_nsec))
+		return 0;
+	current = (uint64_t)now->tv_sec * 1000000u +
+		(uint64_t)now->tv_nsec / 1000u;
+	previous = (uint64_t)start->tv_sec * 1000000u +
+		(uint64_t)start->tv_nsec / 1000u;
+
+	return current >= previous ? current - previous : 0;
+}
+
 static unsigned loading_game;
 static int core_watchdog_kmsg_fd = -1;
 static volatile sig_atomic_t core_watchdog_stage;
@@ -172,6 +402,7 @@ static unsigned pause_frame_ready;
 static unsigned pause_frame_writes;
 static unsigned pause_ge_disabled;
 static unsigned pause_ge_presented;
+static unsigned ge_raw_logged;
 /* One-shot guard so a failed GE present resets and retries the engine at
  * most once before the permanent CPU fallback. */
 static unsigned ge_reset_retried;
@@ -246,6 +477,7 @@ static void start_metrics_logging(void)
 static void reset_metric_window(void)
 {
 	video_callbacks = 0;
+	run_frames = 0;
 	sf2000_pacer_reset_interval(&pacer);
 	interval_max_run_us = 0;
 	interval_sampled_present_us = 0;
@@ -253,7 +485,186 @@ static void reset_metric_window(void)
 	interval_buffered_frames = 0;
 	previous_xruns = audio_metrics.xruns;
 	sf2000_input_reset_interval(&host.input);
+#if SF2000_FRAME_TAIL_METRICS
+	frame_tail_hist_reset();
+	frame_tail_runs = 0;
+#endif
 	(void)clock_gettime(CLOCK_MONOTONIC, &metrics_start);
+	metrics_cpu_clock_valid =
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
+}
+
+/*
+ * A core is a statically linked executable on the NOMMU image, so opening a
+ * different core starts a fresh process but does not guarantee that every
+ * physically indexed cache line left by the previous process has been
+ * invalidated.  BCACHE covers both the I- and D-cache; flush every private
+ * executable/data mapping once at the process boundary.  Shared device
+ * mappings (framebuffer/GE) are deliberately left
+ * alone: they are maintained by their own cache-clean calls and passing a
+ * device VMA to cacheflush is not portable across the vendor kernels.
+ */
+static void clear_core_open_caches(void)
+{
+#ifdef __mips__
+	FILE *maps;
+	char line[320];
+	unsigned ranges = 0;
+	unsigned errors = 0;
+	uint64_t bytes = 0;
+
+	maps = fopen("/proc/self/maps", "r");
+	if (!maps) {
+		char details[128];
+
+		snprintf(details, sizeof(details),
+			"core_cache_clear=maps-open-failed errno=%d\n", errno);
+		log_kmsg(details);
+		return;
+	}
+	while (fgets(line, sizeof(line), maps)) {
+		unsigned long start;
+		unsigned long end;
+		char perms[5];
+		char pathname[192];
+		int fields;
+		unsigned long cursor;
+
+		pathname[0] = '\0';
+		fields = sscanf(line, "%lx-%lx %4s %*s %*s %*s %191[^\n]",
+			&start, &end, perms, pathname);
+		if (fields < 3 || end <= start || perms[3] != 'p')
+			continue;
+		/* cacheflush takes an int byte count on the SF2000 ABI. */
+		cursor = start;
+		while (cursor < end) {
+			unsigned long chunk = end - cursor;
+
+			if (chunk > (unsigned long)INT_MAX)
+				chunk = (unsigned long)INT_MAX;
+			if (cacheflush((void *)(uintptr_t)cursor, (int)chunk,
+					BCACHE) < 0)
+				errors++;
+			ranges++;
+			bytes += chunk;
+			cursor += chunk;
+		}
+	}
+	fclose(maps);
+	{
+		char details[160];
+
+		snprintf(details, sizeof(details),
+			"core_cache_clear=whole-id-private-maps ranges=%u bytes=%" PRIu64
+			" errors=%u\n", ranges, bytes, errors);
+		log_kmsg(details);
+	}
+#else
+	log_kmsg("core_cache_clear=host-none\n");
+#endif
+}
+
+static long read_sysfs_long(const char *path)
+{
+	char text[40];
+	char *end;
+	long value;
+	int fd;
+	ssize_t length;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	length = read(fd, text, sizeof(text) - 1u);
+	close(fd);
+	if (length <= 0)
+		return 0;
+	text[length] = '\0';
+	errno = 0;
+	value = strtol(text, &end, 10);
+	if (end == text || errno == ERANGE)
+		return 0;
+	return value;
+}
+
+static long current_cpu_khz(void)
+{
+	long value = read_sysfs_long(
+		"/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq");
+
+	if (value <= 0)
+		value = read_sysfs_long(
+			"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq");
+	return value;
+}
+
+static long current_temperature_mc(void)
+{
+	return read_sysfs_long("/sys/class/thermal/thermal_zone0/temp");
+}
+
+static uint64_t fnv1a_file(const char *path, uint64_t *bytes, int *ok)
+{
+	unsigned char buffer[4096];
+	uint64_t hash = UINT64_C(1469598103934665603);
+	uint64_t total = 0;
+	int fd;
+
+	*ok = 0;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	for (;;) {
+		ssize_t length = read(fd, buffer, sizeof(buffer));
+		size_t i;
+
+		if (length == 0)
+			break;
+		if (length < 0) {
+			if (errno == EINTR)
+				continue;
+			close(fd);
+			return 0;
+		}
+		for (i = 0; i < (size_t)length; i++) {
+			hash ^= buffer[i];
+			hash *= UINT64_C(1099511628211);
+		}
+		total += (uint64_t)length;
+	}
+	close(fd);
+	*bytes = total;
+	*ok = 1;
+	return hash;
+}
+
+static void log_frontend_identity(const char *argv0)
+{
+	char resolved[PATH_MAX];
+	const char *path = argv0;
+	ssize_t length;
+	uint64_t bytes = 0;
+	uint64_t hash;
+	int hash_ok;
+	struct stat status;
+
+	length = readlink("/proc/self/exe", resolved, sizeof(resolved) - 1u);
+	if (length > 0) {
+		resolved[length] = '\0';
+		path = resolved;
+	}
+	hash = fnv1a_file(path, &bytes, &hash_ok);
+	if (stat(path, &status) < 0)
+		memset(&status, 0, sizeof(status));
+	{
+		char details[320];
+
+		snprintf(details, sizeof(details),
+			"frontend identity path=%.*s bytes=%" PRIu64
+			" mtime=%ld fnv1a=%016" PRIx64 " hash_ok=%d\n",
+			180, path, bytes, (long)status.st_mtime, hash, hash_ok);
+		log_kmsg(details);
+	}
 }
 
 void unifrog_core_load_progress(const char *stage, unsigned current,
@@ -616,6 +1027,71 @@ static uint32_t frame_hash(const void *data, unsigned height, size_t pitch)
 	return hash ^ (uint32_t)length;
 }
 
+/* The diagnostic strips are tiny, but cache-cleaning their original core
+ * mappings through an ioctl on every frame is not.  Hash only the visible
+ * pixels (not any caller padding), then refresh the persistent GE-managed
+ * copy when the once-per-second counter changes. */
+static uint32_t ge_overlay_data_hash(const void *data, unsigned width,
+	unsigned height, size_t pitch)
+{
+	const uint8_t *row = data;
+	uint32_t hash = 2166136261u;
+	unsigned y;
+	unsigned x;
+	unsigned bytes = width * sizeof(uint16_t);
+
+	for (y = 0; y < height; y++) {
+		for (x = 0; x < bytes; x++) {
+			hash ^= row[x];
+			hash *= 16777619u;
+		}
+		row += pitch;
+	}
+	return hash ^ (width * 65537u + height);
+}
+
+static int ge_prepare_fps_overlay(unsigned slot, const void *data,
+	unsigned width, unsigned height, size_t pitch,
+	struct ge_overlay_request *request)
+{
+	uint32_t hash;
+	unsigned y;
+	unsigned row_bytes;
+
+	if (slot >= 2u || !data || !width || !height ||
+		pitch < (size_t)width * sizeof(uint16_t) ||
+		!host.ge_fps_overlay[slot] ||
+		width > (slot == 0u ? GE_FPS_LEFT_WIDTH : GE_FPS_RIGHT_WIDTH) ||
+		height > (slot == 0u ? GE_FPS_LEFT_HEIGHT : GE_FPS_RIGHT_HEIGHT))
+		return 0;
+	row_bytes = width * sizeof(uint16_t);
+	hash = ge_overlay_data_hash(data, width, height, pitch);
+	if (!host.ge_fps_overlay_valid[slot] ||
+		host.ge_fps_overlay_hash[slot] != hash ||
+		host.ge_fps_overlay_width[slot] != width ||
+		host.ge_fps_overlay_height[slot] != height) {
+		uint8_t *destination = (uint8_t *)host.ge_fps_overlay[slot];
+		const uint8_t *source = data;
+
+		for (y = 0; y < height; y++) {
+			memcpy(destination, source, row_bytes);
+			destination += row_bytes;
+			source += pitch;
+		}
+		if (hcge_linux_cache_clean(host.ge,
+			(void *)host.ge_fps_overlay[slot], row_bytes * height) < 0)
+			return -1;
+		host.ge_fps_overlay_hash[slot] = hash;
+		host.ge_fps_overlay_width[slot] = width;
+		host.ge_fps_overlay_height[slot] = height;
+		host.ge_fps_overlay_valid[slot] = 1;
+	}
+	*request = (struct ge_overlay_request){
+		host.ge_fps_overlay[slot], host.ge_fps_overlay_phys[slot], width,
+		height, row_bytes, 0u, 0u };
+	return 1;
+}
+
 static void cpu_present(const void *data, unsigned width, unsigned height,
 	size_t pitch, unsigned out_w, unsigned out_h, unsigned left, unsigned top)
 {
@@ -654,6 +1130,65 @@ static void cpu_present(const void *data, unsigned width, unsigned height,
 #endif
 }
 
+/* Queue one small opaque RGB565 diagnostic strip after the raw BGR555
+ * stretch.  A missing/ordinary userspace mapping is intentionally a no-op:
+ * the game frame must remain on the GE path even when the optional overlay
+ * cannot be addressed by the NOMMU physical window. */
+static void ge_submit_overlay(const struct ge_overlay_request *overlay)
+{
+	hcge_state *state;
+	HCGERectangle source;
+	uint32_t source_phys;
+	size_t source_bytes;
+
+	if (!overlay || !overlay->data || !host.ge || !host.fb_phys ||
+		!overlay->width || !overlay->height ||
+		overlay->width > host.fb_width || overlay->height > host.fb_height ||
+		overlay->x > host.fb_width - overlay->width ||
+		overlay->y > host.fb_height - overlay->height ||
+		overlay->pitch < (size_t)overlay->width * sizeof(uint16_t))
+		return;
+	source_bytes = overlay->pitch * overlay->height;
+	if (source_bytes / overlay->height != overlay->pitch ||
+		source_bytes > UINT_MAX)
+		return;
+	source_phys = overlay->source_phys;
+	if (!source_phys) {
+		source_phys = hcge_linux_cached_phys(overlay->data);
+		if (!source_phys || hcge_linux_cache_clean(host.ge,
+				(void *)overlay->data, (unsigned)source_bytes) < 0)
+			return;
+	} else if (!ge_fps_overlay_source_logged) {
+		log_kmsg("GE FPS overlay source=managed-cache");
+		ge_fps_overlay_source_logged = 1;
+	}
+	state = &host.ge->state;
+	memset(state, 0, sizeof(*state));
+	state->render_options = HCGE_DSRO_NONE;
+	state->drawingflags = HCGE_DSDRAW_NOFX;
+	state->blittingflags = HCGE_DSBLIT_NOFX;
+	state->destination.config.format = HCGE_DSPF_RGB16;
+	state->destination.config.size.w = (int)host.fb_width;
+	state->destination.config.size.h = (int)host.fb_height;
+	state->source.config.format = HCGE_DSPF_RGB16;
+	state->source.config.size.w = (int)overlay->width;
+	state->source.config.size.h = (int)overlay->height;
+	state->dst.phys = host.fb_phys;
+	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
+	state->src.phys = source_phys;
+	state->src.pitch = (uint32_t)overlay->pitch;
+	state->accel = HCGE_DFXL_BLIT;
+	hcge_set_state(host.ge, state, state->accel);
+	source = (HCGERectangle){ 0, 0, (int)overlay->width,
+		(int)overlay->height };
+	if (!hcge_blit(host.ge, &source, (int)overlay->x, (int)overlay->y))
+		return;
+	if (!ge_fps_overlay_logged) {
+		log_kmsg("GE FPS overlay strips active\n");
+		ge_fps_overlay_logged = 1;
+	}
+}
+
 static int ge_present(const void *data, unsigned width, unsigned height,
 	size_t pitch, unsigned out_w, unsigned out_h, unsigned left, unsigned top)
 {
@@ -667,6 +1202,10 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	int direct;
 	unsigned source_index;
 	unsigned y;
+	int direct_raw;
+	int raw_batch_active = 0;
+	hcge_batch raw_batch;
+	uint32_t raw_batch_nodes[64];
 
 	if (!host.ge || !host.ge_buffers || width > GE_SOURCE_MAX_WIDTH ||
 			height > GE_SOURCE_MAX_HEIGHT ||
@@ -689,12 +1228,15 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	if (((host.format == RETRO_PIXEL_FORMAT_RGB565 &&
 			pitch == (size_t)width * sizeof(uint16_t)) ||
 			(host.format == RETRO_PIXEL_FORMAT_XRGB8888 &&
-			pitch == (size_t)width * sizeof(uint32_t))) &&
+			pitch == (size_t)width * sizeof(uint32_t)) ||
+			(host.format == RETRO_PIXEL_FORMAT_0RGB1555 &&
+			pitch >= (size_t)width * sizeof(uint16_t))) &&
 			source_bytes <= UINT_MAX &&
 			(uintptr_t)data + source_bytes >= (uintptr_t)data &&
 			(uintptr_t)data + source_bytes <= 0xa0000000u)
-		direct_phys = hcge_linux_cached_phys(data);
+	direct_phys = hcge_linux_cached_phys(data);
 	direct = direct_phys != 0;
+	direct_raw = direct && host.format == RETRO_PIXEL_FORMAT_0RGB1555;
 	/*
 	 * Keep one complete source surface available while the GE consumes the
 	 * other.  The barrier before reuse is the ownership boundary: the CPU
@@ -710,7 +1252,31 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	source_buffer = host.ge_source[source_index];
 	if (!first_frame)
 		log_kmsg("GE first present source prepare begin\n");
-	if (data == (const void *)source_buffer &&
+	if (direct_raw) {
+		/*
+		 * QPSX's optional raw-VRAM presenter hands us a display window in
+		 * native PS1 BGR555 (red in bits 0..4).  KSEG0 VRAM is physically
+		 * linear on the NOMMU target, so the GE can convert it directly; no
+		 * managed staging buffer
+		 * or CPU RGB conversion is needed.  The final fence below is required
+		 * because the emulator reuses the same VRAM on its next frame.
+		 */
+		if (source_bytes > UINT_MAX ||
+			hcge_linux_cache_clean(host.ge, (void *)data,
+				(unsigned int)source_bytes) < 0)
+			return -1;
+		if (!ge_raw_logged) {
+			char details[160];
+
+			snprintf(details, sizeof(details),
+				"GE raw VRAM path active phys=%08x size=%ux%u pitch=%lu\n",
+				direct_phys, width, height, (unsigned long)pitch);
+			log_kmsg(details);
+			ge_raw_logged = 1;
+		}
+		source_phys = direct_phys;
+		interval_ge_stage_frames++;
+	} else if (data == (const void *)source_buffer &&
 			host.format == RETRO_PIXEL_FORMAT_RGB565) {
 		if (hcge_linux_cache_clean(host.ge, source_buffer,
 				(unsigned int)(width * height * sizeof(uint16_t))) < 0)
@@ -736,7 +1302,8 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 		state->destination.config.size.h = (int)height;
 		state->source.config.format =
 			host.format == RETRO_PIXEL_FORMAT_XRGB8888 ?
-			HCGE_DSPF_RGB32 : HCGE_DSPF_RGB16;
+			HCGE_DSPF_RGB32 : host.format == RETRO_PIXEL_FORMAT_0RGB1555 ?
+			HCGE_DSPF_ARGB1555 : HCGE_DSPF_RGB16;
 		state->source.config.size.w = (int)width;
 		state->source.config.size.h = (int)height;
 		state->dst.phys = host.ge_source_phys[source_index];
@@ -917,26 +1484,67 @@ static int ge_present(const void *data, unsigned width, unsigned height,
 	state->destination.config.format = HCGE_DSPF_RGB16;
 	state->destination.config.size.w = (int)host.fb_width;
 	state->destination.config.size.h = (int)host.fb_height;
-	state->source.config.format = HCGE_DSPF_RGB16;
+	state->source.config.format = direct_raw ? HCGE_DSPF_BGR555 :
+		HCGE_DSPF_RGB16;
 	state->source.config.size.w = (int)width;
 	state->source.config.size.h = (int)height;
 	state->dst.phys = host.fb_phys;
 	state->dst.pitch = host.fb_stride * sizeof(uint16_t);
 	state->src.phys = source_phys;
-	state->src.pitch = width * sizeof(uint16_t);
-	state->accel = HCGE_DFXL_STRETCHBLIT;
-	hcge_set_state(host.ge, state, state->accel);
+	state->src.pitch = direct_raw ? pitch : width * sizeof(uint16_t);
+	/*
+	 * The panel has one physical scanout buffer.  Submit the raw BGR555
+	 * stretch and its optional FPS strips as one GE command batch, so the
+	 * kernel sees one queue doorbell instead of exposing the tiny overlay
+	 * blits as a separate update.  This also removes two ioctl round trips
+	 * from every raw frame while keeping all pixel work on the GE.
+	 */
+	if (direct_raw && raw_overlay_count &&
+		hcge_batch_begin(host.ge, &raw_batch, raw_batch_nodes,
+			(unsigned)(sizeof(raw_batch_nodes) / sizeof(raw_batch_nodes[0]))) == 0)
+		raw_batch_active = 1;
 	source = (HCGERectangle){ 0, 0, (int)width, (int)height };
-	destination = (HCGERectangle){ (int)left, (int)top,
-		(int)out_w, (int)out_h };
-	if (!hcge_stretch_blit(host.ge, &source, &destination))
+	if (width == out_w && height == out_h) {
+		state->accel = HCGE_DFXL_BLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		if (!hcge_blit(host.ge, &source, (int)left, (int)top)) {
+			if (raw_batch_active)
+				(void)hcge_batch_end(&raw_batch, 0);
+			return -1;
+		}
+	} else {
+		state->accel = HCGE_DFXL_STRETCHBLIT;
+		hcge_set_state(host.ge, state, state->accel);
+		destination = (HCGERectangle){ (int)left, (int)top,
+			(int)out_w, (int)out_h };
+		if (!hcge_stretch_blit(host.ge, &source, &destination)) {
+			if (raw_batch_active)
+				(void)hcge_batch_end(&raw_batch, 0);
+			return -1;
+		}
+	}
+	if (direct_raw && raw_overlay_count) {
+		unsigned overlay_index;
+
+		for (overlay_index = 0; overlay_index < raw_overlay_count;
+			overlay_index++)
+			ge_submit_overlay(&raw_overlays[overlay_index]);
+	}
+	if (raw_batch_active && hcge_batch_end(&raw_batch, 0) < 0)
 		return -1;
 	if (!first_frame)
 		log_kmsg("GE first present submitted\n");
 	host.ge_pending++;
-	host.ge_next = (host.ge_next + 1u) % host.ge_buffers;
+	if (direct_raw) {
+		/* The raw source is the emulator's live VRAM, not a queued snapshot. */
+		if (hcge_engine_sync(host.ge) < 0)
+			return -1;
+		host.ge_pending = 0;
+	} else {
+		host.ge_next = (host.ge_next + 1u) % host.ge_buffers;
+	}
 	/* Make the first frame observable before publishing READY_MARKER. */
-	if (!first_frame) {
+	if (!first_frame && !direct_raw) {
 		if (hcge_engine_sync(host.ge) < 0)
 			return -1;
 		host.ge_pending = 0;
@@ -959,8 +1567,11 @@ static void ge_disable_cpu_fallback(void)
 		return;
 	(void)hcge_engine_sync(host.ge);
 	for (i = 0; i < host.ge_buffers; i++) {
-		(void)hcge_linux_free_buffer(host.ge, host.ge_source_handle[i]);
+		if (host.ge_source_handle[i])
+			(void)hcge_linux_free_buffer(host.ge,
+				host.ge_source_handle[i]);
 		host.ge_source[i] = NULL;
+		host.ge_source_handle[i] = 0;
 	}
 	hcge_close_context(host.ge);
 	host.ge = NULL;
@@ -1008,7 +1619,7 @@ static void video(const void *data, unsigned width, unsigned height,
 	out_h = host.fb_height;
 	left = 0;
 	top = 0;
-	profile_present = first_frame && (video_callbacks % 300u) == 0;
+	profile_present = first_frame && ((run_frames + 1u) % 300u) == 0;
 	if (profile_present)
 		(void)clock_gettime(CLOCK_MONOTONIC, &present_start);
 	if (ge_present(data, width, height, pitch, out_w, out_h, left, top) < 0) {
@@ -1086,15 +1697,23 @@ static void video(const void *data, unsigned width, unsigned height,
 #endif
 		first_frame = 1;
 		video_callbacks = 0;
+		run_frames = 0;
 		reset_metric_window();
 	} else if ((video_callbacks % 300u) == 0) {
 		struct timespec now;
+		struct timespec cpu_now;
 		unsigned long elapsed_ms;
 		unsigned long fps_milli;
+		uint64_t cpu_user_us = 0;
+		uint64_t cpu_sys_us = 0;
+		uint64_t cpu_total_us;
+		uint64_t cpu_pct_milli = 0;
 		/* Must fit the whole metric line including the trailing newline:
 		 * a truncated write swallows the '\n', gluing the next record
 		 * (e.g. a mode event) onto this line so sf2000-logd drops it. */
-		char details[768];
+		char details[1280];
+		long cpu_khz = current_cpu_khz();
+		long temperature_mc = current_temperature_mc();
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (unsigned long)(now.tv_sec - metrics_start.tv_sec) *
@@ -1108,15 +1727,25 @@ static void video(const void *data, unsigned width, unsigned height,
 		fps_milli = elapsed_ms ?
 			(unsigned long)(((uint64_t)video_callbacks * 1000000ull) /
 				elapsed_ms) : 0;
+		if (metrics_cpu_clock_valid &&
+			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_now) == 0)
+			cpu_user_us = timespec_delta_us(&cpu_now, &metrics_cpu_start);
+		/* CLOCK_PROCESS_CPUTIME_ID is a process-total clock on Linux. Keep
+		 * the historical cpu_user_us field for compatibility, but also emit
+		 * an unambiguous process-total field for physical A/B measurements. */
+		cpu_total_us = cpu_user_us + cpu_sys_us;
+		if (elapsed_ms)
+			cpu_pct_milli = (cpu_total_us * 100u) / elapsed_ms;
 		snprintf(details, sizeof(details),
-			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
+			"audio metric generated=%u submitted=%u dropped=%u eagain=%u xrun=%u interval_xrun=%u peak=%u queued=%u delay=%ld resample_hz=%u suppressed=%u frames=%u elapsed_ms=%lu fps_milli=%lu cpu_metric=process-clock cpu_user_us=%" PRIu64 " cpu_sys_us=%" PRIu64 " cpu_process_us=%" PRIu64 " cpu_pct_milli=%" PRIu64 " pacing_resets=%u late_frames=%u max_late_us=%u sampled_max_run_us=%u sampled_present_us=%u ge_stage_frames=%u buffered_frames=%u input_polls=%u input_events=%u input_max_latency_us=%u			mode=%s presenter=%s gba_pc=%08x sustained=%u sustain_events=%u clicks=%u nearclip=%u gen_hf_ratio=%u enq_hf_ratio=%u enq_clicks=%u\n",
 			audio_metrics.generated, audio_metrics.submitted,
 			audio_metrics.dropped, audio_metrics.eagain,
 			audio_metrics.xruns, audio_metrics.xruns - previous_xruns,
 			audio_metrics.peak,
 			host.audio_count, (long)host.audio_delay,
 			host.audio_resample_rate, audio_suppressed, video_callbacks,
-			elapsed_ms, fps_milli,
+			elapsed_ms, fps_milli, cpu_user_us, cpu_sys_us, cpu_total_us,
+			cpu_pct_milli,
 			pacer.resets, pacer.interval_late_frames,
 			pacer.interval_max_late_us,
 			interval_max_run_us, interval_sampled_present_us,
@@ -1135,6 +1764,18 @@ static void video(const void *data, unsigned width, unsigned height,
 				(audio_metrics.enq_hf * 1000u) /
 					audio_metrics.enq_l1 : 0u,
 			audio_metrics.enq_clicks);
+		/* Keep the established metric ABI stable and append hardware state
+		 * without making the hot per-frame path perform any sysfs I/O. */
+		{
+			size_t details_length = strlen(details);
+
+			if (details_length && details[details_length - 1u] == '\n') {
+				snprintf(details + details_length - 1u,
+					sizeof(details) - details_length + 1u,
+					" cpu_khz=%ld temp_mc=%ld\n", cpu_khz,
+					temperature_mc);
+			}
+		}
 		if (metrics_fd >= 0 &&
 		    write(metrics_fd, details, strlen(details)) < 0) {
 			/* best-effort metrics spool */
@@ -1158,7 +1799,66 @@ static void video(const void *data, unsigned width, unsigned height,
 		interval_ge_stage_frames = 0;
 		interval_buffered_frames = 0;
 		sf2000_input_reset_interval(&host.input);
+#if SF2000_FRAME_TAIL_METRICS
+		frame_tail_hist_reset();
+		frame_tail_runs = 0;
+#endif
+		metrics_cpu_clock_valid =
+			clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &metrics_cpu_start) == 0;
 	}
+}
+
+/*
+ * Optional QPSX zero-copy path.  The ordinary libretro pixel-format
+ * negotiation remains RGB565 for every core (and for QPSX menus); this narrow
+ * entry point labels only a native PS1 VRAM callback as BGR555 so the GE
+ * presenter can submit it without a CPU conversion pass.
+ */
+void sf2000_video_vram(const void *data, unsigned width, unsigned height,
+	size_t pitch)
+{
+	enum retro_pixel_format previous = host.format;
+
+	host.format = RETRO_PIXEL_FORMAT_0RGB1555;
+	video(data, width, height, pitch);
+	host.format = previous;
+}
+
+void sf2000_video_vram_fps(const void *data, unsigned width, unsigned height,
+	size_t pitch, const void *left, unsigned left_width,
+	unsigned left_height, size_t left_pitch, const void *right,
+	unsigned right_width, unsigned right_height, size_t right_pitch)
+{
+	enum retro_pixel_format previous = host.format;
+
+	raw_overlay_count = 0;
+	if (left && left_width && left_height) {
+		struct ge_overlay_request request;
+
+		if (ge_prepare_fps_overlay(0u, left, left_width, left_height,
+			left_pitch, &request) <= 0)
+			request = (struct ge_overlay_request){ left, 0u, left_width,
+				left_height, left_pitch, 2u, 2u };
+		request.x = 2u;
+		request.y = 2u;
+		raw_overlays[raw_overlay_count++] = request;
+	}
+	if (right && right_width && right_height) {
+		struct ge_overlay_request request;
+
+		if (ge_prepare_fps_overlay(1u, right, right_width, right_height,
+			right_pitch, &request) <= 0)
+			request = (struct ge_overlay_request){ right, 0u, right_width,
+				right_height, right_pitch, 0u, 2u };
+		request.x = host.fb_width > right_width + 2u ?
+			host.fb_width - right_width - 2u : 0u;
+		request.y = 2u;
+		raw_overlays[raw_overlay_count++] = request;
+	}
+	host.format = RETRO_PIXEL_FORMAT_0RGB1555;
+	video(data, width, height, pitch);
+	host.format = previous;
+	raw_overlay_count = 0;
 }
 
 static struct snd_mask *pcm_param_mask(struct snd_pcm_hw_params *parameters,
@@ -1447,7 +2147,7 @@ static void audio_update_feedback(void)
 
 static void audio_tail_push(const int16_t *samples, unsigned count)
 {
-	unsigned i;
+	unsigned first;
 
 	if (!count)
 		return;
@@ -1460,13 +2160,20 @@ static void audio_tail_push(const int16_t *samples, unsigned count)
 		host.audio_tail_play = 0;
 		return;
 	}
-	for (i = 0; i < count; ++i) {
-		host.audio_tail[host.audio_tail_write] = samples[i];
-		host.audio_tail_write = (host.audio_tail_write + 1u) %
-			AUDIO_SUSTAIN_SAMPLES;
-		if (host.audio_tail_count < AUDIO_SUSTAIN_SAMPLES)
-			host.audio_tail_count++;
-	}
+	first = AUDIO_SUSTAIN_SAMPLES - host.audio_tail_write;
+	if (first > count)
+		first = count;
+	memcpy(host.audio_tail + host.audio_tail_write, samples,
+		first * sizeof(*samples));
+	if (first < count)
+		memcpy(host.audio_tail, samples + first,
+			(count - first) * sizeof(*samples));
+	host.audio_tail_write = (host.audio_tail_write + count) &
+		(AUDIO_SUSTAIN_SAMPLES - 1u);
+	if (count > AUDIO_SUSTAIN_SAMPLES - host.audio_tail_count)
+		host.audio_tail_count = AUDIO_SUSTAIN_SAMPLES;
+	else
+		host.audio_tail_count += count;
 	host.audio_tail_play = 0;
 }
 
@@ -1477,7 +2184,6 @@ static void audio_queue(const int16_t *samples, unsigned count,
 		sizeof(host.audio_buffer[0]);
 	unsigned tail;
 	unsigned first;
-	unsigned i;
 
 	if (!count)
 		return;
@@ -1487,25 +2193,31 @@ static void audio_queue(const int16_t *samples, unsigned count,
 		audio_metrics.sustained += count;
 	if (generated)
 		audio_sustain_factor = 256u;
-	for (i = 0; i < count; ++i) {
-		int sample = samples[i];
-		unsigned magnitude = sample < 0 ?
-			(unsigned)-sample : (unsigned)sample;
+#if SF2000_AUDIO_WAVEFORM_METRICS
+	{
+		unsigned i;
 
-		if (magnitude > audio_metrics.peak)
-			audio_metrics.peak = magnitude;
-		if (generated) {
-			int delta = sample - audio_last_sample;
+		for (i = 0; i < count; ++i) {
+			int sample = samples[i];
+			unsigned magnitude = sample < 0 ?
+				(unsigned)-sample : (unsigned)sample;
 
-			if (magnitude >= 32000u)
-				audio_metrics.nearclip++;
-			if (delta < 0)
-				delta = -delta;
-			if ((unsigned)delta > 24000u)
-				audio_metrics.clicks++;
-			audio_last_sample = sample;
+			if (magnitude > audio_metrics.peak)
+				audio_metrics.peak = magnitude;
+			if (generated) {
+				int delta = sample - audio_last_sample;
+
+				if (magnitude >= 32000u)
+					audio_metrics.nearclip++;
+				if (delta < 0)
+					delta = -delta;
+				if ((unsigned)delta > 24000u)
+					audio_metrics.clicks++;
+				audio_last_sample = sample;
+			}
 		}
 	}
+#endif
 	if (count > capacity - host.audio_count)
 		audio_flush();
 	while (count > capacity - host.audio_count) {
@@ -1529,6 +2241,7 @@ static void audio_queue(const int16_t *samples, unsigned count,
 	if (generated)
 		audio_tail_push(samples, count);
 	if (count) {
+#if SF2000_AUDIO_WAVEFORM_METRICS
 		int enq_prev = audio_last_output;
 		int gen_prev = audio_last_sample;
 		unsigned i;
@@ -1556,6 +2269,7 @@ static void audio_queue(const int16_t *samples, unsigned count,
 			}
 			enq_prev = sample;
 		}
+#endif
 		audio_last_output = samples[count - 1];
 	}
 	tail = (host.audio_head + host.audio_count) % capacity;
@@ -1623,15 +2337,30 @@ static void audio_enqueue_repeat(unsigned count)
 				AUDIO_SUSTAIN_SAMPLES - host.audio_tail_count) %
 				AUDIO_SUSTAIN_SAMPLES;
 			unsigned old_play = host.audio_tail_play;
+			unsigned filled = 0;
 
-			for (i = 0; i < chunk; ++i)
-				samples[i] = host.audio_tail[(start +
-					host.audio_tail_play + i) % AUDIO_SUSTAIN_SAMPLES];
-			host.audio_tail_play = (host.audio_tail_play + chunk) %
-				host.audio_tail_count;
-			/* Declick every repeat-loop wrap inside this chunk
-			 * (position 0 is the fresh-to-repeat boundary and is
-			 * declicked separately below). */
+			/* Copy contiguous pieces of the circular tail.  The former
+			 * per-sample modulo loop was disproportionately expensive on
+			 * MIPS32 when the core was slow enough to sustain audio. */
+			while (filled < chunk) {
+				unsigned index = (start + host.audio_tail_play) &
+					(AUDIO_SUSTAIN_SAMPLES - 1u);
+				unsigned span = host.audio_tail_count -
+					host.audio_tail_play;
+				unsigned physical = AUDIO_SUSTAIN_SAMPLES - index;
+
+				if (span > physical)
+					span = physical;
+				if (span > chunk - filled)
+					span = chunk - filled;
+				memcpy(samples + filled, host.audio_tail + index,
+					span * sizeof(*samples));
+				filled += span;
+				host.audio_tail_play += span;
+				if (host.audio_tail_play == host.audio_tail_count)
+					host.audio_tail_play = 0;
+			}
+			/* Declick each loop boundary after all target samples exist. */
 			{
 				unsigned wrap = (host.audio_tail_count - old_play) %
 					host.audio_tail_count;
@@ -1744,6 +2473,64 @@ static void audio_sample(int16_t left, int16_t right)
 {
 	int16_t pair[2] = { left, right };
 	(void)audio_batch(pair, 1);
+}
+
+/* Benchmark runs pass SF2000_UNCAPPED=1 on the kernel command line.  The
+ * flag bypasses the pause-menu fast-forward path so the core's own 1.5-sec
+ * START-hold menu is never triggered and the attract sequence runs
+ * unthrottled from the first frame.  Production boots never set it. */
+static int cmdline_has_uncapped(void)
+{
+	char line[512];
+	char *needle;
+	int fd;
+	ssize_t n;
+
+	fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, line, sizeof(line) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	line[n] = '\0';
+	needle = strstr(line, "SF2000_UNCAPPED=1");
+	if (!needle)
+		return 0;
+	return (needle == line || needle[-1] == ' ') &&
+		(needle[17] == '\0' || needle[17] == ' ' || needle[17] == '\n');
+}
+
+/* A fixed guest-frame endpoint makes QEMU cache A/Bs compare the same game
+ * scene instead of whichever point the host reached before a wall-clock
+ * timeout.  The option is diagnostic-only and absent from production boots. */
+static unsigned cmdline_benchmark_frames(void)
+{
+	char line[512];
+	char *needle;
+	char *end;
+	unsigned long value;
+	int fd;
+	ssize_t n;
+
+	fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, line, sizeof(line) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	line[n] = '\0';
+	needle = strstr(line, "SF2000_BENCHMARK_FRAMES=");
+	if (!needle || (needle != line && needle[-1] != ' '))
+		return 0;
+	needle += strlen("SF2000_BENCHMARK_FRAMES=");
+	errno = 0;
+	value = strtoul(needle, &end, 10);
+	if (errno || end == needle || value > UINT_MAX ||
+		(*end != '\0' && *end != ' ' && *end != '\n'))
+		return 0;
+	return (unsigned)value;
 }
 
 static void set_uncapped_mode(unsigned enable)
@@ -2593,39 +3380,83 @@ static int open_platform(void)
 		return -1;
 	if (host.fb_phys && hcge_open_context(&host.ge_storage) == 0) {
 		unsigned i;
+		uint16_t *allocation;
+		uint32_t allocation_phys;
+		uint32_t allocation_handle;
+		size_t allocation_bytes;
+		size_t overlay_offset;
+		size_t overlay_left_bytes;
+		size_t overlay_right_bytes;
 
 		host.ge = &host.ge_storage;
 		host.ge_source_bytes = (size_t)GE_SOURCE_MAX_WIDTH *
 			GE_SOURCE_MAX_HEIGHT * sizeof(uint16_t);
-		for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
-			host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
-				(unsigned int)host.ge_source_bytes,
-				&host.ge_source_phys[i], &host.ge_source_handle[i]);
-			if (!host.ge_source[i]) {
-				char details[160];
-
-				snprintf(details, sizeof(details),
-					"GE source buffer allocation failed index=%u bytes=%lu errno=%d\n",
-					i, (unsigned long)host.ge_source_bytes, errno);
-				log_kmsg(details);
-				break;
+		overlay_left_bytes = GE_FPS_LEFT_WIDTH * GE_FPS_LEFT_HEIGHT *
+			sizeof(uint16_t);
+		overlay_right_bytes = GE_FPS_RIGHT_WIDTH * GE_FPS_RIGHT_HEIGHT *
+			sizeof(uint16_t);
+		overlay_offset = host.ge_source_bytes * GE_SOURCE_BUFFERS;
+		/* Keep the tail on a separate cache-line boundary so cache-cleaning a
+		 * strip never flushes the neighbouring staging surface. */
+		overlay_offset = (overlay_offset + GE_FPS_OVERLAY_ALIGN - 1u) &
+			~(size_t)(GE_FPS_OVERLAY_ALIGN - 1u);
+		allocation_bytes = overlay_offset + overlay_left_bytes +
+			overlay_right_bytes;
+		allocation = hcge_linux_alloc_buffer(host.ge,
+			(unsigned int)allocation_bytes, &allocation_phys,
+			&allocation_handle);
+		if (allocation) {
+			/* The kernel exposes only three managed GE handles globally and
+			 * the screen service owns one.  Suballocate all frontend surfaces
+			 * from one contiguous handle so triple buffering really fits. */
+			for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
+				host.ge_source[i] = allocation +
+					i * (host.ge_source_bytes / sizeof(*allocation));
+				host.ge_source_phys[i] = allocation_phys +
+					i * (uint32_t)host.ge_source_bytes;
 			}
-			host.ge_buffers++;
+			host.ge_fps_overlay[0] = (uint16_t *)((uint8_t *)allocation +
+				overlay_offset);
+			host.ge_fps_overlay[1] = (uint16_t *)((uint8_t *)
+				host.ge_fps_overlay[0] + overlay_left_bytes);
+			host.ge_fps_overlay_phys[0] = allocation_phys +
+				(uint32_t)overlay_offset;
+			host.ge_fps_overlay_phys[1] = host.ge_fps_overlay_phys[0] +
+				(uint32_t)overlay_left_bytes;
+			host.ge_source_handle[0] = allocation_handle;
+			host.ge_buffers = GE_SOURCE_BUFFERS;
+		} else {
+			char details[160];
+
+			snprintf(details, sizeof(details),
+				"GE source slab allocation failed bytes=%lu errno=%d; trying separate buffers\n",
+				(unsigned long)allocation_bytes, errno);
+			log_kmsg(details);
+			for (i = 0; i < GE_SOURCE_BUFFERS; i++) {
+				host.ge_source[i] = hcge_linux_alloc_buffer(host.ge,
+					(unsigned int)host.ge_source_bytes,
+					&host.ge_source_phys[i],
+					&host.ge_source_handle[i]);
+				if (!host.ge_source[i])
+					break;
+				host.ge_buffers++;
+			}
 		}
 		if (!host.ge_buffers) {
 			hcge_close_context(host.ge);
 			host.ge = NULL;
 		} else {
-			char details[192];
+			char details[224];
 
 			memset(host.fb, 0, host.fb_bytes);
 #ifdef __mips__
 			(void)cacheflush(host.fb, (int)host.fb_bytes, BCACHE);
 #endif
 			snprintf(details, sizeof(details),
-				"GE RGB565 stretch presenter ready fb_phys=%08x source0=%08x source1=%08x bytes=%lu buffers=%u fenced_depth=%u max_source=%ux%u\n",
+				"GE RGB565 presenter ready fb_phys=%08x source0=%08x source1=%08x source2=%08x bytes=%lu buffers=%u fenced_depth=%u max_source=%ux%u\n",
 				host.fb_phys, host.ge_source_phys[0],
 				host.ge_buffers > 1 ? host.ge_source_phys[1] : 0,
+				host.ge_buffers > 2 ? host.ge_source_phys[2] : 0,
 				(unsigned long)host.ge_source_bytes, host.ge_buffers,
 				host.ge_buffers, GE_SOURCE_MAX_WIDTH, GE_SOURCE_MAX_HEIGHT);
 			log_kmsg(details);
@@ -2691,6 +3522,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	log_kmsg("entry\n");
+	log_frontend_identity(argv[0]);
 	retained_stage("frontend-entry", 1);
 	core_watchdog_kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	(void)signal(SIGALRM, core_load_timeout_signal);
@@ -2717,6 +3549,10 @@ int main(int argc, char **argv)
 	retro_set_audio_sample_batch(audio_batch);
 	retro_set_input_poll(input_poll);
 	retro_set_input_state(input_state);
+	/* This is a process-open operation, never a per-frame operation.  Keep it
+	 * after the platform mappings exist so every private core mapping is
+	 * covered, but before retro_init can execute hot translated code. */
+	clear_core_open_caches();
 	if (retro_api_version() != RETRO_API_VERSION) {
 		fprintf(stderr, "sf2000-frontend: incompatible libretro API\n");
 		close_platform();
@@ -2792,10 +3628,24 @@ int main(int argc, char **argv)
 	if (sf2000_performance_begin() != 0)
 		log_kmsg("performance journal acknowledgement timeout\n");
 	start_metrics_logging();
+	benchmark_frame_limit = cmdline_benchmark_frames();
+	benchmark_frame_count = 0;
+	if (cmdline_has_uncapped()) {
+		char details[128];
+
+		snprintf(details, sizeof(details),
+			"cmdline uncapped=1 enabling benchmark mode frames=%u\n",
+			benchmark_frame_limit);
+		log_kmsg(details);
+		set_uncapped_mode(1);
+	}
 	signal(SIGINT, stop_signal);
 	signal(SIGTERM, stop_signal);
 	while (!stopping) {
 		struct timespec run_start;
+#if SF2000_FRAME_TAIL_METRICS
+		struct timespec core_end;
+#endif
 		struct timespec now;
 		int profile_sample;
 
@@ -2806,13 +3656,23 @@ int main(int argc, char **argv)
 		 */
 		profile_sample = (++profile_frame_counter %
 			(uncapped_mode ? 300u : 60u)) == 0;
+#if SF2000_FRAME_TAIL_METRICS
+		(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
+#else
 		if (profile_sample)
 			(void)clock_gettime(CLOCK_MONOTONIC, &run_start);
+#endif
 		core_watchdog_stage = 3;
 		(void)alarm(CORE_RUN_TIMEOUT_SECONDS);
 		retro_run();
 		(void)alarm(0);
 		core_watchdog_stage = 0;
+#if SF2000_FRAME_TAIL_METRICS
+		(void)clock_gettime(CLOCK_MONOTONIC, &core_end);
+#endif
+		benchmark_frame_count++;
+		run_frames++;
+		retro_run_total++;
 		if (state_resume_probe_frames) {
 			char details[96];
 			unsigned completed = 3u - state_resume_probe_frames;
@@ -2832,11 +3692,39 @@ int main(int argc, char **argv)
 		}
 		audio_refill_sustain();
 		save_ram_poll();
+		if (benchmark_frame_limit &&
+			benchmark_frame_count >= benchmark_frame_limit) {
+			log_kmsg("benchmark frame limit reached\n");
+			stopping = 1;
+		}
+#if SF2000_FRAME_TAIL_METRICS
+		/* The normal pacer already needs this timestamp. In the tail-metrics
+		 * build it also closes the per-frame sample, including audio/save
+		 * maintenance after retro_run(). Keep this before the uncapped branch
+		 * so deterministic benchmark runs get the same distribution. */
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		frame_tail_hist_add(core_tail_hist, &core_tail_samples,
+			&core_tail_sum_us, timespec_delta_us(&core_end, &run_start));
+		frame_tail_hist_add(frame_tail_hist, &frame_tail_samples,
+			&frame_tail_sum_us, timespec_delta_us(&now, &run_start));
+		frame_tail_max_update(&core_tail_max_us,
+			timespec_delta_us(&core_end, &run_start));
+		frame_tail_max_update(&frame_tail_max_us,
+			timespec_delta_us(&now, &run_start));
+		frame_tail_runs++;
+		if (frame_tail_runs >= 300u)
+			frame_tail_emit();
+		if (uncapped_mode) {
+			sf2000_pacer_invalidate(&pacer);
+			continue;
+		}
+	#else
 		if (uncapped_mode) {
 			sf2000_pacer_invalidate(&pacer);
 			continue;
 		}
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+	#endif
 		if (profile_sample) {
 			uint64_t run_us =
 				(uint64_t)(now.tv_sec - run_start.tv_sec) * 1000000u;
