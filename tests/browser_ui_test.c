@@ -17,6 +17,12 @@ int main(void)
 	strcpy(config.language, "ja");
 	if (sf2000_ui_init(&ui, pixels, 64, 32, 64, &config) != 0)
 		return 1;
+	if (strcmp(sf2000_ui_label(&ui, SF2000_UI_DEBUG), "デバッグ") != 0)
+		return 1;
+	strcpy(ui.config.language, "en");
+	if (strcmp(sf2000_ui_label(&ui, SF2000_UI_DEBUG), "DEBUG") != 0)
+		return 1;
+	strcpy(ui.config.language, "ja");
 	sf2000_ui_clear(&ui, config.background);
 	sf2000_ui_round(&ui, 1, 1, 62, 30, 5, config.panel);
 	if (sf2000_ui_measure(&ui,
