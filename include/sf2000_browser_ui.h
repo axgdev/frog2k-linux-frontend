@@ -32,7 +32,7 @@ enum sf2000_ui_label {
 };
 
 struct sf2000_ui_config {
-	char language[8];
+	char language[16];
 	char font[256];
 	char font_latin[256];
 	unsigned font_px;

@@ -927,23 +927,82 @@ static void draw_home(void)
 	(void)write_frame();
 }
 
+static const char *const available_languages[] = {
+	"en", "pt-br", "es", "pt", "pl", "vi", "ja"
+};
+
+static void cycle_language(int direction)
+{
+	unsigned count = sizeof(available_languages) / sizeof(available_languages[0]);
+	unsigned current_idx = 0;
+	unsigned i;
+
+	for (i = 0; i < count; i++) {
+		if (!strcasecmp(ui.config.language, available_languages[i])) {
+			current_idx = i;
+			break;
+		}
+	}
+	if (direction > 0)
+		current_idx = (current_idx + 1u) % count;
+	else
+		current_idx = (current_idx + count - 1u) % count;
+
+	strncpy(ui.config.language, available_languages[current_idx],
+		sizeof(ui.config.language) - 1u);
+	ui.config.language[sizeof(ui.config.language) - 1u] = 0;
+
+	FILE *f = fopen("/mnt/sd/sf2000.conf", "r+");
+	if (f) {
+		char buf[4096];
+		size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		buf[n] = 0;
+		char *lang_line = strstr(buf, "language=");
+		if (lang_line) {
+			char *nl = strchr(lang_line, '\n');
+			char rest[4096];
+			rest[0] = 0;
+			if (nl) {
+				strncpy(rest, nl, sizeof(rest) - 1);
+				rest[sizeof(rest) - 1] = 0;
+			}
+			rewind(f);
+			*lang_line = 0;
+			fprintf(f, "%slanguage=%s%s", buf, ui.config.language, rest);
+			(void)ftruncate(fileno(f), ftell(f));
+		}
+		fclose(f);
+	}
+}
+
 static void draw_settings(void)
 {
 	char language[48];
+	char footer[64];
+	const char *change_label = "CHANGE";
+
+	if (!strncasecmp(ui.config.language, "pt", 2))
+		change_label = "MUDAR";
+	else if (!strncasecmp(ui.config.language, "es", 2))
+		change_label = "CAMBIAR";
+	else if (!strncasecmp(ui.config.language, "pl", 2))
+		change_label = "ZMIEŃ";
 
 	sf2000_ui_clear(&ui, ui.config.background);
 	sf2000_ui_fill(&ui, 0, 0, (int)width, 42, ui.config.panel);
 	sf2000_ui_text(&ui, 13, 11,
 		sf2000_ui_label(&ui, SF2000_UI_SETTINGS), ui.config.header,
 		(int)width - 26);
-	snprintf(language, sizeof(language), "LANGUAGE: %s", ui.config.language);
+	snprintf(language, sizeof(language), "< LANGUAGE: %s >", ui.config.language);
 	sf2000_ui_round(&ui, 16, 66, (int)width - 32, 38, 7,
 		ui.config.panel);
-	sf2000_ui_text(&ui, 27, 78, language, ui.config.text,
+	sf2000_ui_text(&ui, 27, 78, language, ui.config.accent,
 		(int)width - 54);
 	sf2000_ui_text(&ui, 27, 119, "CONFIG: /sf2000.conf",
 		ui.config.muted, (int)width - 54);
-	sf2000_ui_text(&ui, 14, (int)height - 22, "B  BACK",
+	snprintf(footer, sizeof(footer), "< >  %s    B  %s",
+		change_label, sf2000_ui_label(&ui, SF2000_UI_BACK));
+	sf2000_ui_text(&ui, 14, (int)height - 22, footer,
 		ui.config.muted, (int)width - 28);
 	(void)write_frame();
 }
@@ -1814,7 +1873,12 @@ int main(void)
 			} else if (view == VIEW_SETTINGS) {
 				if (event.code == BTN_SOUTH) {
 					view = VIEW_HOME;
-					selected = first = 0;
+					selected = 1u;
+					first = 0;
+				} else if (event.code == BTN_DPAD_RIGHT) {
+					cycle_language(1);
+				} else if (event.code == BTN_DPAD_LEFT) {
+					cycle_language(-1);
 				}
 			} else if (event.code == BTN_DPAD_UP) {
 				selected = entry_count ?

@@ -14,9 +14,17 @@ int main(void)
 
 	sf2000_ui_config_defaults(&config);
 	config.font[0] = 0;
-	strcpy(config.language, "ja");
+	strcpy(config.language, "pt-br");
 	if (sf2000_ui_init(&ui, pixels, 64, 32, 64, &config) != 0)
 		return 1;
+	if (strcmp(sf2000_ui_label(&ui, SF2000_UI_SAVE_STATE), "SALVAR ESTADO") != 0)
+		return 1;
+	if (strcmp(sf2000_ui_label(&ui, SF2000_UI_STATE_SLOT), "SLOT") != 0)
+		return 1;
+	strcpy(ui.config.language, "pt_br");
+	if (strcmp(sf2000_ui_label(&ui, SF2000_UI_SAVE_STATE), "SALVAR ESTADO") != 0)
+		return 1;
+	strcpy(ui.config.language, "ja");
 	sf2000_ui_clear(&ui, config.background);
 	sf2000_ui_round(&ui, 1, 1, 62, 30, 5, config.panel);
 	if (sf2000_ui_measure(&ui,

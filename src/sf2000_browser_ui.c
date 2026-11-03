@@ -85,6 +85,13 @@ static const struct translation translations[] = {
 		"INÍCIO", "CONFIGURAÇÕES", "REINICIAR", "DESLIGAMENTO SEGURO",
 		"ESCOLHA O EMULADOR", "CONTINUAR", "AVANÇO RÁPIDO", "PULAR QUADROS",
 		"RANHURA", "GUARDAR ESTADO", "CARREGAR ESTADO" } },
+	{ "pt-br", { "BIBLIOTECA", "NENHUM ARQUIVO", "ABRIR", "VOLTAR", "SAIR",
+		"CARREGANDO EMULADOR", "AGUARDE - SISTEMA ATIVO",
+		"MEMÓRIA INSUFICIENTE", "FECHE OUTROS APLICATIVOS",
+		"NÚCLEO NÃO INSTALADO", "COPIE O NÚCLEO PARA O CARTÃO SD",
+		"INÍCIO", "CONFIGURAÇÕES", "REINICIAR", "DESLIGAMENTO SEGURO",
+		"ESCOLHER EMULADOR", "CONTINUAR", "AVANÇO RÁPIDO", "PULAR QUADROS",
+		"SLOT", "SALVAR ESTADO", "CARREGAR ESTADO" } },
 	{ "pl", { "BIBLIOTEKA", "BRAK PLIKÓW", "OTWÓRZ", "WSTECZ", "WYJDŹ",
 		"ŁADOWANIE EMULATORA", "CZEKAJ - SYSTEM DZIAŁA",
 		"ZA MAŁO PAMIĘCI", "ZAMKNIJ INNE APLIKACJE",
@@ -554,10 +561,17 @@ int sf2000_ui_measure(struct sf2000_ui *ui, const char *text)
 const char *sf2000_ui_label(const struct sf2000_ui *ui,
 	enum sf2000_ui_label label)
 {
+	char normalized[sizeof(ui->config.language)];
 	unsigned i;
 
+	for (i = 0; i < sizeof(normalized) - 1u && ui->config.language[i]; i++) {
+		char c = ui->config.language[i];
+		normalized[i] = (c == '_') ? '-' : c;
+	}
+	normalized[i] = 0;
+
 	for (i = 0; i < sizeof(translations) / sizeof(translations[0]); i++)
-		if (!strcasecmp(ui->config.language, translations[i].language))
+		if (!strcasecmp(normalized, translations[i].language))
 			return translations[i].labels[label];
 	return translations[0].labels[label];
 }
