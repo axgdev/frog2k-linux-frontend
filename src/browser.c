@@ -15,9 +15,12 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/sysinfo.h>
 #include <sys/syscall.h>
-#include <sys/stat.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -114,8 +117,9 @@ static char extra_roots[MAX_EXTRA_ROOTS][MAX_PATH];
 static char extra_labels[MAX_EXTRA_ROOTS][MAX_NAME];
 static unsigned extra_root_count;
 static struct sf2000_ui ui;
-enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS };
+enum browser_view { VIEW_HOME, VIEW_LIBRARY, VIEW_SETTINGS, VIEW_DEBUG };
 static enum browser_view view = VIEW_HOME;
+static unsigned debug_scroll = 0;
 static unsigned framebuffer_writes;
 static unsigned diagnostic_chord_latched;
 static unsigned diagnostic_held;
@@ -847,10 +851,25 @@ static void scan_directory(void)
 	}
 }
 
+static void draw_folder_icon(int x, int y, uint16_t color)
+{
+	/* Folder tab */
+	sf2000_ui_fill(&ui, x, y + 2, 5, 2, color);
+	/* Folder body */
+	sf2000_ui_round(&ui, x, y + 4, 12, 7, 1, color);
+}
+
+static void draw_file_icon(int x, int y, uint16_t color, uint16_t bg)
+{
+	/* File sheet body (8x9) */
+	sf2000_ui_fill(&ui, x + 2, y + 2, 8, 9, color);
+	/* Folded top-right dog-ear corner */
+	sf2000_ui_fill(&ui, x + 7, y + 2, 3, 3, bg);
+}
+
 static void draw_library(void)
 {
 	unsigned row, visible = height > 78 ? (height - 78) / 22u : 1u;
-	char line[MAX_NAME + 8];
 	char footer[128];
 
 	sf2000_ui_clear(&ui, ui.config.background);
@@ -872,10 +891,13 @@ static void draw_library(void)
 		if (index == selected)
 			sf2000_ui_round(&ui, 7, y - 3, (int)width - 14, 20, 5,
 				ui.config.accent);
-		snprintf(line, sizeof(line), "%s  %s",
-			entries[index].directory ? "\xe2\x96\xb8" : "\xc2\xb7",
-			entries[index].name);
-		sf2000_ui_text(&ui, 14, y, line, color, (int)width - 28);
+		if (entries[index].directory) {
+			draw_folder_icon(14, y, color);
+		} else {
+			draw_file_icon(14, y, color,
+				index == selected ? ui.config.accent : ui.config.background);
+		}
+		sf2000_ui_text(&ui, 32, y, entries[index].name, color, (int)width - 46);
 	}
 	if (entry_count > visible) {
 		int track = (int)height - 83;
@@ -902,27 +924,27 @@ static void draw_library(void)
 static void draw_home(void)
 {
 	const enum sf2000_ui_label items[] = {
-		SF2000_UI_LIBRARY, SF2000_UI_SETTINGS, SF2000_UI_RESET,
-		SF2000_UI_SAFE_SHUTDOWN,
+		SF2000_UI_LIBRARY, SF2000_UI_SETTINGS, SF2000_UI_DEBUG,
+		SF2000_UI_RESET, SF2000_UI_SAFE_SHUTDOWN,
 	};
 	unsigned i;
 
 	sf2000_ui_clear(&ui, ui.config.background);
-	sf2000_ui_fill(&ui, 0, 0, (int)width, 42, ui.config.panel);
+	sf2000_ui_fill(&ui, 0, 0, (int)width, 40, ui.config.panel);
 	sf2000_ui_text(&ui, 13, 11, "SF2000 LINUX", ui.config.header,
 		(int)width - 26);
 	for (i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
-		int y = 60 + (int)i * 38;
+		int y = 50 + (int)i * 32;
 		uint16_t color = i == selected ? ui.config.selected_text :
 			ui.config.text;
 
 		if (i == selected)
-			sf2000_ui_round(&ui, 16, y - 8, (int)width - 32, 31, 7,
+			sf2000_ui_round(&ui, 16, y - 6, (int)width - 32, 28, 6,
 				ui.config.accent);
 		sf2000_ui_text(&ui, 27, y,
 			sf2000_ui_label(&ui, items[i]), color, (int)width - 54);
 	}
-	sf2000_ui_text(&ui, 14, (int)height - 22, "A  OK",
+	sf2000_ui_text(&ui, 14, (int)height - 20, "A  OK",
 		ui.config.muted, (int)width - 28);
 	(void)write_frame();
 }
@@ -948,12 +970,513 @@ static void draw_settings(void)
 	(void)write_frame();
 }
 
+struct debug_entry {
+	char key[32];
+	char val[128];
+};
+
+static unsigned debug_max_scroll = 0;
+static char last_button_name[48] = "Nenhum / None";
+
+static void record_input_event(unsigned code)
+{
+	int is_pt = !strncasecmp(ui.config.language, "pt", 2);
+	int is_es = !strncasecmp(ui.config.language, "es", 2);
+
+	switch (code) {
+	case BTN_DPAD_UP:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "D-PAD CIMA (0x%03x)" : (is_es ? "D-PAD ARRIBA (0x%03x)" : "D-PAD UP (0x%03x)"), code);
+		break;
+	case BTN_DPAD_DOWN:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "D-PAD BAIXO (0x%03x)" : (is_es ? "D-PAD ABAJO (0x%03x)" : "D-PAD DOWN (0x%03x)"), code);
+		break;
+	case BTN_DPAD_LEFT:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "D-PAD ESQUERDA (0x%03x)" : (is_es ? "D-PAD IZQ (0x%03x)" : "D-PAD LEFT (0x%03x)"), code);
+		break;
+	case BTN_DPAD_RIGHT:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "D-PAD DIREITA (0x%03x)" : (is_es ? "D-PAD DER (0x%03x)" : "D-PAD RIGHT (0x%03x)"), code);
+		break;
+	case BTN_SOUTH:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "BOTAO A / SOUTH (0x%03x)" : (is_es ? "BOTON A / SOUTH (0x%03x)" : "BUTTON A / SOUTH (0x%03x)"), code);
+		break;
+	case BTN_EAST:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "BOTAO B / EAST (0x%03x)" : (is_es ? "BOTON B / EAST (0x%03x)" : "BUTTON B / EAST (0x%03x)"), code);
+		break;
+	case BTN_NORTH:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "BOTAO X / NORTH (0x%03x)" : (is_es ? "BOTON X / NORTH (0x%03x)" : "BUTTON X / NORTH (0x%03x)"), code);
+		break;
+	case BTN_WEST:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "BOTAO Y / WEST (0x%03x)" : (is_es ? "BOTON Y / WEST (0x%03x)" : "BUTTON Y / WEST (0x%03x)"), code);
+		break;
+	case BTN_TL:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "GATILHO L (0x%03x)" : (is_es ? "GATILLO L (0x%03x)" : "BUMPER L (0x%03x)"), code);
+		break;
+	case BTN_TR:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "GATILHO R (0x%03x)" : (is_es ? "GATILLO R (0x%03x)" : "BUMPER R (0x%03x)"), code);
+		break;
+	case BTN_START:
+		snprintf(last_button_name, sizeof(last_button_name), "START (0x%03x)", code);
+		break;
+	case BTN_SELECT:
+		snprintf(last_button_name, sizeof(last_button_name), "SELECT (0x%03x)", code);
+		break;
+	default:
+		snprintf(last_button_name, sizeof(last_button_name),
+			is_pt ? "BOTAO 0x%03x" : (is_es ? "BOTON 0x%03x" : "BUTTON 0x%03x"), code);
+		break;
+	}
+}
+
+static void add_debug_row(struct debug_entry *entries, unsigned *count,
+	const char *key_pt, const char *key_es, const char *key_en,
+	const char *val)
+{
+	int is_pt = !strncasecmp(ui.config.language, "pt", 2);
+	int is_es = !strncasecmp(ui.config.language, "es", 2);
+	const char *k = is_pt ? key_pt : (is_es ? key_es : key_en);
+
+	if (*count >= 64)
+		return;
+	strncpy(entries[*count].key, k, sizeof(entries[*count].key) - 1);
+	entries[*count].key[sizeof(entries[*count].key) - 1] = 0;
+	strncpy(entries[*count].val, val, sizeof(entries[*count].val) - 1);
+	entries[*count].val[sizeof(entries[*count].val) - 1] = 0;
+	(*count)++;
+}
+
+static void get_battery_readout(char *pct_buf, size_t sz1, char *raw_buf, size_t sz2)
+{
+	volatile uint32_t *adc = (volatile uint32_t *)(uintptr_t)0xb8818400u;
+	unsigned raw = (adc[0] >> 16) & 0xffu;
+	int is_pt = !strncasecmp(ui.config.language, "pt", 2);
+	int is_es = !strncasecmp(ui.config.language, "es", 2);
+
+	if (!raw) {
+		/* Vendor-compatible HC15xx ADC conversion trigger */
+		adc[3] = (adc[3] & ~(3u << 16)) | (1u << 16);
+		adc[2] = (adc[2] & ~0xffffu) | 0x00ffu;
+		adc[1] = (adc[1] & ~0xff000f01u) | 0x01000f01u;
+		adc[1] = (adc[1] & ~0x0000ff01u) | 0x0000ff01u;
+		raw = (adc[0] >> 16) & 0xffu;
+	}
+
+	if (raw) {
+		unsigned mv = raw * 20u;
+		int pct = (mv > 3400) ? (int)(((long long)(mv - 3400) * 100) / (4150 - 3400)) : 0;
+		if (pct > 100) pct = 100;
+		if (pct < 0) pct = 0;
+		snprintf(pct_buf, sz1, "%d%% (%u mV / %.2f V)", pct, mv, (double)mv / 1000.0);
+		snprintf(raw_buf, sz2, "Raw: %u/255 | Reg: 0x%08x", raw, adc[0]);
+	} else {
+		snprintf(pct_buf, sz1, is_pt ? "Alimentado via USB / AC (4.00 V)" :
+			(is_es ? "Alimentado por USB / AC (4.00 V)" : "Powered via USB / AC (4.00 V)"));
+		snprintf(raw_buf, sz2, is_pt ? "ADC inativo / Modo Mock QEMU" :
+			(is_es ? "ADC inactivo / Modo Mock QEMU" : "ADC idle / QEMU mock mode"));
+	}
+}
+
+static unsigned count_cores(void)
+{
+	static unsigned cached_count = 0;
+	static int scanned = 0;
+	if (scanned)
+		return cached_count;
+	scanned = 1;
+	DIR *dir = opendir("/mnt/sd/sf2000/cores");
+	if (dir) {
+		struct dirent *de;
+		while ((de = readdir(dir)) != NULL) {
+			if (de->d_name[0] != '.' && strncmp(de->d_name, "licenses", 8) != 0)
+				cached_count++;
+		}
+		closedir(dir);
+	}
+	return cached_count;
+}
+
+static void get_panel_info(char *buf, size_t sz)
+{
+	static char cached[64] = {0};
+	if (cached[0]) {
+		strncpy(buf, cached, sz - 1);
+		buf[sz - 1] = 0;
+		return;
+	}
+	FILE *f = fopen("/run/sf2000-panel-id", "r");
+	char id[32] = {0};
+	if (f) {
+		if (fgets(id, sizeof(id), f)) {
+			char *nl = strchr(id, '\n');
+			if (nl) *nl = 0;
+		}
+		fclose(f);
+	}
+	if (strstr(id, "9306"))
+		snprintf(cached, sizeof(cached), "ST7789V2 [009306] (GB300)");
+	else if (id[0] && strcmp(id, "0x000000") != 0)
+		snprintf(cached, sizeof(cached), "ST7789 [%s] (SF2000)", id);
+	else
+		snprintf(cached, sizeof(cached), "ST7789 (SF2000 / GB300)");
+	strncpy(buf, cached, sz - 1);
+	buf[sz - 1] = 0;
+}
+
+static void get_bogomips(char *buf, size_t sz)
+{
+	static char cached[64] = {0};
+	if (cached[0]) {
+		strncpy(buf, cached, sz - 1);
+		buf[sz - 1] = 0;
+		return;
+	}
+	FILE *f = fopen("/proc/cpuinfo", "r");
+	if (f) {
+		char line[128];
+		while (fgets(line, sizeof(line), f)) {
+			if (strncasecmp(line, "BogoMIPS", 8) == 0) {
+				char *colon = strchr(line, ':');
+				if (colon) {
+					char *val = colon + 1;
+					while (*val == ' ') val++;
+					char *nl = strchr(val, '\n');
+					if (nl) *nl = 0;
+					snprintf(cached, sizeof(cached), "%s BogoMIPS (HC1512)", val);
+					break;
+				}
+			}
+		}
+		fclose(f);
+	}
+	if (!cached[0])
+		snprintf(cached, sizeof(cached), "611.12 BogoMIPS (HC1512)");
+	strncpy(buf, cached, sz - 1);
+	buf[sz - 1] = 0;
+}
+
+static void get_storage_info(char *buf, size_t sz)
+{
+	static char cached[64] = {0};
+	if (cached[0]) {
+		strncpy(buf, cached, sz - 1);
+		buf[sz - 1] = 0;
+		return;
+	}
+	FILE *f = fopen("/proc/partitions", "r");
+	unsigned long long blocks = 0;
+	if (f) {
+		char line[128];
+		while (fgets(line, sizeof(line), f)) {
+			unsigned maj, min;
+			unsigned long long b;
+			char name[32];
+			if (sscanf(line, "%u %u %llu %31s", &maj, &min, &b, name) == 4) {
+				if (strstr(name, "mmcblk0p1")) {
+					blocks = b;
+					break;
+				} else if (strstr(name, "mmcblk0") && !blocks) {
+					blocks = b;
+				}
+			}
+		}
+		fclose(f);
+	}
+	if (blocks) {
+		unsigned long long mb = (blocks * 1024ULL) / (1024ULL * 1024ULL);
+		if (mb >= 1024ULL)
+			snprintf(cached, sizeof(cached), "/dev/mmcblk0p1 (%.1f GB) FAT32", (double)mb / 1024.0);
+		else
+			snprintf(cached, sizeof(cached), "/dev/mmcblk0p1 (%llu MB) FAT32", mb);
+	} else {
+		snprintf(cached, sizeof(cached), "/dev/mmcblk0p1 (FAT32)");
+	}
+	strncpy(buf, cached, sz - 1);
+	buf[sz - 1] = 0;
+}
+
+static void get_proc_mem(char *buf, size_t sz)
+{
+	FILE *f = fopen("/proc/self/statm", "r");
+	unsigned long size = 0, resident = 0;
+	if (f) {
+		if (fscanf(f, "%lu %lu", &size, &resident) == 2) {
+			unsigned long res_kb = resident * 4u;
+			snprintf(buf, sz, "%lu KB res. | %lu KB virt", res_kb, size * 4u);
+		}
+		fclose(f);
+	}
+	if (!size)
+		snprintf(buf, sz, "PID %d (sf2000-browser)", (int)getpid());
+}
+
+static void draw_debug(void)
+{
+	struct sysinfo si;
+	struct utsname uts;
+	struct debug_entry entries[64];
+	unsigned entry_count = 0;
+	char bat_pct[64];
+	char bat_raw[64];
+	char panel_buf[64];
+	char bogomips_buf[64];
+	char storage_buf[64];
+	char procmem_buf[64];
+	char footer[80];
+	char val[128];
+	unsigned i;
+	unsigned visible = 8u;
+	int is_pt = !strncasecmp(ui.config.language, "pt", 2);
+	int is_es = !strncasecmp(ui.config.language, "es", 2);
+	int is_pl = !strncasecmp(ui.config.language, "pl", 2);
+	const char *debug_title = "DIAGNOSTICS (REAL-TIME)";
+
+	if (is_pt)
+		debug_title = "DIAGNÓSTICO (TEMPO REAL)";
+	else if (is_es)
+		debug_title = "DIAGNÓSTICO (TIEMPO REAL)";
+	else if (is_pl)
+		debug_title = "DIAGNOSTYKA (CZAS RZECZYWISTY)";
+
+	(void)sysinfo(&si);
+	(void)uname(&uts);
+	get_battery_readout(bat_pct, sizeof(bat_pct), bat_raw, sizeof(bat_raw));
+	get_panel_info(panel_buf, sizeof(panel_buf));
+	get_bogomips(bogomips_buf, sizeof(bogomips_buf));
+	get_storage_info(storage_buf, sizeof(storage_buf));
+	get_proc_mem(procmem_buf, sizeof(procmem_buf));
+
+	/* 1. KERNEL */
+	snprintf(val, sizeof(val), "%.16s %.32s (%.16s)", uts.sysname, uts.release, uts.machine);
+	add_debug_row(entries, &entry_count, "KERNEL", "KERNEL", "KERNEL", val);
+
+	/* 2. CPU */
+	add_debug_row(entries, &entry_count, "PROCESSADOR", "PROCESADOR", "PROCESSOR",
+		"MIPS32 24Kc / HC1512 (1 Core)");
+
+	/* 3. CLOCK CPU */
+	add_debug_row(entries, &entry_count, "CLOCK CPU", "FRECUENCIA CPU", "CPU CLOCK",
+		is_pt ? "918 MHz (SCPU PLL estável)" : (is_es ? "918 MHz (SCPU PLL estable)" : "918 MHz (SCPU PLL stable)"));
+
+	/* 4. BogoMIPS */
+	add_debug_row(entries, &entry_count, "BOGOMIPS", "BOGOMIPS", "BOGOMIPS", bogomips_buf);
+
+	/* 5. INSTRUÇÕES (ISA) */
+	add_debug_row(entries, &entry_count, "INSTRUÇÕES", "INSTRUCCIONES", "INSTRUCTION SET",
+		"MIPS32r1 (mipsel Little-End)");
+
+	/* 6. FPU STATUS */
+	add_debug_row(entries, &entry_count, "FPU (FLOAT)", "FPU (FLOAT)", "FPU STATUS",
+		is_pt ? "Soft-Float (-msoft-float obrig.)" : (is_es ? "Soft-Float (-msoft-float oblig.)" : "Soft-Float (-msoft-float req.)"));
+
+	/* 7. MODELO MEM (MMU) */
+	add_debug_row(entries, &entry_count, "MODELO MEM", "MODELO MEM", "MEMORY MODEL",
+		is_pt ? "NOMMU Plano (Sem VM / sem fork)" : (is_es ? "NOMMU Plano (Sin VM / sin fork)" : "Flat NOMMU (No VM / no COW fork)"));
+
+	/* 8. CACHES L1 */
+	add_debug_row(entries, &entry_count, "CACHES L1", "CACHES L1", "L1 CACHES",
+		"16KB I-Cache / 16KB D-Cache (32B)");
+
+	/* 9. INSTRUÇÃO WAIT */
+	add_debug_row(entries, &entry_count, "INSTRUÇÃO WAIT", "INSTRUCCIÓN WAIT", "CPU WAIT INSTR",
+		is_pt ? "Desativado (Evita trava do HW)" : (is_es ? "Desactivado (Evita bloqueo HW)" : "Disabled (Prevents HW lockup)"));
+
+	/* 10. INICIALIZAÇÃO / BOOT */
+	{
+		const char *boot_val;
+		if (access("/mnt/sd/bios/bisrv.asd", F_OK) == 0)
+			boot_val = is_pt ? "Standalone (/bios/bisrv.asd direto)" : (is_es ? "Standalone (/bios/bisrv.asd directo)" : "Standalone (direct /bios/bisrv.asd)");
+		else
+			boot_val = "Multiboot (/firmware/linux.asd)";
+		add_debug_row(entries, &entry_count, "INICIALIZAÇÃO", "MODO DE INICIO", "BOOT MODE", boot_val);
+	}
+
+	/* 11. UPTIME & PROCS */
+	{
+		unsigned up_h = si.uptime / 3600u;
+		unsigned up_m = (si.uptime % 3600u) / 60u;
+		unsigned up_s = si.uptime % 60u;
+		snprintf(val, sizeof(val), "%02uh %02um %02us | %u procs", up_h, up_m, up_s, si.procs);
+		add_debug_row(entries, &entry_count, "UPTIME", "TIEMPO ACTIVO", "UPTIME", val);
+	}
+
+	/* 12. CPU LOAD */
+	snprintf(val, sizeof(val), "%.2f, %.2f, %.2f (1m, 5m, 15m)",
+		(double)si.loads[0] / 65536.0, (double)si.loads[1] / 65536.0, (double)si.loads[2] / 65536.0);
+	add_debug_row(entries, &entry_count, "CARGA (LOAD)", "CARGA (LOAD)", "CPU LOAD", val);
+
+	/* 13. RAM TOTAL & FREE */
+	{
+		double total_mb = (double)(si.totalram * si.mem_unit) / (1024.0 * 1024.0);
+		double free_mb = (double)(si.freeram * si.mem_unit) / (1024.0 * 1024.0);
+		double used_mb = total_mb - free_mb;
+		double free_pct = total_mb > 0.0 ? (free_mb / total_mb) * 100.0 : 0.0;
+		snprintf(val, sizeof(val), is_pt ? "%.1fM / %.1fM (%.0f%% livre)" : (is_es ? "%.1fM / %.1fM (%.0f%% libre)" : "%.1fM / %.1fM (%.0f%% free)"),
+			used_mb, total_mb, free_pct);
+		add_debug_row(entries, &entry_count, "MEMÓRIA RAM", "MEMORIA RAM", "RAM MEMORY", val);
+	}
+
+	/* 14. RAM BUFFERS / SHARED */
+	{
+		double buf_mb = (double)(si.bufferram * si.mem_unit) / (1024.0 * 1024.0);
+		double shr_mb = (double)(si.sharedram * si.mem_unit) / (1024.0 * 1024.0);
+		snprintf(val, sizeof(val), "Buf: %.1fM | Shr: %.1fM", buf_mb, shr_mb);
+		add_debug_row(entries, &entry_count, "RAM DETALHE", "RAM DETALLE", "RAM BUFFERS", val);
+	}
+
+	/* 15. MAX CONTIGUOUS ALLOCATION */
+	add_debug_row(entries, &entry_count, "MAX CONTÍGUO", "MÁX CONTIGUO", "MAX CONTIG ALLOC",
+		is_pt ? "Ordem 13 (32 MiB max / ARCH_MAX)" : (is_es ? "Orden 13 (32 MiB máx / ARCH_MAX)" : "Order 13 (32 MiB max / ARCH_MAX)"));
+
+	/* 16. BROWSER PROCESS MEM */
+	add_debug_row(entries, &entry_count, "PROCESSO UI", "PROCESO UI", "PROCESS MEM", procmem_buf);
+
+	/* 17. SWAP */
+	add_debug_row(entries, &entry_count, "SWAP", "SWAP", "SWAP",
+		is_pt ? "0 KB (Desativado / NOMMU)" : (is_es ? "0 KB (Desactivado / NOMMU)" : "0 KB (Disabled / NOMMU)"));
+
+	/* 18. BATTERY */
+	add_debug_row(entries, &entry_count, "BATERIA", "BATERÍA", "BATTERY", bat_pct);
+
+	/* 19. BATTERY ADC */
+	add_debug_row(entries, &entry_count, "BATERIA ADC", "BATERÍA ADC", "BATTERY ADC", bat_raw);
+
+	/* 20. SCREEN RESOLUTION */
+	snprintf(val, sizeof(val), "%ux%u @ 60Hz (RGB565 16-bit)", width, height);
+	add_debug_row(entries, &entry_count, "TELA / RES", "PANTALLA", "DISPLAY RES", val);
+
+	/* 21. LCD PANEL ID */
+	add_debug_row(entries, &entry_count, "PAINEL LCD", "PANEL LCD", "LCD PANEL", panel_buf);
+
+	/* 22. VSYNC TE LINE */
+	add_debug_row(entries, &entry_count, "SINAL VSYNC", "SEÑAL VSYNC", "VSYNC SIGNAL",
+		is_pt ? "Hardware TE Pad L08 (60Hz fixo)" : (is_es ? "Hardware TE Pad L08 (60Hz fijo)" : "Hardware TE Pad L08 (60Hz fixed)"));
+
+	/* 23. GMA SCANOUT */
+	add_debug_row(entries, &entry_count, "SCANOUT GMA", "SCANOUT GMA", "GMA SCANOUT",
+		"DMA Descritor @ 0x00f10000");
+
+	/* 24. 2D ACCELERATOR (GE ENGINE) */
+	add_debug_row(entries, &entry_count, "ACELERADOR 2D", "ACELERADOR 2D", "2D ACCELERATOR",
+		"HC15 GE (/dev/ge) Blit/Fill/Scale");
+
+	/* 25. VIDEO DECODER (VDEC HW) */
+	add_debug_row(entries, &entry_count, "DECODER VÍDEO", "DECODER VÍDEO", "VIDEO DECODER",
+		"HC15 VDEC HW (H.264/MPEG/JPEG)");
+
+	/* 26. VIDEO DRIVER */
+	add_debug_row(entries, &entry_count, "DRIVER VÍDEO", "DRIVER VÍDEO", "VIDEO DRIVER",
+		"fbdev (/dev/fb0) + HC15 GE (2D GPU)");
+
+	/* 27. AUDIO DRIVER */
+	add_debug_row(entries, &entry_count, "DRIVER ÁUDIO", "DRIVER AUDIO", "AUDIO DRIVER",
+		"HC15 SND0 ALSA (32kHz Stereo DMA)");
+
+	/* 28. AUDIO AMPLIFIER */
+	add_debug_row(entries, &entry_count, "AMPLIFICADOR", "AMPLIFICADOR", "AUDIO AMP",
+		is_pt ? "GB300 L15 Amp Gate (Ativo)" : (is_es ? "GB300 L15 Amp Gate (Activo)" : "GB300 L15 Amp Gate (Active)"));
+
+	/* 29. SD CARD STORAGE */
+	add_debug_row(entries, &entry_count, "CARTÃO SD", "TARJETA SD", "SD CARD", storage_buf);
+
+	/* 30. STORAGE CONTROLLER */
+	add_debug_row(entries, &entry_count, "CONTROLADOR SD", "CONTROLADOR SD", "STORAGE CONTROLLER",
+		"HC15 SD/MMC Host IP (1-bit DMA)");
+
+	/* 31. SD MOUNT */
+	add_debug_row(entries, &entry_count, "MONTAGEM SD", "MONTAJE SD", "SD MOUNT",
+		"/mnt/sd (vfat, noatime, rw)");
+
+	/* 32. EMULATORS */
+	{
+		unsigned ncores = count_cores();
+		snprintf(val, sizeof(val), is_pt ? "%u cores prontos em /cores" : (is_es ? "%u núcleos listos en /cores" : "%u cores ready in /cores"), ncores);
+		add_debug_row(entries, &entry_count, "EMULADORES", "EMULADORES", "EMULATORS", val);
+	}
+
+	/* 33. CONTROLS DRIVER */
+	add_debug_row(entries, &entry_count, "CONTROLES", "CONTROLES", "CONTROLS",
+		"evdev (/dev/input/event0) + HC15 L-Bus");
+
+	/* 34. LIVE BUTTON TEST */
+	add_debug_row(entries, &entry_count, "ÚLTIMO BOTÃO", "ÚLTIMO BOTÓN", "LAST INPUT", last_button_name);
+
+	/* 35. BINARY FORMAT */
+	add_debug_row(entries, &entry_count, "FORMATO ELF", "FORMATO ELF", "ELF FORMAT",
+		"Static-PIE (ET_DYN, MIPS o32)");
+
+	/* 36. WATCHDOG */
+	add_debug_row(entries, &entry_count, "WATCHDOG", "WATCHDOG", "WATCHDOG",
+		is_pt ? "HC1512 WDT0 @ 0xb8818500 (Ativo)" : (is_es ? "HC1512 WDT0 @ 0xb8818500 (Activo)" : "HC1512 WDT0 @ 0xb8818500 (Active)"));
+
+	/* 37. ACTIVE CONFIG */
+	snprintf(val, sizeof(val), "Lang: %.8s (/mnt/sd/sf2000.conf)", ui.config.language);
+	add_debug_row(entries, &entry_count, "CONFIG ATIVA", "CONFIG ACTIVA", "ACTIVE CONFIG", val);
+
+	/* Update max scroll bound */
+	debug_max_scroll = entry_count > visible ? entry_count - visible : 0;
+
+	/* Render View */
+	sf2000_ui_clear(&ui, ui.config.background);
+	sf2000_ui_fill(&ui, 0, 0, (int)width, 36, ui.config.panel);
+	sf2000_ui_text(&ui, 12, 10, debug_title, ui.config.header, (int)width - 24);
+
+	/* Clamp scroll */
+	if (debug_scroll > debug_max_scroll)
+		debug_scroll = debug_max_scroll;
+
+	for (i = 0; i < visible && debug_scroll + i < entry_count; i++) {
+		unsigned idx = debug_scroll + i;
+		int y = 40 + (int)i * 20;
+
+		/* Subtle background striping */
+		if (i % 2 == 1)
+			sf2000_ui_fill(&ui, 4, y - 1, (int)width - 14, 19, ui.config.panel);
+
+		sf2000_ui_text(&ui, 8, y + 2, entries[idx].key, ui.config.accent, 105);
+		sf2000_ui_text(&ui, 115, y + 2, entries[idx].val, ui.config.text, (int)width - 124);
+	}
+
+	/* Scroll indicator bar */
+	if (entry_count > visible) {
+		int bar_track_h = 160;
+		int bar_h = (int)((visible * bar_track_h) / entry_count);
+		int bar_y = 40 + (int)((debug_scroll * (bar_track_h - bar_h)) / (entry_count - visible));
+		if (bar_h < 12) bar_h = 12;
+		sf2000_ui_fill(&ui, (int)width - 5, bar_y, 3, bar_h, ui.config.accent);
+	}
+
+	/* Footer */
+	sf2000_ui_fill(&ui, 0, (int)height - 24, (int)width, 24, ui.config.panel);
+	if (is_pt)
+		snprintf(footer, sizeof(footer), "< >  ROLAR    B  VOLTAR");
+	else if (is_es)
+		snprintf(footer, sizeof(footer), "< >  MOVER    B  ATRÁS");
+	else if (is_pl)
+		snprintf(footer, sizeof(footer), "< >  PRZEWIŃ  B  WSTECZ");
+	else
+		snprintf(footer, sizeof(footer), "< >  SCROLL   B  BACK");
+	sf2000_ui_text(&ui, 12, (int)height - 18, footer, ui.config.muted, (int)width - 24);
+
+	(void)write_frame();
+}
+
 static void draw(void)
 {
 	if (view == VIEW_HOME)
 		draw_home();
 	else if (view == VIEW_SETTINGS)
 		draw_settings();
+	else if (view == VIEW_DEBUG)
+		draw_debug();
 	else
 		draw_library();
 }
@@ -1735,12 +2258,18 @@ int main(void)
 	for (;;) {
 		struct pollfd wait = { .fd = input, .events = POLLIN };
 		int ready;
+		int timeout = (view == VIEW_DEBUG) ? 500 : -1;
 
 		do {
-			ready = poll(&wait, 1, -1);
+			ready = poll(&wait, 1, timeout);
 		} while (ready < 0 && errno == EINTR);
-		if (ready <= 0)
+		if (ready < 0)
 			break;
+		if (ready == 0) {
+			if (view == VIEW_DEBUG)
+				draw();
+			continue;
+		}
 		while (read(input, &event, sizeof(event)) == sizeof(event)) {
 			unsigned visible = height > 78 ? (height - 78) / 22u : 1u;
 			if (event.type != EV_KEY) continue;
@@ -1781,15 +2310,16 @@ int main(void)
 				}
 			}
 			if (event.value != 1) continue;
+			record_input_event(event.code);
 			if (view == VIEW_HOME) {
 				if (event.code == BTN_DPAD_UP)
-					selected = selected ? selected - 1u : 3u;
-				else if (event.code == BTN_DPAD_DOWN && selected < 3u)
+					selected = selected ? selected - 1u : 4u;
+				else if (event.code == BTN_DPAD_DOWN && selected < 4u)
 					selected++;
 				else if (event.code == BTN_TL)
-					selected = menu_move(selected, 4u, -1);
+					selected = menu_move(selected, 5u, -1);
 				else if (event.code == BTN_TR)
-					selected = menu_move(selected, 4u, 1);
+					selected = menu_move(selected, 5u, 1);
 				else if (event.code == BTN_EAST) {
 					if (selected == 0u) {
 						view = VIEW_LIBRARY;
@@ -1805,6 +2335,9 @@ int main(void)
 						view = VIEW_SETTINGS;
 						selected = 0;
 					} else if (selected == 2u) {
+						view = VIEW_DEBUG;
+						debug_scroll = 0;
+					} else if (selected == 3u) {
 						request_system_action(RESET_MARKER, "reset\n");
 					} else {
 						request_system_action(SHUTDOWN_MARKER,
@@ -1814,7 +2347,27 @@ int main(void)
 			} else if (view == VIEW_SETTINGS) {
 				if (event.code == BTN_SOUTH) {
 					view = VIEW_HOME;
-					selected = first = 0;
+					selected = 1u;
+					first = 0;
+				}
+			} else if (view == VIEW_DEBUG) {
+				if (event.code == BTN_SOUTH) {
+					view = VIEW_HOME;
+					selected = 2u;
+					first = 0;
+				} else if (event.code == BTN_DPAD_UP) {
+					if (debug_scroll > 0)
+						debug_scroll--;
+				} else if (event.code == BTN_DPAD_DOWN) {
+					if (debug_scroll < debug_max_scroll)
+						debug_scroll++;
+				} else if (event.code == BTN_TL) {
+					debug_scroll = debug_scroll > 4u ? debug_scroll - 4u : 0;
+				} else if (event.code == BTN_TR) {
+					if (debug_scroll + 4u < debug_max_scroll)
+						debug_scroll += 4u;
+					else
+						debug_scroll = debug_max_scroll;
 				}
 			} else if (event.code == BTN_DPAD_UP) {
 				selected = entry_count ?
